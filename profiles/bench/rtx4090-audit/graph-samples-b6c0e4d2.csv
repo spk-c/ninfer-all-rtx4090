@@ -1,0 +1,16 @@
+campaign,ngram_draft_tokens,capacity,rep,returncode,graph_mib,allowance_mib,process_wall_s,engine_start_s,sampled_peak_board_mib,memory_samples,free after startup,KV capacity headroom,planned slack,runtime reservation,kv cache payload
+phase3-revalidated,0,8192,1,0,34.0,288.0,4.56,3.9,16004.0,42,8.46 GiB,0 B,8.21 GiB,927.3 MiB,140.0 MiB
+phase3-revalidated,0,8192,2,0,34.0,288.0,4.53,3.9,16006.0,41,8.46 GiB,0 B,8.21 GiB,927.3 MiB,140.0 MiB
+phase3-revalidated,0,8192,3,0,34.0,288.0,4.54,3.9,16004.0,42,8.46 GiB,0 B,8.21 GiB,927.3 MiB,140.0 MiB
+phase3-revalidated,0,8192,4,0,34.0,288.0,4.52,3.9,16004.0,41,8.46 GiB,0 B,8.21 GiB,927.3 MiB,140.0 MiB
+phase3-revalidated,0,8192,5,0,34.0,288.0,4.52,3.9,16002.0,41,8.46 GiB,0 B,8.21 GiB,927.3 MiB,140.0 MiB
+phase3-revalidated,0,32768,1,0,42.0,384.0,4.54,3.9,16429.0,41,8.04 GiB,0 B,7.71 GiB,1.41 GiB,560.0 MiB
+phase3-revalidated,0,32768,2,0,42.0,384.0,4.51,3.9,16428.0,41,8.04 GiB,0 B,7.71 GiB,1.41 GiB,560.0 MiB
+phase3-revalidated,0,32768,3,0,42.0,384.0,4.55,3.9,16427.0,42,8.04 GiB,0 B,7.71 GiB,1.41 GiB,560.0 MiB
+phase3-revalidated,0,32768,4,0,42.0,384.0,4.52,3.9,16428.0,41,8.04 GiB,0 B,7.71 GiB,1.41 GiB,560.0 MiB
+phase3-revalidated,0,32768,5,0,42.0,384.0,4.55,3.9,16426.0,42,8.04 GiB,0 B,7.71 GiB,1.41 GiB,560.0 MiB
+phase3-revalidated,0,65536,1,0,50.0,480.0,4.56,3.9,16994.0,41,7.49 GiB,0 B,7.07 GiB,2.05 GiB,1.09 GiB
+phase3-revalidated,0,65536,2,0,50.0,480.0,4.55,3.9,16994.0,42,7.49 GiB,0 B,7.07 GiB,2.05 GiB,1.09 GiB
+phase3-revalidated,0,65536,3,0,50.0,480.0,4.62,4.0,16994.0,42,7.49 GiB,0 B,7.07 GiB,2.05 GiB,1.09 GiB
+phase3-revalidated,0,65536,4,0,50.0,480.0,4.58,3.9,16994.0,41,7.49 GiB,0 B,7.07 GiB,2.05 GiB,1.09 GiB
+phase3-revalidated,0,65536,5,0,50.0,480.0,4.57,3.9,16994.0,42,7.49 GiB,0 B,7.07 GiB,2.05 GiB,1.09 GiB

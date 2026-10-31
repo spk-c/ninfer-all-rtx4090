@@ -1,0 +1,302 @@
+[
+  {
+    "campaign": "phase3-neural-k5",
+    "scope": "Runtime API summed wall intervals clipped to NVTX phase, not CPU instruction time",
+    "phases": [
+      {
+        "phase": "prefill",
+        "apis": {
+          "cudaMemcpyAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.126163
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 2628,
+            "summed_wall_ms": 217.22070099999988
+          },
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 422,
+            "summed_wall_ms": 0.10511100000000002
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 518,
+            "summed_wall_ms": 2.4875559999999983
+          },
+          "cudaMemcpy2DAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.159955
+          },
+          "cudaMemsetAsync_v3020": {
+            "calls": 24,
+            "summed_wall_ms": 0.24464600000000009
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 25,
+            "summed_wall_ms": 0.037201
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 197.252049
+          },
+          "cudaEventSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 128.533595
+          },
+          "cuKernelGetName": {
+            "calls": 2628,
+            "summed_wall_ms": 0.3322210000000008
+          },
+          "cuStreamGetGreenCtx": {
+            "calls": 50,
+            "summed_wall_ms": 0.00683
+          },
+          "cuStreamGetCaptureInfo_v2": {
+            "calls": 120,
+            "summed_wall_ms": 0.011919999999999997
+          }
+        }
+      },
+      {
+        "phase": "decode",
+        "apis": {
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 9,
+            "summed_wall_ms": 0.008430000000000002
+          },
+          "cudaEventQuery_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.00702
+          },
+          "cudaMemcpyAsync_v3020": {
+            "calls": 3,
+            "summed_wall_ms": 0.07561100000000001
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.01039
+          },
+          "cudaGraphLaunch_v10000": {
+            "calls": 25,
+            "summed_wall_ms": 23.724410000000002
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 26,
+            "summed_wall_ms": 510.98071799999997
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 25,
+            "summed_wall_ms": 0.5197189999999999
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 5,
+            "summed_wall_ms": 0.03017
+          },
+          "cuKernelGetName": {
+            "calls": 25,
+            "summed_wall_ms": 0.014920000000000001
+          }
+        }
+      }
+    ]
+  },
+  {
+    "campaign": "phase3-compatible-k5",
+    "scope": "Runtime API summed wall intervals clipped to NVTX phase, not CPU instruction time",
+    "phases": [
+      {
+        "phase": "prefill",
+        "apis": {
+          "cudaMemcpyAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.105901
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 2628,
+            "summed_wall_ms": 161.27850099999992
+          },
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 422,
+            "summed_wall_ms": 0.10925000000000006
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 518,
+            "summed_wall_ms": 48.48800400000003
+          },
+          "cudaMemcpy2DAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.165737
+          },
+          "cudaMemsetAsync_v3020": {
+            "calls": 24,
+            "summed_wall_ms": 0.09596
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 25,
+            "summed_wall_ms": 0.032342
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 202.617972
+          },
+          "cudaEventSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 131.914468
+          },
+          "cuKernelGetName": {
+            "calls": 2628,
+            "summed_wall_ms": 0.3287479999999992
+          },
+          "cuStreamGetGreenCtx": {
+            "calls": 50,
+            "summed_wall_ms": 0.0074199999999999995
+          },
+          "cuStreamGetCaptureInfo_v2": {
+            "calls": 120,
+            "summed_wall_ms": 0.012420999999999995
+          }
+        }
+      },
+      {
+        "phase": "decode",
+        "apis": {
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 9,
+            "summed_wall_ms": 0.008790000000000001
+          },
+          "cudaEventQuery_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.00594
+          },
+          "cudaMemcpyAsync_v3020": {
+            "calls": 3,
+            "summed_wall_ms": 0.082903
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.00958
+          },
+          "cudaGraphLaunch_v10000": {
+            "calls": 25,
+            "summed_wall_ms": 23.887674
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 26,
+            "summed_wall_ms": 511.2107669999998
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 25,
+            "summed_wall_ms": 0.479822
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 5,
+            "summed_wall_ms": 0.03283
+          },
+          "cuKernelGetName": {
+            "calls": 25,
+            "summed_wall_ms": 0.01179
+          }
+        }
+      }
+    ]
+  },
+  {
+    "campaign": "phase3-run2",
+    "scope": "Runtime API summed wall intervals clipped to NVTX phase, not CPU instruction time",
+    "phases": [
+      {
+        "phase": "prefill",
+        "apis": {
+          "cudaMemcpyAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.10211199999999998
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 2628,
+            "summed_wall_ms": 174.9675769999999
+          },
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 422,
+            "summed_wall_ms": 0.11108999999999988
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 518,
+            "summed_wall_ms": 32.615146000000024
+          },
+          "cudaMemcpy2DAsync_v3020": {
+            "calls": 10,
+            "summed_wall_ms": 0.20827500000000004
+          },
+          "cudaMemsetAsync_v3020": {
+            "calls": 24,
+            "summed_wall_ms": 0.10109399999999999
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 25,
+            "summed_wall_ms": 0.031620999999999996
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 204.571878
+          },
+          "cudaEventSynchronize_v3020": {
+            "calls": 1,
+            "summed_wall_ms": 132.749217
+          },
+          "cuKernelGetName": {
+            "calls": 2628,
+            "summed_wall_ms": 0.35589999999999977
+          },
+          "cuStreamGetGreenCtx": {
+            "calls": 50,
+            "summed_wall_ms": 0.007670000000000003
+          },
+          "cuStreamGetCaptureInfo_v2": {
+            "calls": 120,
+            "summed_wall_ms": 0.013460000000000003
+          }
+        }
+      },
+      {
+        "phase": "decode",
+        "apis": {
+          "cudaStreamIsCapturing_v10000": {
+            "calls": 9,
+            "summed_wall_ms": 0.009
+          },
+          "cudaEventQuery_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.00811
+          },
+          "cudaMemcpyAsync_v3020": {
+            "calls": 3,
+            "summed_wall_ms": 0.090951
+          },
+          "cudaEventRecord_v3020": {
+            "calls": 2,
+            "summed_wall_ms": 0.01083
+          },
+          "cudaGraphLaunch_v10000": {
+            "calls": 8,
+            "summed_wall_ms": 12.726252999999998
+          },
+          "cudaStreamSynchronize_v3020": {
+            "calls": 9,
+            "summed_wall_ms": 215.72939100000002
+          },
+          "cudaLaunchKernel_v7000": {
+            "calls": 8,
+            "summed_wall_ms": 0.546866
+          },
+          "cudaLaunchKernelExC_v11060": {
+            "calls": 5,
+            "summed_wall_ms": 0.054972
+          },
+          "cuKernelGetName": {
+            "calls": 8,
+            "summed_wall_ms": 0.005979999999999999
+          }
+        }
+      }
+    ]
+  }
+]

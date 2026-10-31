@@ -1,0 +1,320 @@
+[
+  {
+    "family": "IQ4_XS",
+    "phase": "prefill MMQ",
+    "kernel": "void mul_mat_q<23, 128, 0, 30, __nv_bfloat16, 0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+    "block": "(32, 8, 1)",
+    "grid": "(128, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "501.696000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "254",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "256.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "16.665130",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "88.891695",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "51.629114",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "57.856000",
+        "unit": "Kbyte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "1,00",
+        "unit": ""
+      }
+    }
+  },
+  {
+    "family": "IQ4_XS",
+    "phase": "verification Vec T6",
+    "kernel": "void kernel<23, 6, 0, 5120, 0>(VecArgs)",
+    "block": "(128, 1, 1)",
+    "grid": "(384, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "33.056000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "134",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "136.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "23.822224",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "849.676670",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "23.131499",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "3.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "8.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "1,00",
+        "unit": ""
+      }
+    }
+  },
+  {
+    "family": "IQ3_S",
+    "phase": "prefill MMQ",
+    "kernel": "void mul_mat_q<21, 128, 0, 30, __nv_bfloat16, 0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+    "block": "(32, 8, 1)",
+    "grid": "(128, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "574.080000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "254",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "256.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "16.665364",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "66.053289",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "46.345547",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "57.856000",
+        "unit": "Kbyte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "1,00",
+        "unit": ""
+      }
+    }
+  },
+  {
+    "family": "IQ3_S",
+    "phase": "verification Vec T6",
+    "kernel": "void kernel<21, 6, 0, 5120, 0>(VecArgs)",
+    "block": "(128, 1, 1)",
+    "grid": "(512, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "30.464000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "128",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "128.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "31.001313",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "759.042017",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "33.550770",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "4.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "10.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "2.048000",
+        "unit": "Kbyte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "1,00",
+        "unit": ""
+      }
+    }
+  },
+  {
+    "family": "IQ3_XXS",
+    "phase": "prefill MMQ",
+    "kernel": "void mul_mat_q<18, 128, 0, 30, __nv_bfloat16, 0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+    "block": "(32, 8, 1)",
+    "grid": "(480, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "359.264000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "238",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "240.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "16.660092",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "62.997773",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "42.782184",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "1.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "57.856000",
+        "unit": "Kbyte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "3,75",
+        "unit": ""
+      }
+    }
+  },
+  {
+    "family": "IQ3_XXS",
+    "phase": "verification Vec T6",
+    "kernel": "void kernel<18, 6, 0, 5120, 0>(VecArgs)",
+    "block": "(128, 1, 1)",
+    "grid": "(512, 1, 1)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "20.160000",
+        "unit": "us"
+      },
+      "launch__registers_per_thread": {
+        "value": "101",
+        "unit": "register/thread"
+      },
+      "launch__registers_per_thread_allocated": {
+        "value": "104.000000",
+        "unit": "register/thread"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "29.322299",
+        "unit": "%"
+      },
+      "dram__bytes.sum.per_second": {
+        "value": "614.996825",
+        "unit": "Gbyte/s"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "28.844437",
+        "unit": "%"
+      },
+      "launch__occupancy_limit_registers": {
+        "value": "4.000000",
+        "unit": "block"
+      },
+      "launch__occupancy_limit_shared_mem": {
+        "value": "8.000000",
+        "unit": "block"
+      },
+      "launch__shared_mem_per_block_dynamic": {
+        "value": "0",
+        "unit": "byte/block"
+      },
+      "launch__shared_mem_per_block_static": {
+        "value": "1.024000",
+        "unit": "Kbyte/block"
+      },
+      "launch__waves_per_multiprocessor": {
+        "value": "1,00",
+        "unit": ""
+      }
+    }
+  }
+]

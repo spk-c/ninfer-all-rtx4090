@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "scope": "sum of Nsight kernel durations, NOT elapsed GPU wall / CPU time",
+  "numeric_ggml_type_ids": {
+    "IQ4_XS": 23,
+    "IQ3_S": 21,
+    "IQ3_XXS": 18
+  },
+  "total_kernel_time_ns": 1059026042,
+  "kernel_rows": 134,
+  "families": {
+    "IQ4_XS": {
+      "total_time_ns": 193275028,
+      "share_percent": 18.2503,
+      "instances": 2628,
+      "kernel_rows": 9
+    },
+    "IQ3_S": {
+      "total_time_ns": 300728818,
+      "share_percent": 28.3967,
+      "instances": 3883,
+      "kernel_rows": 9
+    },
+    "IQ3_XXS": {
+      "total_time_ns": 173398427,
+      "share_percent": 16.3734,
+      "instances": 1931,
+      "kernel_rows": 9
+    }
+  },
+  "top_kernels": [
+    {
+      "name": "void mul_mat_q<(ggml_type)21, (int)128, (bool)0, (ggml_prec)30, float, (bool)0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 68998669,
+      "instances": 94
+    },
+    {
+      "name": "void mul_mat_q<(ggml_type)18, (int)128, (bool)0, (ggml_prec)30, float, (bool)0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 64563395,
+      "instances": 82
+    },
+    {
+      "name": "void mul_mat_q<(ggml_type)21, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16, (bool)1>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 60911593,
+      "instances": 108
+    },
+    {
+      "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)21, (int)6, (bool)0, (int)5120, (bool)0>(ninfer::ops::gguf::detail::VecArgs)",
+      "total_time_ns": 59853267,
+      "instances": 1925
+    },
+    {
+      "name": "void mul_mat_q<(ggml_type)23, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16, (bool)1>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 43822617,
+      "instances": 78
+    },
+    {
+      "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)23, (int)6, (bool)0, (int)5120, (bool)0>(ninfer::ops::gguf::detail::VecArgs)",
+      "total_time_ns": 39882180,
+      "instances": 1275
+    },
+    {
+      "name": "void mul_mat_q<(ggml_type)23, (int)128, (bool)0, (ggml_prec)30, float, (bool)0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 37967813,
+      "instances": 68
+    },
+    {
+      "name": "void mul_mat_q<(ggml_type)21, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16, (bool)0>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3, float *, int)",
+      "total_time_ns": 36553082,
+      "instances": 92
+    },
+    {
+      "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)21, (int)6, (bool)0, (int)17408, (bool)0>(ninfer::ops::gguf::detail::VecArgs)",
+      "total_time_ns": 35556188,
+      "instances": 550
+    },
+    {
+      "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)23, (int)6, (bool)0, (int)17408, (bool)0>(ninfer::ops::gguf::detail::VecArgs)",
+      "total_time_ns": 33371801,
+      "instances": 525
+    }
+  ],
+  "limitations": "Nsight captures kernels only inside its configured range. Overlap may double-count GPU elapsed wall time. This report cannot establish a decode-speed gain.",
+  "source_file": "C:\\coding\\ninfer-all\\profiles\\bench\\rtx4090-audit\\phase3-revalidated\\decode-dflash2-k5_cuda_gpu_kern_sum.csv"
+}
