@@ -42,6 +42,8 @@ bool select_kv_storage(std::string_view name) {
         kv_storage = ninfer::KvCacheStorage::Nvfp4Group16;
     } else if (name == "k8v4") {
         kv_storage = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
+    } else if (name == "rk4v4") {
+        kv_storage = ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
     } else {
         return false;
     }
@@ -69,6 +71,8 @@ ninfer::EngineOptions hybrid_options(const char* artifact, ninfer::SpeculativeBa
     options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(kv_tokens);
     options.prefill_chunk        = kPrefillChunk;
     options.kv_cache             = kv_storage;
+    const char* fp16 = std::getenv("NINFER_HYBRID_GDN_FP16");
+    options.gdn_state_fp16       = fp16 != nullptr && std::string_view(fp16) == "1";
     options.speculative.backend  = backend;
     options.max_concurrency      = 1;
     options.max_pending_requests = 1;
@@ -76,7 +80,7 @@ ninfer::EngineOptions hybrid_options(const char* artifact, ninfer::SpeculativeBa
         options.speculative.draft_tokens  = 3;
         options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
     } else if (backend == ninfer::SpeculativeBackend::DFlash2) {
-        options.speculative.draft_tokens = 7;
+        options.speculative.draft_tokens = 5;
     }
     options.context_cache.mode                         = ninfer::ContextCacheMode::Hybrid;
     options.context_cache.host_cache_budget_bytes      = host_bytes;
@@ -135,13 +139,14 @@ int exercise_restore_exact(const char* artifact, ninfer::SpeculativeBackend back
     const Observed device = run(hybrid_options(artifact, backend, 16384, 1ULL << 30, 8), false);
     const Observed host   = run(hybrid_options(artifact, backend, 4096, 1ULL << 30, 1), true);
 
-    // The first prompt's chunks end at 512 and 1024; the final chunk [1024, 1500) holds the
-    // flexible prompt-tail tap, realized at its start.
-    constexpr std::uint32_t kExpectedReuse = 2 * kPrefillChunk;
+    // Device profiles may align the requested chunk (e.g. 512 to 640 on SM89/rk4v4).
+    // A flexible tap must restore the same nonempty prefix through either tier, never beyond
+    // the independently constructed 1400-token common prefix. Its private chunk frontier is
+    // not a public constant. Keep the exact output and actual Host-transfer checks below.
     int failures                           = 0;
-    if (device.reused != kExpectedReuse || host.reused != kExpectedReuse) {
+    if (device.reused == 0 || device.reused > 1400 || host.reused != device.reused) {
         std::cerr << "restore-exact: reused device=" << device.reused << " host=" << host.reused
-                  << ", expected the prompt-tail snapshot at " << kExpectedReuse << '\n';
+                  << ", expected the same nonempty prefix within the 1400 shared tokens\n";
         ++failures;
     }
     if (device.stats.hybrid_host_image_restores != 0 ||
@@ -167,7 +172,7 @@ int exercise_restore_exact(const char* artifact, ninfer::SpeculativeBackend back
 // restarted. A file written for a different build identity is ignored, a Host tier one slab
 // smaller than the file restores some but not all of its snapshots, and an abandoned save keeps
 // the previous file and leaves no temporary one.
-int exercise_persist(const char* artifact) {
+int exercise_persist(const char* artifact, ninfer::SpeculativeBackend backend) {
     const std::filesystem::path file =
         std::filesystem::temp_directory_path() / "ninfer-hybrid-persist-real-test.bin";
     std::error_code ignored;
@@ -178,7 +183,7 @@ int exercise_persist(const char* artifact) {
     second.insert(second.end(), suffix.begin(), suffix.end());
     const auto options = [&](const char* identity) {
         ninfer::EngineOptions result =
-            hybrid_options(artifact, ninfer::SpeculativeBackend::None, 16384, 1ULL << 30, 8);
+              hybrid_options(artifact, backend, 16384, 1ULL << 30, 8);
         if (identity != nullptr) {
             result.context_cache.hybrid.persistent_file     = file;
             result.context_cache.hybrid.persistent_identity = identity;
@@ -187,10 +192,13 @@ int exercise_persist(const char* artifact) {
     };
 
     std::vector<ninfer::TokenId> reference;
+    std::uint32_t reference_reuse = 0;
     {
         ninfer::Engine engine(options(nullptr));
         (void)engine.generate(engine.prepare_tokens(first), greedy(8));
-        reference = engine.generate(engine.prepare_tokens(second), greedy(24)).generated_token_ids;
+        const auto result = engine.generate(engine.prepare_tokens(second), greedy(24));
+        reference = result.generated_token_ids;
+        reference_reuse = result.reused_prompt_tokens;
     }
     int failures = 0;
     {
@@ -278,7 +286,8 @@ int exercise_persist(const char* artifact) {
         }
         required_host_bytes = cache.required_host_bytes;
         saved_snapshots     = cache.saved_snapshots;
-        if (resumed.reused_prompt_tokens != 2 * kPrefillChunk ||
+        if (reference_reuse == 0 || reference_reuse > 1400 ||
+            resumed.reused_prompt_tokens != reference_reuse ||
             stats.hybrid_host_block_restores == 0 || stats.hybrid_host_image_restores == 0) {
             std::cerr << "persist: the restarted Engine reused " << resumed.reused_prompt_tokens
                       << " tokens (blocks restored " << stats.hybrid_host_block_restores << ")\n";
@@ -310,7 +319,7 @@ int exercise_persist(const char* artifact) {
         // One slab short of the file: whole snapshots are dropped, never all of them, and only the
         // chosen entries are read.
         ninfer::EngineOptions small = observe(hybrid_options(
-            artifact, ninfer::SpeculativeBackend::None, 16384, required_host_bytes - 1, 8));
+            artifact, backend, 16384, required_host_bytes - 1, 8));
         small.context_cache.hybrid.persistent_file     = partial;
         small.context_cache.hybrid.persistent_identity = "persist-test";
         const std::uint64_t file_bytes                 = std::filesystem::file_size(partial);
@@ -904,7 +913,7 @@ int main() {
     }
     const char* selected            = std::getenv("NINFER_HYBRID_REAL_SCENARIO");
     const std::string_view scenario = selected != nullptr && *selected != '\0' ? selected : "all";
-    constexpr std::array<std::string_view, 15> kScenarios{"all",
+    constexpr std::array<std::string_view, 16> kScenarios{"all",
                                                           "restore-exact",
                                                           "restore-exact-mtp",
                                                           "restore-exact-dflash2",
@@ -916,6 +925,7 @@ int main() {
                                                           "turns-device-only",
                                                           "vision",
                                                           "persist",
+                                                          "persist-dflash2",
                                                           "turns-protocol",
                                                           "coalesce",
                                                           "interleaved"};
@@ -950,7 +960,12 @@ int main() {
         if (all || scenario == "turns") { failures += exercise_turns(artifact, 1ULL << 30); }
         if (all || scenario == "turns-device-only") { failures += exercise_turns(artifact, 0); }
         if (all || scenario == "vision") { failures += exercise_vision(artifact); }
-        if (all || scenario == "persist") { failures += exercise_persist(artifact); }
+        if (all || scenario == "persist") {
+            failures += exercise_persist(artifact, ninfer::SpeculativeBackend::None);
+        }
+        if (all || scenario == "persist-dflash2") {
+            failures += exercise_persist(artifact, ninfer::SpeculativeBackend::DFlash2);
+        }
         if (all || scenario == "interleaved") { failures += exercise_interleaved(artifact); }
         if (all || scenario == "coalesce") {
             failures += exercise_coalesce(artifact, 6 * kPrefillChunk, true);
