@@ -28,7 +28,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <random>
@@ -78,7 +80,8 @@ std::vector<float> host_decode(QType qtype, const std::vector<std::uint8_t>& byt
     std::vector<float> out;
     const auto block = gguf_block_shape(qtype);
     if (qtype != QType::GGUF_Q4_0 && qtype != QType::GGUF_Q5_0 && qtype != QType::GGUF_Q2_0 &&
-        qtype != QType::GGUF_MXFP4 && qtype != QType::GGUF_IQ3_S) {
+        qtype != QType::GGUF_MXFP4 && qtype != QType::GGUF_IQ3_S &&
+        qtype != QType::GGUF_IQ4_XS) {
         return out;
     }
     const std::size_t blocks = bytes.size() / block.bytes;
@@ -98,6 +101,20 @@ std::vector<float> host_decode(QType qtype, const std::vector<std::uint8_t>& byt
         }
         const float d         = half_value(b);
         for (int j = 0; j < block.elements; ++j) {
+            if (qtype == QType::GGUF_IQ4_XS) {
+                // Published IQ4 nonlinear table; scalar stored-block interpretation,
+                // independent of the vector decoder and CUDA dequantization routine.
+                constexpr int values[] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                         1, 13, 25, 38, 53, 69, 89, 113};
+                const int sub = j / 32;
+                const unsigned high = unsigned(b[2]) | (unsigned(b[3]) << 8);
+                const int scale = ((b[4 + sub / 2] >> (4 * (sub % 2))) & 15) |
+                                  (((high >> (2 * sub)) & 3) << 4);
+                const int packed = b[8 + 16 * sub + j % 16];
+                const int code = (packed >> (j % 32 < 16 ? 0 : 4)) & 15;
+                out.push_back(d * float(scale - 32) * float(values[code]));
+                continue;
+            }
             if (qtype == QType::GGUF_IQ3_S) {
                 const int sub = j / 32, group = (j % 32) / 8, element = j % 8;
                 const int code_index = 2 * group + element / 4;
@@ -213,7 +230,8 @@ Error compare(const std::vector<float>& got, const std::vector<double>& want) {
 // and 704, which are no whole number of the matrix kernel's 512-value activation steps (2112 and
 // 704 not even of its 256-value weight steps).
 int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k,
-             std::span<const std::int32_t> widths, std::int32_t kRows = 256) {
+             std::span<const std::int32_t> widths, std::int32_t kRows = 256,
+             std::ostream* result_dump = nullptr) {
     const std::int32_t kK        = k;
     const std::int32_t max_t     = *std::max_element(widths.begin(), widths.end());
     std::mt19937 rng(seed);
@@ -298,6 +316,11 @@ int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k,
     // carries two such products, so it gets twice the budget.
     const auto run_check = [&](const std::string& label, const std::vector<float>& got,
                                const std::vector<double>& want) {
+        if (result_dump != nullptr) {
+            result_dump->write(reinterpret_cast<const char*>(got.data()),
+                               static_cast<std::streamsize>(got.size() * sizeof(float)));
+            if (!*result_dump) { throw std::runtime_error("verification result write failed"); }
+        }
         const Error e     = compare(got, want);
         const double gain = label.starts_with("swiglu") ? 2.0 : 1.0;
         const bool ok     = e.relative_rms < 2e-2 * gain && e.relative_max < 8e-2 * gain;
@@ -526,11 +549,24 @@ int main(int argc, char** argv) {
     try {
         int failures      = 0;
         std::uint32_t seed = 9001;
-        const bool verification_only = argc == 2 &&
-            std::string_view(argv[1]) == "--iq3s-verification-only";
+        const bool iq4_verification = argc == 2 &&
+            std::string_view(argv[1]) == "--iq4xs-verification-only";
+        const bool verification_only = iq4_verification || (argc == 2 &&
+            std::string_view(argv[1]) == "--iq3s-verification-only");
+        std::ofstream verification_dump;
+        if (iq4_verification) {
+            if (const char* path = std::getenv("NINFER_IQ4XS_VERIFICATION_OUTPUT")) {
+                if (std::ifstream(path).good()) {
+                    throw std::runtime_error("verification output already exists");
+                }
+                verification_dump.open(path, std::ios::binary);
+                if (!verification_dump) { throw std::runtime_error("cannot open verification output"); }
+            }
+        }
         const std::int32_t widths[] = {1, 2, 3, 4, 5, 6, 8, 9, 17, 40, 70, 130};
         for (const auto& c : cases()) {
-            if (verification_only && c.qtype != QType::GGUF_IQ3_S) { continue; }
+            if (verification_only && c.qtype != (iq4_verification ? QType::GGUF_IQ4_XS
+                                                                 : QType::GGUF_IQ3_S)) { continue; }
             const bool cooperative = c.qtype == QType::GGUF_Q4_K || c.qtype == QType::GGUF_Q6_K;
             for (const std::string_view schedule :
                  cooperative ? std::vector<std::string_view>{"scalar", "cooperative"}
@@ -545,6 +581,16 @@ int main(int argc, char** argv) {
                     const int f = run_type(c, seed++, k, widths);
                     std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
                               << (schedule.empty() ? "" : " ") << schedule << '\n';
+                    failures += f;
+                }
+            }
+            if (c.qtype == QType::GGUF_IQ4_XS) {
+                const std::int32_t neighbors[] = {5, 6, 7};
+                for (const std::int32_t rows : {255, 256, 257, 5120}) {
+                    const int f = run_type(c, seed++, 5120, neighbors, rows,
+                                          verification_dump.is_open() ? &verification_dump : nullptr);
+                    std::cout << (f == 0 ? "OK   " : "FAIL ")
+                              << "gguf iq4_xs N=" << rows << " K=5120 T=5,6,7\n";
                     failures += f;
                 }
             }

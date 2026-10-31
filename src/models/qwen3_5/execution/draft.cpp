@@ -1,3 +1,4 @@
+#include "../../../../tools/bench/qwen_cache_trace.h"
 #include "models/qwen3_5/program/structured_round.h"
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/execution/linear.h"
@@ -754,6 +755,8 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
                          DecodeGraphExecutable* executable) {
     auto body = dflash_decode_batch_body(state, batch_size, k, envelopes, target_envelope);
     run_prepared(state, executable, body);
+    auto tf = state.frame.narrowed(k);
+    diagnostic::target_trace("verify", {{"logits",tf.target_logits.slice(2,0,batch_size)}, {"ids",tf.verify_ids.slice(1,0,batch_size)}, {"positions",tf.verify_positions.slice(1,0,batch_size)}, {"valid",tf.target_valid_columns.slice(0,0,batch_size)}, {"targets",tf.target_argmax.slice(1,0,batch_size)}, {"drafts",tf.draft_tokens.slice(1,0,batch_size)}, {"licensed",tf.licensed_tokens.slice(1,0,batch_size)}, {"counts",tf.licensed_counts.slice(0,0,batch_size)}, {"accepted",tf.accepted_drafts.slice(0,0,batch_size)}},state.execution.device.stream);
 }
 
 } // namespace ninfer::models::qwen3_5::execution
