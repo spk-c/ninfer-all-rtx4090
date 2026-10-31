@@ -10,7 +10,7 @@ def test_graph_diagnostic_reads_stdout_and_keeps_dflash_graph_count_unknown(monk
 
     def run(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0, stdout="CUDA Graph memory 11.50 MiB / 24 MiB\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="CUDA Graph used 11.50 MiB\nCUDA Graph allowance 24 MiB\n", stderr="")
 
     monkeypatch.setattr(sweep.subprocess, "run", run)
     measured = sweep.measure(tmp_path / "ninfer.exe", tmp_path / "model.ninfer",
@@ -19,14 +19,15 @@ def test_graph_diagnostic_reads_stdout_and_keeps_dflash_graph_count_unknown(monk
     assert measured["observed_bytes"] == int(11.5 * sweep.MIB)
     assert measured["allowance_bytes"] == 24 * sweep.MIB
     assert measured["predicted_graphs"] is None
-    assert commands[0][-5:] == ["--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft"]
+    assert commands[0][-7:] == ["--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
+                                "--ngram-draft-tokens", "0"]
 
 
 def test_exact_failure_bytes_take_precedence_over_rounded_graph_line(monkeypatch, tmp_path):
     def run(*args, **kwargs):
         return SimpleNamespace(
             returncode=1,
-            stderr=("CUDA Graph memory 12.00 MiB / 2.00 MiB\n"
+            stderr=("CUDA Graph used 12.00 MiB\nCUDA Graph allowance 2.00 MiB\n"
                     "CUDA Graph preparation consumed 12582913 bytes, "
                     "exceeding the planned allowance of 2097152 bytes"),
             stdout="",
@@ -51,7 +52,7 @@ def test_cli_emits_reproducible_sweep_and_handles_speculative_counts(monkeypatch
     def run(cmd, **kwargs):
         calls.append(cmd)
         return SimpleNamespace(returncode=0, stdout="",
-                               stderr="CUDA Graph memory 0 B / 64 MiB")
+                               stderr="CUDA Graph used 0 B\nCUDA Graph allowance 64 MiB")
 
     monkeypatch.setattr(sweep.subprocess, "run", run)
     code = sweep.main([
@@ -91,7 +92,7 @@ def test_failed_startup_with_memory_diagnostic_still_fails(monkeypatch, tmp_path
     model.write_bytes(b"x")
     monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **kw:
                         SimpleNamespace(returncode=1, stdout="",
-                                        stderr="CUDA Graph memory 12 MiB / 64 MiB\nlater failure"))
+                                        stderr="CUDA Graph used 12 MiB\nCUDA Graph allowance 64 MiB\nlater failure"))
     assert sweep.main([
         "--cli", str(exe), "--model", str(model), "--capacities", "8192",
         "--repeats", "2", "--output", str(tmp_path / "out"),
@@ -109,7 +110,7 @@ def test_gdn_fp16_is_used_and_recorded(monkeypatch, tmp_path):
 
     def run(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0, stdout="CUDA Graph memory 1 MiB / 64 MiB", stderr="")
+        return SimpleNamespace(returncode=0, stdout="CUDA Graph used 1 MiB\nCUDA Graph allowance 64 MiB", stderr="")
 
     monkeypatch.setattr(sweep.subprocess, "run", run)
     assert sweep.main([
@@ -119,3 +120,14 @@ def test_gdn_fp16_is_used_and_recorded(monkeypatch, tmp_path):
     assert all("--gdn-state-fp16" in cmd for cmd in commands)
     report = json.loads((tmp_path / "out" / "graph-allowance-none-int8.json").read_text())
     assert report["config"]["gdn_state_fp16"] is True
+
+
+def test_unmeasured_graph_usage_is_not_substituted_with_allowance(monkeypatch, tmp_path):
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(returncode=0, stdout="", stderr=(
+                            "summary     CUDA Graph allowance      64 MiB\n"
+                            "summary     CUDA Graph used           unmeasured (no free device memory left)\n")))
+    result = sweep.measure(tmp_path / "ninfer.exe", tmp_path / "qwen.ninfer",
+                           8192, "dflash2", 5, "rk4v4", 1024, True)
+    assert result["observed_bytes"] is None
+    assert "unmeasured" in result["unparsed_output"]

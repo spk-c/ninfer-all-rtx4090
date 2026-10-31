@@ -13,10 +13,13 @@ import re
 from pathlib import Path
 
 FAMILIES = ("IQ4_XS", "IQ3_S", "IQ3_XXS")
+# MSVC/CUDA demangles ggml template arguments as numeric enum casts. These are
+# stored-format IDs from third_party/ggml-quants/include/ggml.h, not tile sizes.
+GGML_TYPE_IDS = {"IQ4_XS": 23, "IQ3_S": 21, "IQ3_XXS": 18}
 PATTERNS = {
-    "IQ4_XS": re.compile(r"iq4[_-]?xs", re.I),
-    "IQ3_S": re.compile(r"iq3[_-]?s(?![a-z])", re.I),
-    "IQ3_XXS": re.compile(r"iq3[_-]?xxs", re.I),
+    family: re.compile(symbol + rf"|\(\s*(?:enum\s+)?ggml_type\s*\)\s*{GGML_TYPE_IDS[family]}\b", re.I)
+    for family, symbol in {"IQ4_XS": r"iq4[_-]?xs", "IQ3_S": r"iq3[_-]?s(?![a-z])",
+                           "IQ3_XXS": r"iq3[_-]?xxs"}.items()
 }
 
 
@@ -56,6 +59,7 @@ def analyse(rows: list[dict[str, str]], *, require_iq4: bool = False) -> dict:
     return {
         "schema_version": 1,
         "scope": "sum of Nsight kernel durations, NOT elapsed GPU wall / CPU time",
+        "numeric_ggml_type_ids": GGML_TYPE_IDS,
         "total_kernel_time_ns": total_ns,
         "kernel_rows": len(timings),
         "families": groups,

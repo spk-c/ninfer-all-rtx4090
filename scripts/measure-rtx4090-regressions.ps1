@@ -12,6 +12,7 @@ param(
     [string]$Out = '.\profiles\bench\rtx4090-audit',
     [ValidateRange(2,25)][int]$GraphRepeats = 5,
     [ValidateRange(1,15)][int]$DraftTokens = 5,
+    [ValidateRange(0,63)][int]$NgramDraftTokens = 0,
     [switch]$PlanOnly
 )
 Set-StrictMode -Version Latest
@@ -43,11 +44,14 @@ try {
     $graph = @('-m','tools.bench.run_graph_allowance_sweep',
         '--cli',$Cli,'--model',$Model,'--spec','dflash2',
         '--draft-tokens',[string]$DraftTokens,'--kv-dtype','rk4v4',
+        '--ngram-draft-tokens',[string]$NgramDraftTokens,
         '--prefill-chunk','1024','--gdn-state-fp16','--capacities','8192','32768','65536',
         '--repeats',[string]$GraphRepeats,'--output',$graphOut)
     $benchArgs = @('--weights',$Model,'--kv-dtype','rk4v4',
-        '--max-ctx','8192','--spec','dflash2','--draft-tokens',[string]$DraftTokens,
-        '--lm-head-draft','--gdn-state-fp16','-n','128','-r','1','--warmup','1','--profile-measured')
+        '--max-ctx','8192','--prefill-chunk','1024','--spec','dflash2','--draft-tokens',[string]$DraftTokens,
+        '--ngram-draft-tokens',[string]$NgramDraftTokens,
+        '--lm-head-draft','--gdn-state-fp16','-pg','2048,128','-r','1','--warmup','1',
+        '-o','json','--output-file',($stem + '.json'),'--profile-measured')
     $candidateGraph = @($graph)
     $candidateGraph[[array]::IndexOf($candidateGraph,'--cli') + 1] = $CandidateCli
     $candidateGraph[[array]::IndexOf($candidateGraph,'--output') + 1] = $candidateGraphOut
@@ -86,26 +90,49 @@ try {
     $meta = [ordered]@{
         timestamp_utc = [DateTime]::UtcNow.ToString('o')
         source_revision = (& git rev-parse HEAD)
+        source_changes = @(& git status --porcelain --untracked-files=no)
         gpu_names = @($GpuNames)
+        gpu_state = @(& nvidia-smi --query-gpu=name,driver_version,pstate,memory.used,utilization.gpu,power.draw,temperature.gpu,clocks.gr,clocks.mem --format=csv)
+        nsys_version = (& $Nsys --version)
+        python_version = (& $Python --version)
+        telemetry_utc_offset = [DateTimeOffset]::Now.Offset.ToString()
         model_path = $Model
         model_size_bytes = $artifact.Length
         model_modified_utc = $artifact.LastWriteTimeUtc.ToString('o')
         cli_path = $Cli
+        cli_version = (& $Cli --version)
         candidate_cli_path = $CandidateCli
         cli_sha256 = (Get-FileHash -LiteralPath $Cli -Algorithm SHA256).Hash
         bench_path = $Bench
         bench_sha256 = (Get-FileHash -LiteralPath $Bench -Algorithm SHA256).Hash
         graph_repeats = $GraphRepeats
         kv_dtype = 'rk4v4'
+        prefill_chunk = 1024
         spec = 'dflash2'
         draft_tokens = $DraftTokens
+        ngram_draft_tokens = $NgramDraftTokens
         gdn_state_fp16 = $true
         scope = 'Device-wide graph allocation and Nsight CUDA/host activity; no causal speedup claim'
     }
     $meta | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Out 'manifest.json') -Encoding utf8
     Write-Host 'Phase 3a: recording repeated graph-memory allowances'
-    & $Python @graph
-    if ($LASTEXITCODE -ne 0) { throw 'Graph allowance sweep incomplete; inspect graph-memory output' }
+    $graphTelemetryArgs = @{
+        FilePath = (Get-Command nvidia-smi).Source
+        ArgumentList = @('--query-gpu=timestamp,index,memory.used,utilization.gpu,power.draw,temperature.gpu,clocks.gr,clocks.mem', '--format=csv', '--loop-ms=100')
+        RedirectStandardOutput = (Join-Path $Out 'graph-telemetry.csv')
+        RedirectStandardError = (Join-Path $Out 'graph-telemetry-errors.log')
+        PassThru = $true
+    }
+    if ($env:OS -eq 'Windows_NT') { $graphTelemetryArgs.WindowStyle = 'Hidden' }
+    $graphTelemetryProcess = Start-Process @graphTelemetryArgs
+    try {
+        & $Python @graph
+        $graphExitCode = $LASTEXITCODE
+    } finally {
+        if (-not $graphTelemetryProcess.HasExited) { Stop-Process -Id $graphTelemetryProcess.Id }
+        $graphTelemetryProcess.WaitForExit()
+    }
+    if ($graphExitCode -ne 0) { throw 'Graph allowance sweep incomplete; inspect graph-memory output' }
     if ($CandidateCli) {
         Write-Host 'Candidate graph-memory sweep (separate samples; GPU drift may confound comparisons)'
         & $Python @candidateGraph
@@ -114,8 +141,23 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot compare graph-memory sweeps' }
     }
     Write-Host 'Phase 3b: capturing CUDA graph nodes, NVTX and CUDA API wall intervals'
-    & $Nsys @profile *> (Join-Path $Out 'nsys-profile.log')
-    if ($LASTEXITCODE -ne 0) { throw 'Nsight profile failed; inspect nsys-profile.log' }
+    $telemetryArgs = @{
+        FilePath = (Get-Command nvidia-smi).Source
+        ArgumentList = @('--query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,power.draw,temperature.gpu,clocks.gr,clocks.mem,clocks_event_reasons.active', '--format=csv', '--loop-ms=100')
+        RedirectStandardOutput = (Join-Path $Out 'gpu-telemetry.csv')
+        RedirectStandardError = (Join-Path $Out 'gpu-telemetry-errors.log')
+        PassThru = $true
+    }
+    if ($env:OS -eq 'Windows_NT') { $telemetryArgs.WindowStyle = 'Hidden' }
+    $telemetryProcess = Start-Process @telemetryArgs
+    try {
+        & $Nsys @profile *> (Join-Path $Out 'nsys-profile.log')
+        $profileExitCode = $LASTEXITCODE
+    } finally {
+        if (-not $telemetryProcess.HasExited) { Stop-Process -Id $telemetryProcess.Id }
+        $telemetryProcess.WaitForExit()
+    }
+    if ($profileExitCode -ne 0) { throw 'Nsight profile failed; inspect nsys-profile.log' }
     & $Nsys @stats *> (Join-Path $Out 'nsys-stats.log')
     if ($LASTEXITCODE -ne 0) { throw 'Nsight stats export failed; inspect nsys-stats.log' }
     if (-not (Test-Path $kernCsv) -or -not (Test-Path $apiCsv)) {

@@ -26,6 +26,17 @@ class KernelShareTests(unittest.TestCase):
             analyse([{"Name": "other", "Total Time (ns)": "10", "Instances": "1"}],
                     require_iq4=True)
 
+    def test_windows_numeric_enum_names_are_formats_not_tile_dimensions(self):
+        result = analyse([
+            {"Name": "void mul_mat_q<(ggml_type)23, (int)128, float>()", "Total Time (ns)": "23"},
+            {"Name": "void mul_mat_q<(ggml_type)21, (int)16, float>()", "Total Time (ns)": "21"},
+            {"Name": "void mul_mat_q<(ggml_type)18, (int)128, float>()", "Total Time (ns)": "18"},
+            {"Name": "other<(ggml_type)2, (int)23, (ggml_prec)21>()", "Total Time (ns)": "38"},
+        ], require_iq4=True)
+        for family, percent in (("IQ4_XS", 23), ("IQ3_S", 21), ("IQ3_XXS", 18)):
+            self.assertEqual(result["families"][family]["share_percent"], percent)
+            self.assertEqual(result["families"][family]["kernel_rows"], 1)
+
     def test_refuse_empty_or_invalid_timing(self):
         with self.assertRaisesRegex(ValueError, "no data"):
             analyse([])
