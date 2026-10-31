@@ -32,6 +32,12 @@ added up to tens of GB. Each test keeps its name as a program in the bundle and 
 own process under CTest. Run one by hand with `build/tests/ninfer_tests <name> [args...]`;
 `ninfer_tests --list` prints the names. `ninfer_jinja_test` and
 `ninfer_artifact_materialization_test` stay standalone because Python tests invoke them by path.
+`ninfer_artifact_selected_upload_stress_test` runs that standalone binary with `--selected-stress`:
+256 rounds of selected uploads with alignment padding and panel layouts, checked byte-for-byte
+against Host selection and an independent CPU permutation. It guards the default-stream memset
+versus nonblocking-upload race. The ordinary materialization case also covers a transcode-only
+rank's zero tail. Build `ninfer_artifact_materialization_test` explicitly for focused changes;
+building the bundle alone does not rebuild this standalone test.
 A test's helpers and entry function must be internal (anonymous namespace) so that programs do not
 collide at link time. The mechanism is `cmake/NinferBundles.cmake`.
 `ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
