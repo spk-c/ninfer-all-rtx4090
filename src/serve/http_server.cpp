@@ -5,6 +5,8 @@
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
 #include "serve/mcp_proxy.h"
+#include "serve/monitor_dashboard.h"
+#include "serve/monitor_gpu.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 #include "serve/webui.h"
@@ -32,6 +34,7 @@ constexpr std::string_view kCorsAllowedHeaders =
 bool is_api_path(std::string_view path) {
     return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
+           path == "/monitor/gpu" ||
            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
            path == "/rerank" || path == "/reranking" || path == kMcpProxyPath;
@@ -210,6 +213,12 @@ std::string response_request_id(const httplib::Response& response) {
 
 bool requires_api_key(const std::string& api_key, bool webui_enabled,
                       const httplib::Request& request) {
+    // The monitor document is a public static asset, like an optional WebUI page.
+    // Its telemetry endpoints still require the normal API key.
+    if (request.method == "GET" &&
+        (request.path == "/monitor" || request.path == "/monitor/")) {
+        return false;
+    }
     return !api_key.empty() && request.path != "/health" && request.method != "OPTIONS" &&
            !(webui_enabled && request.method == "GET" && !is_api_path(request.path));
 }
@@ -607,6 +616,29 @@ void HttpServer::register_routes() {
 
     server_.Get("/health",
                 [this](const httplib::Request&, httplib::Response& res) { handle_health(res); });
+    server_.Get(R"(/monitor/?)", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_header("X-Content-Type-Options", "nosniff");
+        res.set_header("Content-Security-Policy",
+                       "default-src 'none'; script-src 'unsafe-inline'; "
+                       "style-src 'unsafe-inline'; connect-src 'self'; "
+                       "base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+        res.set_content(std::string(monitor_dashboard_html()), "text/html; charset=utf-8");
+    });
+    server_.Get("/monitor/gpu", [](const httplib::Request& req, httplib::Response& res) {
+        unsigned int index = 0;
+        if (req.has_param("index")) {
+            const std::string value = req.get_param_value("index");
+            if (value.size() != 1 || value[0] < '0' || value[0] > '7') {
+                res.status = 400;
+                res.set_content(R"({"error":"index must be 0 through 7"})", "application/json");
+                return;
+            }
+            index = static_cast<unsigned int>(value[0] - '0');
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(monitor_gpu_json(index), "application/json");
+    });
     server_.Get(api_route_pattern("/load"),
                 [this](const httplib::Request& req, httplib::Response& res) {
                     handle_load(req, res);
