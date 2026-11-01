@@ -1,4 +1,5 @@
 #include "serve/http_server.h"
+#include "serve/monitor_dashboard.h"
 
 #include <nlohmann/json.hpp>
 
@@ -58,6 +59,34 @@ int main() {
                               "request_too_large" &&
                           oversized_response.has_header("x-request-id"),
                       "a doubled OpenAI path must keep the OpenAI error envelope");
+
+    // The built-in monitor page is public static HTML even when there is no optional WebUI,
+    // but neither the raw GPU telemetry nor existing stats endpoints bypass API-key checks.
+    httplib::Request monitor_html;
+    monitor_html.method = "GET";
+    monitor_html.path = "/monitor";
+    failures += check(!ninfer::serve::requires_api_key("secret", false, monitor_html),
+                      "monitor HTML must not require a browser-inaccessible API key");
+    monitor_html.path = "/monitor/";
+    failures += check(!ninfer::serve::requires_api_key("secret", false, monitor_html),
+                      "monitor trailing slash must have the same static HTML policy");
+    monitor_html.path = "/monitor/gpu";
+    failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html) &&
+                          ninfer::serve::requires_api_key("secret", true, monitor_html),
+                      "NVML endpoint must retain API-key checks with and without WebUI");
+    monitor_html.path = "/stats";
+    failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html),
+                      "stats endpoint must retain API-key checks");
+    monitor_html.method = "POST";
+    monitor_html.path = "/monitor";
+    failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html),
+                      "only the GET monitor document is public");
+    const std::string_view dashboard = ninfer::serve::monitor_dashboard_html();
+    failures += check(dashboard.find("<title>NInfer Monitor</title>") != std::string_view::npos &&
+                          dashboard.find("'/stats'") != std::string_view::npos &&
+                          dashboard.find("'/metrics'") != std::string_view::npos &&
+                          dashboard.find("'/monitor/gpu?index='") != std::string_view::npos,
+                      "embedded dashboard must poll the built-in telemetry endpoints");
 
     // Route patterns reach the handler under either prefix and keep the endpoint's own captures.
     httplib::Server server;
