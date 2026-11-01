@@ -36,6 +36,9 @@ concurrency:
 
 jobs:
   changes:
+    # Upstream's universal CUDA release depends on its private HF bucket. The
+    # RTX 4090 fork has a dedicated, tag-driven Windows release workflow instead.
+    if: github.repository == 'iamwavecut/ninfer-all'
     name: Native inputs changed
     runs-on: ubuntu-24.04
     outputs:
