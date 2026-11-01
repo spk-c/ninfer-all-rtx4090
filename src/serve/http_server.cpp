@@ -34,7 +34,7 @@ constexpr std::string_view kCorsAllowedHeaders =
 bool is_api_path(std::string_view path) {
     return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
-           path == "/monitor/gpu" ||
+           path == "/monitor/gpu" || path == "/monitor/requests" ||
            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
            path == "/rerank" || path == "/reranking" || path == kMcpProxyPath;
@@ -362,6 +362,50 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
     return std::make_shared<RequestLifecycle>(*this, std::move(context));
 }
 
+void HttpServer::append_monitor_request(MonitorRequest event) {
+    event.timestamp_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    std::lock_guard lock(monitor_mutex_);
+    constexpr std::size_t kMaxMonitorRequests = 50;
+    if (monitor_requests_.size() >= kMaxMonitorRequests) {
+        monitor_requests_.pop_front();
+    }
+    monitor_requests_.push_back(std::move(event));
+}
+
+void HttpServer::handle_monitor_requests(httplib::Response& res) const {
+    std::deque<MonitorRequest> events;
+    {
+        std::lock_guard lock(monitor_mutex_);
+        events = monitor_requests_;
+    }
+    nlohmann::json result = nlohmann::json::array();
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        const MonitorRequest& event = *it;
+        nlohmann::json item{
+            {"id", event.id},
+            {"time_unix_ms", event.timestamp_ms},
+            {"model", event.model},
+            {"status", event.status},
+        };
+        if (event.prompt_tokens >= 0) {
+            item["prompt_tokens"] = event.prompt_tokens;
+            item["output_tokens"] = event.output_tokens;
+            item["cached_tokens"] = event.cached_tokens;
+            item["ttft_seconds"] = event.ttft_seconds;
+            item["total_seconds"] = event.total_seconds;
+            item["decode_seconds"] = event.decode_seconds;
+            item["drafted_tokens"] = event.drafted_tokens;
+            item["accepted_tokens"] = event.accepted_tokens;
+        }
+        result.push_back(std::move(item));
+    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(result.dump(), "application/json");
+}
+
 void HttpServer::record_request_start(const RequestLogContext& context) {
     request_jsonl_.write_request_start(context);
     operational_log_.request_start(context);
@@ -371,6 +415,9 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
     request_jsonl_.write_request_rejected(context);
     metrics_.record_rejection();
     operational_log_.request_rejected(context);
+    append_monitor_request(MonitorRequest{.id = context.id,
+                                          .model = context.model,
+                                          .status = "rejected"});
     if (console_stats_) {
         console_stats_->request_rejected(
             make_request_failure(RequestFailurePhase::Prepare, context.error));
@@ -382,6 +429,19 @@ void HttpServer::record_request_done(const RequestLogContext& context,
     request_jsonl_.write_request_done(context, outcome);
     metrics_.record_done(outcome);
     operational_log_.request_done(context, outcome);
+    append_monitor_request(MonitorRequest{
+        .id = context.id,
+        .model = context.model,
+        .status = "done",
+        .prompt_tokens = outcome.prompt_tokens,
+        .output_tokens = outcome.completion_tokens,
+        .cached_tokens = outcome.metrics.prefix_cache_hit_tokens,
+        .ttft_seconds = outcome.metrics.ttft_seconds,
+        .total_seconds = outcome.metrics.total_seconds,
+        .decode_seconds = outcome.metrics.decode_seconds,
+        .drafted_tokens = outcome.metrics.speculative_draft_tokens,
+        .accepted_tokens = outcome.metrics.speculative_accepted_tokens,
+    });
     if (console_stats_) { console_stats_->request_done(outcome); }
 }
 
@@ -390,6 +450,9 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
     request_jsonl_.write_request_error(context, failure.machine_message);
     metrics_.record_failure();
     operational_log_.request_failure(context, failure);
+    append_monitor_request(MonitorRequest{.id = context.id,
+                                          .model = context.model,
+                                          .status = "failed"});
     if (console_stats_) { console_stats_->request_failure(failure); }
 }
 
@@ -624,6 +687,9 @@ void HttpServer::register_routes() {
                        "style-src 'unsafe-inline'; connect-src 'self'; "
                        "base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
         res.set_content(std::string(monitor_dashboard_html()), "text/html; charset=utf-8");
+    });
+    server_.Get("/monitor/requests", [this](const httplib::Request&, httplib::Response& res) {
+        handle_monitor_requests(res);
     });
     server_.Get("/monitor/gpu", [](const httplib::Request& req, httplib::Response& res) {
         unsigned int index = 0;
