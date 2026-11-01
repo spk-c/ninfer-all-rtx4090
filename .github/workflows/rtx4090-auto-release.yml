@@ -10,6 +10,11 @@ on:
         description: Existing immutable tag (rtx4090-vX.Y.Z)
         type: string
         required: true
+      test_ref:
+        description: Optional master/commit for a build-only dry run; publish must be false
+        type: string
+        required: false
+        default: ''
       publish:
         description: Publish as GPU-unverified prerelease
         type: boolean
@@ -29,12 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish && inputs.test_ref || github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - id: check
         shell: bash
         env:
           REQUESTED_TAG: ${{ inputs.tag }}
+          TEST_REF: ${{ inputs.test_ref }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           tag="$REQUESTED_TAG"
@@ -43,7 +50,11 @@ jobs:
           fi
           [[ "$tag" =~ ^rtx4090-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           sha="$(git rev-parse HEAD)"
-          [[ "$sha" == "$(git rev-parse "refs/tags/$tag^{commit}")" ]] || exit 1
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && -n "$TEST_REF" ]]; then
+            [[ "$PUBLISH" != 'true' ]] || { echo 'Dry run cannot publish' >&2; exit 1; }
+          else
+            [[ "$sha" == "$(git rev-parse "refs/tags/$tag^{commit}")" ]] || exit 1
+          fi
           git fetch --quiet origin master
           git merge-base --is-ancestor "$sha" origin/master || exit 1
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
