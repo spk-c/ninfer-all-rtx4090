@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <map>
 #include <memory>
@@ -219,6 +220,25 @@ private:
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
 
+    // Small metadata-only ring; never stores prompts, responses or token IDs.
+    struct MonitorRequest {
+        std::uint64_t id = 0;
+        std::uint64_t timestamp_ms = 0;
+        std::string model;
+        std::string status;
+        std::string drafter;
+        int prompt_tokens = -1;
+        int output_tokens = -1;
+        std::uint64_t cached_tokens = 0;
+        double ttft_seconds = 0.0;
+        double total_seconds = 0.0;
+        double decode_seconds = 0.0;
+        std::uint64_t drafted_tokens = 0;
+        std::uint64_t accepted_tokens = 0;
+    };
+    void append_monitor_request(MonitorRequest event);
+    void handle_monitor_requests(httplib::Response& res) const;
+
     void record_request_start(const RequestLogContext& context);
     void record_request_rejected(const RequestRejectionLogContext& context);
     void record_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
@@ -248,6 +268,8 @@ private:
     // Mutable: a model's server_start record is written when a const handler first sees it.
     mutable JsonlRequestLog request_jsonl_;
     ServeMetrics metrics_;
+    mutable std::mutex monitor_mutex_;
+    std::deque<MonitorRequest> monitor_requests_;
     std::unique_ptr<ConsoleStatsPanel> console_stats_;
     httplib::Server server_;
     // Present only with --stats-port.

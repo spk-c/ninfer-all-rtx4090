@@ -2,9 +2,12 @@
 #include "serve/slot_files.h"
 
 #include "product/logging/logging.h"
+#include "product/speculative_options.h"
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
 #include "serve/mcp_proxy.h"
+#include "serve/monitor_dashboard.h"
+#include "serve/monitor_gpu.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 #include "serve/webui.h"
@@ -32,6 +35,7 @@ constexpr std::string_view kCorsAllowedHeaders =
 bool is_api_path(std::string_view path) {
     return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
+           path == "/monitor/gpu" || path == "/monitor/requests" ||
            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
            path == "/rerank" || path == "/reranking" || path == kMcpProxyPath;
@@ -210,6 +214,12 @@ std::string response_request_id(const httplib::Response& response) {
 
 bool requires_api_key(const std::string& api_key, bool webui_enabled,
                       const httplib::Request& request) {
+    // The monitor document is a public static asset, like an optional WebUI page.
+    // Its telemetry endpoints still require the normal API key.
+    if (request.method == "GET" &&
+        (request.path == "/monitor" || request.path == "/monitor/")) {
+        return false;
+    }
     return !api_key.empty() && request.path != "/health" && request.method != "OPTIONS" &&
            !(webui_enabled && request.method == "GET" && !is_api_path(request.path));
 }
@@ -353,6 +363,51 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
     return std::make_shared<RequestLifecycle>(*this, std::move(context));
 }
 
+void HttpServer::append_monitor_request(MonitorRequest event) {
+    event.timestamp_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    std::lock_guard lock(monitor_mutex_);
+    constexpr std::size_t kMaxMonitorRequests = 50;
+    if (monitor_requests_.size() >= kMaxMonitorRequests) {
+        monitor_requests_.pop_front();
+    }
+    monitor_requests_.push_back(std::move(event));
+}
+
+void HttpServer::handle_monitor_requests(httplib::Response& res) const {
+    std::deque<MonitorRequest> events;
+    {
+        std::lock_guard lock(monitor_mutex_);
+        events = monitor_requests_;
+    }
+    nlohmann::json result = nlohmann::json::array();
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        const MonitorRequest& event = *it;
+        nlohmann::json item{
+            {"id", event.id},
+            {"time_unix_ms", event.timestamp_ms},
+            {"model", event.model},
+            {"status", event.status},
+            {"drafter", event.drafter},
+        };
+        if (event.prompt_tokens >= 0) {
+            item["prompt_tokens"] = event.prompt_tokens;
+            item["output_tokens"] = event.output_tokens;
+            item["cached_tokens"] = event.cached_tokens;
+            item["ttft_seconds"] = event.ttft_seconds;
+            item["total_seconds"] = event.total_seconds;
+            item["decode_seconds"] = event.decode_seconds;
+            item["drafted_tokens"] = event.drafted_tokens;
+            item["accepted_tokens"] = event.accepted_tokens;
+        }
+        result.push_back(std::move(item));
+    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(result.dump(), "application/json");
+}
+
 void HttpServer::record_request_start(const RequestLogContext& context) {
     request_jsonl_.write_request_start(context);
     operational_log_.request_start(context);
@@ -362,6 +417,9 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
     request_jsonl_.write_request_rejected(context);
     metrics_.record_rejection();
     operational_log_.request_rejected(context);
+    append_monitor_request(MonitorRequest{.id = context.id,
+                                          .model = context.model,
+                                          .status = "rejected"});
     if (console_stats_) {
         console_stats_->request_rejected(
             make_request_failure(RequestFailurePhase::Prepare, context.error));
@@ -373,6 +431,26 @@ void HttpServer::record_request_done(const RequestLogContext& context,
     request_jsonl_.write_request_done(context, outcome);
     metrics_.record_done(outcome);
     operational_log_.request_done(context, outcome);
+    append_monitor_request(MonitorRequest{
+        .id = context.id,
+        .model = context.model,
+        .status = "done",
+        .drafter = product::speculative_backend_name(outcome.metrics.speculative_backend),
+        .prompt_tokens = outcome.prompt_tokens,
+        .output_tokens = outcome.completion_tokens,
+        .cached_tokens = outcome.metrics.prefix_cache_hit_tokens,
+        .ttft_seconds = outcome.metrics.ttft_seconds,
+        .total_seconds = outcome.metrics.total_seconds,
+        .decode_seconds = outcome.metrics.decode_seconds,
+        .drafted_tokens =
+            outcome.metrics.speculative_draft_tokens >= outcome.metrics.ngram_drafted_tokens
+                ? outcome.metrics.speculative_draft_tokens - outcome.metrics.ngram_drafted_tokens
+                : 0,
+        .accepted_tokens =
+            outcome.metrics.speculative_accepted_tokens >= outcome.metrics.ngram_accepted_tokens
+                ? outcome.metrics.speculative_accepted_tokens - outcome.metrics.ngram_accepted_tokens
+                : 0,
+    });
     if (console_stats_) { console_stats_->request_done(outcome); }
 }
 
@@ -381,6 +459,9 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
     request_jsonl_.write_request_error(context, failure.machine_message);
     metrics_.record_failure();
     operational_log_.request_failure(context, failure);
+    append_monitor_request(MonitorRequest{.id = context.id,
+                                          .model = context.model,
+                                          .status = "failed"});
     if (console_stats_) { console_stats_->request_failure(failure); }
 }
 
@@ -607,6 +688,32 @@ void HttpServer::register_routes() {
 
     server_.Get("/health",
                 [this](const httplib::Request&, httplib::Response& res) { handle_health(res); });
+    server_.Get(R"(/monitor/?)", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_header("X-Content-Type-Options", "nosniff");
+        res.set_header("Content-Security-Policy",
+                       "default-src 'none'; script-src 'unsafe-inline'; "
+                       "style-src 'unsafe-inline'; connect-src 'self'; "
+                       "base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+        res.set_content(std::string(monitor_dashboard_html()), "text/html; charset=utf-8");
+    });
+    server_.Get("/monitor/requests", [this](const httplib::Request&, httplib::Response& res) {
+        handle_monitor_requests(res);
+    });
+    server_.Get("/monitor/gpu", [](const httplib::Request& req, httplib::Response& res) {
+        unsigned int index = 0;
+        if (req.has_param("index")) {
+            const std::string value = req.get_param_value("index");
+            if (value.size() != 1 || value[0] < '0' || value[0] > '7') {
+                res.status = 400;
+                res.set_content(R"({"error":"index must be 0 through 7"})", "application/json");
+                return;
+            }
+            index = static_cast<unsigned int>(value[0] - '0');
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(monitor_gpu_json(index), "application/json");
+    });
     server_.Get(api_route_pattern("/load"),
                 [this](const httplib::Request& req, httplib::Response& res) {
                     handle_load(req, res);
