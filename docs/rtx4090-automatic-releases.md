@@ -1,36 +1,41 @@
-# Automated Windows RTX 4090 releases
+# RTX 4090 Windows releases: GitHub-hosted multi-shard build
 
-The **RTX 4090 automatic Windows release** workflow builds native Windows CUDA 13.4 / SM89
-from a new immutable release tag. It runs CTest, verifies the portable package
-and performs a real DFlash2 model inference test before publishing.
+**No self-hosted runner is required to build and publish Windows binaries.**
+For a new immutable version tag, GitHub Actions starts four windows-2022
+workers in parallel. Each compiles a deterministic subset of the CUDA 13.4 /
+native SM89 object graph using build-object-shard.py.
 
-## One-time setup
+## What happens on a new tag
 
-1. As a repository administrator, open **Settings > Actions > Runners > New
-   self-hosted runner**. Install GitHub's Windows x64 runner on a trusted
-   RTX 4090 machine. Assign it the custom **rtx4090** label, along with the
-   standard self-hosted, Windows and X64 labels. Obtain the temporary
-   registration token only from GitHub's UI; never publish it.
-2. Install **VS 2022 Build Tools with C++ and Windows SDK**, **CUDA 13.4**,
-   **CMake**, **Ninja**, **7-Zip**, **PowerShell 7**, **Git**, **GitHub CLI**,
-   **Python 3.11** and vcpkg. All command-line tools must be accessible to
-   the runner account. Set the VCPKG_ROOT environment variable and grant
-   its account write permissions for C:\ninfer-ci\build-rtx4090-release.
-3. Keep a valid Qwen3.8 NInfer model on that machine, by default at
-   C:\ninfer-all\models\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer.
-   Otherwise set the repository Actions variable **NINFER_RELEASE_MODEL** to
-   its absolute location. Model weights are never uploaded.
-4. Keep the runner dedicated to *trusted release jobs*, not arbitrary public
-   pull requests. A runner on a personal desktop has elevated security risk:
-   use a dedicated non-administrator account. Protect release tags or restrict
-   who can create them. Do not provide registration tokens or secrets in chats.
-5. The GPU must be idle, with at least 19000 MiB free for the smoke test.
-   The workflow does not kill running inference servers. If insufficient
-   memory is available, rerun the failed job after freeing the GPU.
+1. Verify the source revision is reachable from master and run the existing
+   Linux/Windows release-tooling checks.
+2. Four hosted Windows workers install the same pinned CUDA 13.4.3, MSVC
+   2022, vcpkg baseline, Python 3.11, CMake/Ninja and ccache. Their object
+   lists are disjoint and follow stable SHA256 path ownership.
+3. Each exports a ZIP archive containing compiled-object ownership metadata,
+   compiler cache entries and SHA256 hashes. Data moves via official
+   GitHub Actions artifacts, NOT the upstream private Hugging Face cache.
+4. The final Windows worker checks all four artifact identities, full Ninja
+   object ownership, cache SHA256 and path safety. Missing/corrupt or stale
+   artifacts cause a hard failure.
+5. The final worker restores the compiler caches, links the six portable
+   programs and checks that cached compilation was actually reused.
+   It builds the native test targets and runs CPU-only CTest. Tests that
+   require an actual GPU/model may skip.
+6. It packages the release, checks SM89 device images, portable startup,
+   archive integrity and SHA256, and publishes verified files to Actions.
+7. A separate publish job creates only a GPU-UNVERIFIED GitHub prerelease.
+   It refuses to overwrite an existing tag or release.
 
-## How to publish
+The initial matrix uses FOUR workers, rather than eight, because installing
+CUDA, vcpkg and uploading caches costs time/disk on each worker. After
+a fully successful real run, use its logs to decide whether eight shards
+actually save time.
 
-After merging and validating a source revision, run:
+## Start a new release
+
+After merging/test-qualifying a source commit on master, create and push
+a NEW version tag:
 
     git fetch origin master
     git switch master
@@ -38,30 +43,27 @@ After merging and validating a source revision, run:
     git tag rtx4090-v0.1.2
     git push origin rtx4090-v0.1.2
 
-Never move an existing release tag. A tag push starts the Windows release
-workflow. It pins the tagged source, reuses a build directory outside the
-working tree, explicitly selects Python 3.11, compiles the native SM89
-release, runs CTest and packages all six portable executables. It checks
-the CUDA device images, package metadata, archive and SHA256 manifest, then
-runs real RTX 4090 DFlash2 inference with sufficient thinking budget.
+The tag push automatically starts the hosted build. Manual dispatch can
+run an existing tag without publishing by leaving the publish checkbox
+unchecked. Tag and release assets must remain immutable.
 
-The workflow uploads to a *prerelease* using the built-in Actions token,
-verifies remote asset names and sizes, and only then promotes to stable/latest.
-It refuses to overwrite an existing release. Manual workflow dispatch allows
-testing an existing tag without publishing (publish=false), or publishing
-when all gates pass (publish=true).
+## GPU qualification remains separate
 
-## What is fixed in the fork
+GitHub-hosted Windows runners have NO RTX 4090. Their checks cannot
+prove that a quantized Qwen model performs correct real GPU inference.
 
-The general CI workflow uses the latest published release *tag* as its
-immutable comparison base rather than depending on an inaccessible upstream
-GHCR image. If the base is missing or cannot be fetched, all check scopes
-are enabled as a safe bootstrap. PR checks use their merge parent.
+Download the prerelease archive and SHA256 file, verify the hash, and
+unpack on an RTX 4090 computer. The repository script
+scripts/test-rtx4090-release-smoke.ps1 runs the packaged server using the
+real Qwen3.8 model and DFlash2. It requires at least 19 GiB free VRAM,
+does not stop ongoing inference processes, and permits 256 output tokens
+so the reasoning phase can complete.
 
-The inherited universal native-release and HF cache-retention workflows
-use the upstream project's private build-cache bucket, and are skipped in
-this fork. The new dedicated RTX 4090 workflow does not require that bucket.
+Only after GPU smoke and appropriate numerical/cache regressions pass
+should a maintainer explicitly promote the prerelease to Stable/Latest.
+The cloud workflow never silently certifies untested GPU behavior.
 
-Existing stable version rtx4090-v0.1.1 is unchanged. Release qualification
-covers Windows x64, one RTX 4090, native SM89 and CUDA 13.4; it does not
-certify Linux, multi-GPU, other models or all optional model-dependent tests.
+This workflow qualifies Windows x64, CUDA 13.4, native SM89 and CPU
+tests, not Linux, multi-GPU or optional model-dependent skipped tests.
+
+Existing stable rtx4090-v0.1.1 and its assets remain unchanged.
