@@ -226,6 +226,7 @@ private:
         std::uint64_t timestamp_ms = 0;
         std::string model;
         std::string status;
+        std::string drafter;
         int prompt_tokens = -1;
         int output_tokens = -1;
         std::uint64_t cached_tokens = 0;
