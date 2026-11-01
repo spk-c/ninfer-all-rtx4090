@@ -13,7 +13,7 @@ instead. The dashboard always polls the server at the same origin.
 The page reads the existing GET /stats and GET /metrics endpoints once every
 three seconds. It shows a time-windowed decode/prefill rate (differences of
 monotonic token counters), active/waiting requests, device KV occupancy,
-draft acceptance, uptime and aggregate request activity. In router mode,
+draft acceptance, uptime, aggregate activity and the last 50 request events. In router mode,
 enter the exact model ID in the Model input to inspect a particular model.
 
 ## NVIDIA GPU sensors
@@ -34,7 +34,7 @@ not access the inference CUDA context.
 
 - GET /monitor and /monitor/ are public **static HTML documents**, like
   optional WebUI assets. No model statistics, secrets or prompts are embedded.
-- GET /stats, GET /metrics and GET /monitor/gpu retain normal API-key
+- GET /stats, GET /metrics, GET /monitor/gpu and GET /monitor/requests retain normal API-key
   authentication. With `--api-key` configured, enter it into the page's
   password field. The value stays in tab memory and is not written to
   localStorage, cookies or URL query parameters.
@@ -51,11 +51,13 @@ not access the inference CUDA context.
 - Draft acceptance comes from totals recorded for completed requests
   since server startup; it is not an instantaneous DFlash2-only rate.
 - KV occupancy is not the total submitted chat context length.
-- Request activity is an aggregate of successive poll samples, **not
-  a per-request event log**.
+- The recent-requests table is a bounded in-memory server feed (last 50
+  completed, rejected or failed requests), with timestamps, status, token counts,
+  cached tokens and timing. It contains **no prompts, completions or token IDs**.
+  The separate activity table remains successive aggregate samples.
 - Samples are stored only in the open browser tab, to a maximum of 120.
   The tab stops polling while hidden.
 
-For detailed per-request JSONL history, CPU/RAM, sensor overrides and
+For full per-request JSONL logs, CPU/RAM, sensor overrides and
 longer history, the existing **tools/monitor/monitor.py** sidecar remains
 available; see tools/monitor/README.md.
