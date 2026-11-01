@@ -1,0 +1,96 @@
+name: Prepare Windows CUDA 13.4 native SM89 build
+description: Identical pinned toolchain, dependencies and CMake flags for object shards and linker
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+    - name: Install CUDA 13.4.3 toolchain
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $version='13.4.3'
+        $installer=Join-Path $env:RUNNER_TEMP 'cuda-13.4.3.exe'
+        $url="https://developer.download.nvidia.com/compute/cuda/$version/network_installers/cuda_$($version)_windows_x86_64_network.exe"
+        Invoke-WebRequest -Uri $url -OutFile $installer
+        $packages=@('nvcc','crt','nvvm','cudart','cublas','cublas_dev','nvtx','thrust','cuda_profiler_api','cuobjdump','nvprune') |
+          ForEach-Object {$_+'_13.4'}
+        $process=Start-Process $installer -ArgumentList (@('-s')+$packages) -Wait -PassThru
+        if($process.ExitCode -ne 0){throw "CUDA installer failed: $($process.ExitCode)"}
+        $cuda=Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v13.4'
+        foreach($file in @('bin\nvcc.exe','bin\cuobjdump.exe','bin\nvprune.exe','include\cuda_runtime.h','lib\x64\cublas.lib')){
+          if(-not (Test-Path (Join-Path $cuda $file))){throw "CUDA component missing: $file"}
+        }
+        python .github/scripts/fetch-cuda-license.py --version $version --output (Join-Path $cuda 'EULA.txt')
+        if($LASTEXITCODE -ne 0){throw 'CUDA EULA extraction failed'}
+        "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+        (Join-Path $cuda 'bin') >> $env:GITHUB_PATH
+    - name: Import VS 2022 x64 build tools
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $vswhere=Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $vs=& $vswhere -latest -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if(-not $vs){throw 'MSVC 2022 x64 tools missing'}
+        $before=@{}
+        Get-ChildItem Env: | ForEach-Object {$before[$_.Name]=$_.Value}
+        $bat=Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+        $vars=cmd /c ('"'+$bat+'" >nul && set')
+        if($LASTEXITCODE -ne 0){throw 'vcvars64 failed'}
+        foreach($line in $vars){
+          if($line -match '^([^=]+)=(.*)$' -and $Matches[1] -notin @('CUDA_PATH','VCPKG_ROOT')){
+            if($before[$Matches[1]] -cne $Matches[2]){
+              "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
+            }
+          }
+        }
+    - name: Install pinned ccache
+      shell: pwsh
+      run: |
+        python .github/scripts/install-compiler-cache.py
+        if($LASTEXITCODE -ne 0){throw 'ccache setup failed'}
+    - name: Restore pinned vcpkg sources
+      uses: actions/checkout@v7
+      with:
+        repository: microsoft/vcpkg
+        ref: 4bca8fd8654e5ba76f92661db7bfe954768ad8ef
+        path: .vcpkg
+    - name: Cache vcpkg binary packages
+      uses: actions/cache@v5
+      with:
+        path: ~/AppData/Local/vcpkg/archives
+        key: vcpkg-windows-x64-cuda134-${{ hashFiles('vcpkg.json') }}
+    - name: Bootstrap vcpkg
+      shell: pwsh
+      run: |
+        $baseline=(Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+        if($baseline -ne '4bca8fd8654e5ba76f92661db7bfe954768ad8ef'){
+          throw 'Pinned vcpkg manifest baseline changed'
+        }
+        & .\.vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        if($LASTEXITCODE -ne 0){throw 'vcpkg bootstrap failed'}
+    - name: Configure identical CMake build graph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $python=(python -c 'import sys; print(sys.executable)').Trim().Replace('\','/')
+        if($LASTEXITCODE -ne 0){throw 'Python selection failed'}
+        $toolchain=(Join-Path $pwd '.vcpkg/scripts/buildsystems/vcpkg.cmake').Replace('\','/')
+        $nvcc=(Join-Path $env:CUDA_PATH 'bin/nvcc.exe').Replace('\','/')
+        $cfg=@('-S','.','-B','build-release','-G','Ninja',
+          '-DCMAKE_BUILD_TYPE=Release',
+          "-DCMAKE_TOOLCHAIN_FILE=$toolchain",
+          '-DVCPKG_TARGET_TRIPLET=x64-windows','-DVCPKG_HOST_TRIPLET=x64-windows',
+          "-DCMAKE_CUDA_COMPILER=$nvcc",
+          '-DCMAKE_C_COMPILER=cl','-DCMAKE_CXX_COMPILER=cl',
+          '-DCMAKE_CUDA_ARCHITECTURES=89',
+          '-DCMAKE_C_COMPILER_LAUNCHER=ccache','-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
+          '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+          '-DNINFER_NVCC_SPLIT_COMPILE=2','-DNINFER_CUDA_PRUNE_PTX=ON',
+          '-DNINFER_WINDOWS_KERNEL_DLL=ON','-DNINFER_SHARED_RUNTIME=ON',
+          '-DNINFER_BUILD_BENCHMARKS=ON','-DBUILD_TESTING=ON',
+          "-DPython3_EXECUTABLE=$python")
+        & cmake @cfg
+        if($LASTEXITCODE -ne 0){throw 'CMake configure failed'}
+        ccache --zero-stats
