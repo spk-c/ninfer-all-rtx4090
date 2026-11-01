@@ -14,6 +14,7 @@ on:
       - 'scripts/build.ps1'
       - 'scripts/test-rtx4090-release-smoke.ps1'
       - '.github/workflows/rtx4090-auto-release.yml'
+      - '.github/actions/windows-sm89/**'
       - 'scripts/package-linux-release.py'
       - 'scripts/assemble-universal-release.py'
       - 'apps/launcher/**'
@@ -36,6 +37,23 @@ jobs:
         with:
           python-version: '3.11'
       - run: sudo apt-get update && sudo apt-get install -y patchelf
+      - run: python -m pip install --disable-pip-version-check PyYAML
+      - name: Validate hosted RTX 4090 workflow and composite action YAML
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          root=Path('.github')
+          workflow=yaml.load((root/'workflows/rtx4090-auto-release.yml').read_text(),
+                             Loader=yaml.BaseLoader)
+          assert set(workflow['jobs']) == {'source','release-tools','objects','package','publish'}
+          assert 'self-hosted' not in str(workflow['jobs'])
+          action=yaml.load((root/'actions/windows-sm89/action.yml').read_text(),
+                           Loader=yaml.BaseLoader)
+          assert action['runs']['using'] == 'composite'
+          print('Hosted RTX 4090 workflow YAML parsed correctly')
+          PY
       - run: python -m unittest discover -s tests/release -v
   windows-lifecycle:
     runs-on: windows-2022
