@@ -149,15 +149,17 @@ def restore(input_root, destination, build, sha, count):
           f"{len(all_files)} content-verified compiler cache files", flush=True)
 
 
-def check_hits(minimum):
+def check_hits(minimum, min_ratio=0.6):
     sys.path.insert(0, str(Path(__file__).parent))
     from build_telemetry import cache_stats
     stats = cache_stats()
     hits = stats.get("direct_cache_hit", 0) + stats.get("preprocessed_cache_hit", 0)
     misses = stats.get("cache_miss", 0)
     print(f"Final compilation: {hits} cache hits, {misses} cache misses", flush=True)
-    if hits < minimum:
-        raise ValueError("No meaningful shard cache reuse; refusing an unbounded cold build")
+    ratio = hits / (hits + misses) if hits + misses else 0
+    print(f"Compiler-cache hit ratio: {ratio:.1%} (required {min_ratio:.1%})", flush=True)
+    if hits < minimum or ratio < min_ratio:
+        raise ValueError("Shard cache reuse below safe minimum; refusing cold CUDA rebuild")
 
 
 def main():
@@ -178,13 +180,14 @@ def main():
     r.add_argument("--count", type=int, required=True)
     q = sub.add_parser("check-hits")
     q.add_argument("--minimum", type=int, default=40)
+    q.add_argument("--min-ratio", type=float, default=0.6)
     args = parser.parse_args()
     if args.action == "pack":
         pack(args.source, args.objects, args.output, args.revision, args.shard, args.count)
     elif args.action == "restore":
         restore(args.input, args.dest, args.build, args.revision, args.count)
     else:
-        check_hits(args.minimum)
+        check_hits(args.minimum, args.min_ratio)
 
 
 if __name__ == "__main__":
