@@ -51,7 +51,7 @@ jobs:
           foreach ($path in 'scripts/package-release.ps1', 'scripts/build.ps1', 'scripts/test-rtx4090-release-smoke.ps1') {
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $path), [ref]$null, [ref]$parseErrors) | Out-Null
-            if ($parseErrors.Count) { throw "$path: $($parseErrors | Out-String)" }
+            if ($parseErrors.Count) { throw ($path + ": " + ($parseErrors | Out-String)) }
           }
       - run: python -m unittest discover -s tests/release -p test_build_lifecycle.py -v
       - run: python -m unittest discover -s tests/release -p test_windows_kernel_dll.py -v
