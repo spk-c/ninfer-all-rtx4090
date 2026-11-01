@@ -48,12 +48,15 @@ not access the inference CUDA context.
 - Decode/prefill rates are differences of **server-wide completed/committed
   token counters** over the most recent polling interval. The first reading
   has no prior sample, so rates start with an empty value.
-- Draft acceptance comes from totals recorded for completed requests
-  since server startup; it is not an instantaneous DFlash2-only rate.
+- The DFlash2 card aggregates model-draft acceptance from the last 50
+  request events whose speculative backend is DFlash2. N-gram proposals
+  are excluded. It is not a per-token instantaneous rate, and displays
+  a dash until matching completed requests exist.
 - KV occupancy is not the total submitted chat context length.
 - The recent-requests table is a bounded in-memory server feed (last 50
   completed, rejected or failed requests), with timestamps, status, token counts,
-  cached tokens and timing. It contains **no prompts, completions or token IDs**.
+  cached tokens, speculative backend and timing. It contains **no prompts,
+  completions or token IDs**.
   The separate activity table remains successive aggregate samples.
 - Samples are stored only in the open browser tab, to a maximum of 120.
   The tab stops polling while hidden.
