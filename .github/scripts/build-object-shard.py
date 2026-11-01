@@ -29,9 +29,10 @@ def main():
     parser.add_argument("--count", type=int, required=True)
     parser.add_argument("--jobs", type=int, default=2)
     args = parser.parse_args()
+    # Standard Ninja supports -t compdb (but not upstream's custom compdb-targets).
+    # Include every compile object, including test targets, so the final job mainly links.
     commands = json.loads(subprocess.check_output(
-        ["ninja", "-C", str(args.build), "-t", "compdb-targets",
-         "ninfer", "ninfer-serve", "ninfer_bench"], text=True))
+        ["ninja", "-C", str(args.build), "-t", "compdb"], text=True))
     objects = select_objects(commands, args.shard, args.count)
     if not objects:
         raise ValueError("The release object shard is empty")
