@@ -11,6 +11,9 @@ on:
       - '.github/workflows/native-linux.yml'
       - '.github/workflows/linux-cache-bootstrap.yml'
       - 'scripts/package-release.ps1'
+      - 'scripts/build.ps1'
+      - 'scripts/test-rtx4090-release-smoke.ps1'
+      - '.github/workflows/rtx4090-auto-release.yml'
       - 'scripts/package-linux-release.py'
       - 'scripts/assemble-universal-release.py'
       - 'apps/launcher/**'
@@ -42,12 +45,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - name: Parse Windows packager
+      - name: Parse Windows release and build scripts
         shell: pwsh
         run: |
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile("$pwd/scripts/package-release.ps1", [ref]$null, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          foreach ($path in 'scripts/package-release.ps1', 'scripts/build.ps1', 'scripts/test-rtx4090-release-smoke.ps1') {
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $path), [ref]$null, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw "$path: $($parseErrors | Out-String)" }
+          }
       - run: python -m unittest discover -s tests/release -p test_build_lifecycle.py -v
       - run: python -m unittest discover -s tests/release -p test_windows_kernel_dll.py -v
       - run: python -m unittest discover -s tests/release -p test_portable_runtime.py -v
