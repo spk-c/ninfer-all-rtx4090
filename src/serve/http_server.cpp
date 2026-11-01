@@ -2,6 +2,7 @@
 #include "serve/slot_files.h"
 
 #include "product/logging/logging.h"
+#include "product/speculative_options.h"
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
 #include "serve/mcp_proxy.h"
@@ -389,6 +390,7 @@ void HttpServer::handle_monitor_requests(httplib::Response& res) const {
             {"time_unix_ms", event.timestamp_ms},
             {"model", event.model},
             {"status", event.status},
+            {"drafter", event.drafter},
         };
         if (event.prompt_tokens >= 0) {
             item["prompt_tokens"] = event.prompt_tokens;
@@ -433,14 +435,21 @@ void HttpServer::record_request_done(const RequestLogContext& context,
         .id = context.id,
         .model = context.model,
         .status = "done",
+        .drafter = product::speculative_backend_name(outcome.metrics.speculative_backend),
         .prompt_tokens = outcome.prompt_tokens,
         .output_tokens = outcome.completion_tokens,
         .cached_tokens = outcome.metrics.prefix_cache_hit_tokens,
         .ttft_seconds = outcome.metrics.ttft_seconds,
         .total_seconds = outcome.metrics.total_seconds,
         .decode_seconds = outcome.metrics.decode_seconds,
-        .drafted_tokens = outcome.metrics.speculative_draft_tokens,
-        .accepted_tokens = outcome.metrics.speculative_accepted_tokens,
+        .drafted_tokens =
+            outcome.metrics.speculative_draft_tokens >= outcome.metrics.ngram_drafted_tokens
+                ? outcome.metrics.speculative_draft_tokens - outcome.metrics.ngram_drafted_tokens
+                : 0,
+        .accepted_tokens =
+            outcome.metrics.speculative_accepted_tokens >= outcome.metrics.ngram_accepted_tokens
+                ? outcome.metrics.speculative_accepted_tokens - outcome.metrics.ngram_accepted_tokens
+                : 0,
     });
     if (console_stats_) { console_stats_->request_done(outcome); }
 }
