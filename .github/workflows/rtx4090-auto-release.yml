@@ -111,7 +111,12 @@ jobs:
           $tag=$env:NINFER_VERSION
           $sha=$env:RELEASE_SHA
           if ((git rev-parse HEAD).Trim() -ne $sha) { throw 'Source changed' }
-          $remote=@(git ls-remote origin "refs/tags/$tag")
+          # Lightweight tags point directly at a commit; annotated tags need ^{}.
+          $remote=@(git ls-remote origin "refs/tags/$tag^{}")
+          if ($LASTEXITCODE -ne 0) { throw 'Remote tag lookup failed' }
+          if (-not $remote.Count) {
+            $remote=@(git ls-remote origin "refs/tags/$tag")
+          }
           if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 1 -or -not $remote[0].StartsWith($sha)) {
             throw 'Release tag changed during compilation'
           }
