@@ -47,7 +47,7 @@ th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #2a3d48}th{color:
 <div class="card"><div class="label">GPU temperature</div><div class="value" id="temp">–</div><small>°C</small></div>
 <div class="card"><div class="label">GPU power</div><div class="value" id="power">–</div><small>W</small></div>
 <div class="card"><div class="label">Running / waiting</div><div class="value" id="requests">–</div><small id="admitted">requests</small></div>
-<div class="card"><div class="label">Draft acceptance</div><div class="value" id="draft">–</div><small>accepted / drafted tokens</small></div>
+<div class="card"><div class="label">DFlash2 acceptance</div><div class="value" id="draft">–</div><small>last 50 requests · model drafts only</small></div>
 </div>
 <div class="grid section">
 <section class="card wide"><h2>Live token throughput</h2><canvas id="rates" role="img" aria-label="Recent prefill and decode throughput"></canvas>
@@ -180,7 +180,9 @@ async function refresh(){
   txt('decode',format(decodeRate));txt('prefill',format(prefillRate));
   txt('requests',format(curr.running)+' / '+format(curr.waiting));
   txt('admitted',format(stats.requests?.admitted||0)+' admitted');
-  const drafted=count(metrics,'ninfer:draft_tokens_total'),accepted=count(metrics,'ninfer:draft_accepted_tokens_total');
+  const dflash=recent.filter(e=>typeof e.drafter==='string'&&e.drafter.toLowerCase()==='dflash2');
+  const drafted=dflash.reduce((sum,e)=>sum+count(e,'drafted_tokens'),0);
+  const accepted=dflash.reduce((sum,e)=>sum+count(e,'accepted_tokens'),0);
   txt('draft',drafted?format(accepted/drafted*100)+' %':'–');
   const capacity=count(stats.capacity,'kv_capacity_tokens'),used=count(stats.occupancy,'device_main_kv_tokens');
   const fill=capacity?Math.min(100,used/capacity*100):0;
