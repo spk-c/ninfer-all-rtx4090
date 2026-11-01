@@ -38,9 +38,10 @@ def safe_name(name):
 
 
 def build_objects(build):
+    # The standard Ninja compdb output lists every build edge; the selector
+    # keeps only compiled .obj/.o records, including CTest's native targets.
     out = subprocess.check_output(
-        ["ninja", "-C", str(build), "-t", "compdb-targets", *TARGETS],
-        text=True)
+        ["ninja", "-C", str(build), "-t", "compdb"], text=True)
     spec = importlib.util.spec_from_file_location(
         "release_shard_selector", Path(__file__).with_name("build-object-shard.py"))
     module = importlib.util.module_from_spec(spec)
