@@ -74,6 +74,10 @@ int main() {
     failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html) &&
                           ninfer::serve::requires_api_key("secret", true, monitor_html),
                       "NVML endpoint must retain API-key checks with and without WebUI");
+    monitor_html.path = "/monitor/requests";
+    failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html) &&
+                          ninfer::serve::requires_api_key("secret", true, monitor_html),
+                      "recent request history must require the API key with and without WebUI");
     monitor_html.path = "/stats";
     failures += check(ninfer::serve::requires_api_key("secret", false, monitor_html),
                       "stats endpoint must retain API-key checks");
@@ -85,6 +89,7 @@ int main() {
     failures += check(dashboard.find("<title>NInfer Monitor</title>") != std::string_view::npos &&
                           dashboard.find("'/stats'") != std::string_view::npos &&
                           dashboard.find("'/metrics'") != std::string_view::npos &&
+                          dashboard.find("'/monitor/requests'") != std::string_view::npos &&
                           dashboard.find("'/monitor/gpu?index='") != std::string_view::npos,
                       "embedded dashboard must poll the built-in telemetry endpoints");
 
