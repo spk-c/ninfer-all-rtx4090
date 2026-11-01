@@ -43,7 +43,7 @@ ninfer_internal_includes(ninfer_serve)
 target_link_libraries(ninfer_serve
   PUBLIC ninfer_engine ninfer_model_catalog Threads::Threads ninfer::json ninfer::httplib
   PRIVATE ninfer_media_acquire ninfer_product_logging ninfer_product_prompt_input
-          ${NINFER_CUDART_TARGET})
+          ${NINFER_CUDART_TARGET} ${CMAKE_DL_LIBS})
 
 # A WebUI is compiled in only from a local directory, never downloaded at configure time, so offline
 # and hermetic builds are unaffected. scripts/fetch-webui.sh unpacks llama.cpp's released WebUI into
