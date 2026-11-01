@@ -16,7 +16,10 @@ namespace ninfer::serve {
 namespace monitor_detail {
 #ifdef _WIN32
 using Module = HMODULE;
-inline Module open() { return LoadLibraryA("nvml.dll"); }
+// Only the trusted Windows system directory may supply the GPU driver DLL.
+inline Module open() {
+    return LoadLibraryExA("nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
 inline void* symbol(Module m, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(m, name));
 }
