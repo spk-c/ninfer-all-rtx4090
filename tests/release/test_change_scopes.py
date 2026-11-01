@@ -67,13 +67,20 @@ class BuildInputsTest(unittest.TestCase):
         self.git('config', 'user.email', 'test@example.invalid')
         self.git('commit', '--allow-empty', '-qm', 'base')
         self.base = self.git('rev-parse', 'HEAD').strip()
+        # Simulate a published release tag in an isolated local Git remote.
+        self.remote = self.root / '.test-origin.git'
+        subprocess.run(['git', 'init', '--bare', str(self.remote)], check=True,
+                       capture_output=True, text=True)
+        self.git('remote', 'add', 'origin', str(self.remote))
+        self.git('tag', 'rtx4090-v0.0.1', self.base)
+        self.git('push', 'origin', 'refs/tags/rtx4090-v0.0.1')
         bindir = self.root / 'bin'
         bindir.mkdir()
-        for name in ['docker', 'gh']:
-            path = bindir / name
-            path.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_BASE"\n')
-            path.chmod(0o755)
-        self.env = dict(os.environ, PATH=f'{bindir}:{os.environ["PATH"]}', TEST_BASE=self.base,
+        path = bindir / 'gh'
+        path.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_TAG"\n')
+        path.chmod(0o755)
+        self.env = dict(os.environ, PATH=f'{bindir}:{os.environ["PATH"]}',
+                        TEST_TAG='rtx4090-v0.0.1',
                         GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/master', GITHUB_REPOSITORY='test/ninfer')
 
     def git(self, *args):
@@ -107,16 +114,15 @@ class BuildInputsTest(unittest.TestCase):
         self.commit('README.md')
         for native in [False, True]:
             self.assertEqual(self.scopes(native)['changed'], 'true')
-        self.env['TEST_BASE'] = built
+        # After that native source becomes the published release, only README changed.
+        self.git('tag', '-f', 'rtx4090-v0.0.1', built)
+        self.git('push', '--force', 'origin', 'refs/tags/rtx4090-v0.0.1')
         for native in [False, True]:
             self.assertEqual(self.scopes(native)['native'], 'false')
             self.assertEqual(self.scopes(native)['changed'], 'false')
 
-    def test_manual_dispatch_forces_all_and_missing_base_does_not_build(self):
+    def test_manual_dispatch_and_missing_release_force_all_scopes(self):
         self.env['GITHUB_EVENT_NAME'] = 'workflow_dispatch'
         self.assertEqual(set(self.scopes().values()), {'true'})
-        self.env.update(GITHUB_EVENT_NAME='push', TEST_BASE='')
-        p = subprocess.run(['bash', str(ROOT / '.github/scripts/build-inputs.sh'), '--native'],
-                           cwd=self.root, env=self.env, text=True, capture_output=True)
-        self.assertNotEqual(p.returncode, 0)
-        self.assertNotIn('=true', p.stdout)
+        self.env.update(GITHUB_EVENT_NAME='push', TEST_TAG='missing-release-tag')
+        self.assertEqual(set(self.scopes(native=True).values()), {'true'})
