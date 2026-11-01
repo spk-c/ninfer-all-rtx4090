@@ -45,7 +45,11 @@ a NEW version tag:
 
 The tag push automatically starts the hosted build. Manual dispatch can
 run an existing tag without publishing by leaving the publish checkbox
-unchecked. Tag and release assets must remain immutable.
+unchecked. For an initial build-only validation without pushing a new tag,
+set the version label to an unused next version (for example rtx4090-v0.1.2),
+test_ref to master, and publish to false. It builds that source revision but
+does not create or alter any release. Tag and release assets must remain
+immutable.
 
 ## GPU qualification remains separate
 
