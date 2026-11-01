@@ -1,0 +1,115 @@
+{
+  "paired_graph_over_eager": [
+    1.169325153374233,
+    1.1691176470588236,
+    1.164835164835165,
+    1.165137614678899,
+    1.162079510703364
+  ],
+  "paired_median": 1.165137614678899,
+  "failures": [],
+  "source_revision": "b6c0e4d2416542ac32e2f474077cb9049852bb47",
+  "scope": "Existing Graph versus Eager; coding80 functions,128 requested outputs,K5,copy width15,rk4v4,FP16 GDN,context8192",
+  "rows": [
+    {
+      "rep": 0,
+      "arm": "eager",
+      "returncode": 0,
+      "wall_s": 5.466837200001464,
+      "decode_tokens_per_second": 163.0,
+      "gpu_before": "45, 52.89 W, 210 MHz, 810 MHz, 1283 MiB, 1 %",
+      "gpu_after": "49, 315.48 W, 2685 MHz, 10501 MHz, 1283 MiB, 1 %",
+      "engine_start_s": 3.4
+    },
+    {
+      "rep": 0,
+      "arm": "graph",
+      "returncode": 0,
+      "wall_s": 5.706024899991462,
+      "decode_tokens_per_second": 190.6,
+      "gpu_before": "49, 315.48 W, 2685 MHz, 10501 MHz, 1283 MiB, 1 %",
+      "gpu_after": "53, 406.13 W, 2670 MHz, 10501 MHz, 1283 MiB, 2 %",
+      "engine_start_s": 4.1
+    },
+    {
+      "rep": 1,
+      "arm": "graph",
+      "returncode": 0,
+      "wall_s": 5.707749799999874,
+      "decode_tokens_per_second": 190.8,
+      "gpu_before": "53, 406.13 W, 2670 MHz, 10501 MHz, 1283 MiB, 2 %",
+      "gpu_after": "49, 339.41 W, 2685 MHz, 10501 MHz, 1283 MiB, 1 %",
+      "engine_start_s": 4.1
+    },
+    {
+      "rep": 1,
+      "arm": "eager",
+      "returncode": 0,
+      "wall_s": 5.416751800003112,
+      "decode_tokens_per_second": 163.2,
+      "gpu_before": "49, 339.41 W, 2685 MHz, 10501 MHz, 1283 MiB, 1 %",
+      "gpu_after": "49, 314.15 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "engine_start_s": 3.3
+    },
+    {
+      "rep": 2,
+      "arm": "eager",
+      "returncode": 0,
+      "wall_s": 5.44762289999926,
+      "decode_tokens_per_second": 163.8,
+      "gpu_before": "49, 314.15 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "gpu_after": "49, 315.21 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "engine_start_s": 3.4
+    },
+    {
+      "rep": 2,
+      "arm": "graph",
+      "returncode": 0,
+      "wall_s": 5.725417900001048,
+      "decode_tokens_per_second": 190.8,
+      "gpu_before": "49, 315.21 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "gpu_after": "59, 421.43 W, 2670 MHz, 10501 MHz, 1286 MiB, 36 %",
+      "engine_start_s": 4.1
+    },
+    {
+      "rep": 3,
+      "arm": "graph",
+      "returncode": 0,
+      "wall_s": 5.730743699998129,
+      "decode_tokens_per_second": 190.5,
+      "gpu_before": "59, 421.43 W, 2670 MHz, 10501 MHz, 1286 MiB, 36 %",
+      "gpu_after": "50, 361.05 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "engine_start_s": 4.1
+    },
+    {
+      "rep": 3,
+      "arm": "eager",
+      "returncode": 0,
+      "wall_s": 5.472276600004989,
+      "decode_tokens_per_second": 163.5,
+      "gpu_before": "50, 361.05 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "gpu_after": "50, 332.86 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "engine_start_s": 3.3
+    },
+    {
+      "rep": 4,
+      "arm": "eager",
+      "returncode": 0,
+      "wall_s": 5.397650800005067,
+      "decode_tokens_per_second": 163.5,
+      "gpu_before": "50, 332.86 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "gpu_after": "50, 319.07 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "engine_start_s": 3.3
+    },
+    {
+      "rep": 4,
+      "arm": "graph",
+      "returncode": 0,
+      "wall_s": 5.7193805999995675,
+      "decode_tokens_per_second": 190.0,
+      "gpu_before": "50, 319.07 W, 2685 MHz, 10501 MHz, 1286 MiB, 1 %",
+      "gpu_after": "62, 438.14 W, 2670 MHz, 10501 MHz, 1284 MiB, 100 %",
+      "engine_start_s": 4.1
+    }
+  ]
+}

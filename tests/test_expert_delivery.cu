@@ -378,6 +378,10 @@ int lent_landing(DeviceContext& device, bool disk, const std::filesystem::path& 
 
 int failure_control(DeviceContext& device, const std::filesystem::path& path, bool omit_wait) {
     Fixture fixture(true, path);
+    // Keep the original extents but shorten the file before opening read handles: Windows
+    // share-read handles forbid resize_file. The first service read still fails asynchronously
+    // and must release the GPU wait without publishing an incomplete expert.
+    if (!omit_wait) { std::filesystem::resize_file(fixture.paths.front(), 0); }
     ExpertDeliveryOptions options;
     options.pair_capacity = kPairs;
     options.cache_bytes = 0;
@@ -394,7 +398,6 @@ int failure_control(DeviceContext& device, const std::filesystem::path& path, bo
     CUDA_CHECK(cudaStreamSynchronize(device.stream));
     std::fill(routes.begin(), routes.end(), 0);
     ids.copy_from_host(routes.data(), ids.bytes);
-    if (!omit_wait) { std::filesystem::resize_file(fixture.paths.front(), 0); }
     const auto call = delivery.begin(0, static_cast<const std::int32_t*>(ids.p), kPairs, device.stream);
     if (omit_wait) {
         inspect<<<kPairs, 32, 0, device.stream>>>(delivery.tables(0), call.missing_ids, kPairs, 0,
@@ -1022,6 +1025,7 @@ int slot_pools(DeviceContext& device) {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) { return 77; }
     try {
@@ -1034,6 +1038,9 @@ int main(int argc, char** argv) {
                 std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(path);
         struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{path};
+        if (argc == 2 && std::string(argv[1]) == "--cpu-share-disk") {
+            return cpu_share(device, true, 0.5, path);
+        }
         if (argc == 2 && std::string(argv[1]) == "--no-ready-wait") {
             return failure_control(device, path, true);
         }

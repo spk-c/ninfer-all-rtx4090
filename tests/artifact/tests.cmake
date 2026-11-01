@@ -49,3 +49,8 @@ set_tests_properties(
 set_tests_properties(
   ninfer_artifact_materialization_test
   PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(NAME ninfer_artifact_selected_upload_stress_test
+  COMMAND ninfer_artifact_materialization_test --selected-stress)
+set_tests_properties(ninfer_artifact_selected_upload_stress_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)

@@ -582,6 +582,11 @@ Materializer 按实际使用的 parent 去重，安排 device/host backing，再
 I/O 读取，再复制到目标位置，不经过 page cache。Pinned 块是普通匿名页（`HostPages`），由这些
 复制在多个线程上缺页分配，读完后整体注册一次；`cudaHostAlloc` 在单线程上清零并锁定同样大小的
 内存要慢数倍。Device 对象经 pinned staging 以 direct I/O 上传。
+
+选中对象的 padding 清零必须先于其文件 H2D 上传，在同一 rank 的 transfer stream 上排序；
+tail 也在该 stream 清零。完成或失败退出时先排空该 stream，再释放 staging。不能依赖
+default stream 的 memset 去排序 nonblocking transfer stream：晚到的清零会覆盖已经上传
+的对象。即使 rank 只有转码对象与零 tail、没有文件上传区间，也必须完成其清零后才能发布 backing。
 辅助 scalar、索引等需要 owning Host 值的用途可以按 Binding 读取对应元素区间，保持其数值类型。
 Reader 的 JSON 与符号索引用于冷加载，运行时使用解析后的引用与直接调用。
 

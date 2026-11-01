@@ -101,6 +101,11 @@ struct CopyRange {
     std::byte* destination = nullptr;
 };
 
+struct ZeroRange {
+    std::byte* destination = nullptr;
+    std::uint64_t bytes = 0;
+};
+
 // Binds a pipeline rank for a scope, and does nothing at all for the primary one: rank 0 is
 // already current, and leaving the single-device path without even a redundant cudaSetDevice is
 // what keeps an offload-free load exactly what it was.
@@ -435,6 +440,7 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
     UploadTotals totals;
     const std::size_t rank_count = bases.size();
     std::vector<std::vector<CopyRange>> ranges_by_rank(rank_count);
+    std::vector<std::vector<ZeroRange>> zeroes_by_rank(rank_count);
     std::vector<const DevicePlacement*> transcoded;
     std::vector<const DevicePlacement*> rebased;
     // Bytes of selected pieces that no run fills: the alignment between a small piece's planes,
@@ -446,9 +452,8 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
         }
         std::byte* const destination = bases[placement.rank] + placement.offset;
         if (placement.tail != 0) {
-            const ScopedRank bound(device, placement.rank);
-            check_cuda(cudaMemset(destination + placement.bytes, 0, placement.tail),
-                       "zero a device tail");
+            zeroes_by_rank[placement.rank].push_back(
+                {destination + placement.bytes, placement.tail});
         }
         if (placement.transcode) {
             transcoded.push_back(&placement);
@@ -466,8 +471,7 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
                 covered = checked_add(covered, run.bytes, "selected bytes");
             }
             if (covered < placement.bytes) {
-                const ScopedRank bound(device, placement.rank);
-                check_cuda(cudaMemset(destination, 0, placement.bytes), "zero a selected piece");
+                zeroes_by_rank[placement.rank].push_back({destination, placement.bytes});
                 zeroed = checked_add(zeroed, placement.bytes - covered, "zeroed bytes");
             }
             for (const SelectedRun& run : runs) {
@@ -537,10 +541,24 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
     // the original single pass, on the original stream, with the original slot pool.
     for (std::size_t rank = 0; rank < rank_count; ++rank) {
         auto& ranges = ranges_by_rank[rank];
-        if (ranges.empty()) { continue; }
-        uploaded_any = true;
+        if (ranges.empty() && zeroes_by_rank[rank].empty()) { continue; }
         const ScopedRank bound(device, rank);
         const cudaStream_t transfer_stream       = device.transfer_stream_for_rank(rank);
+        std::vector<std::unique_ptr<Slot>> slots;
+        // Drain before the staging slots are destroyed, including allocation/error exits.
+        TransferCompletion completion{transfer_stream};
+        // A default-stream memset has no ordering with this nonblocking upload stream. Under
+        // load it can execute after the H2D and erase selected weight bytes. Both operations
+        // belong to the rank's upload queue, including a rank that only needs a zero tail.
+        for (const ZeroRange& range : zeroes_by_rank[rank]) {
+            check_cuda(cudaMemsetAsync(range.destination, 0, range.bytes, transfer_stream),
+                       "zero device upload padding");
+        }
+        if (ranges.empty()) {
+            completion.finish();
+            continue;
+        }
+        uploaded_any = true;
         const std::vector<RepeatedRange> repeats = take_repeated_ranges(ranges);
         const std::vector<ReadSpan> spans        = direct_spans(ranges);
         std::uint64_t aligned_bytes              = 0;
@@ -554,7 +572,6 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
             static_cast<std::size_t>(std::min<std::uint64_t>(kSlotBytes, aligned_bytes));
         const auto slot_count = static_cast<std::size_t>(
             std::min<std::uint64_t>(kMaximumSlotCount, 1 + (aligned_bytes - 1) / slot_bytes));
-        std::vector<std::unique_ptr<Slot>> slots;
         // Passes run one after another and free their slots in between, so the process high-water
         // mark is the largest pass, not their sum.
         totals.peak_staging_bytes =
@@ -565,7 +582,6 @@ UploadTotals upload_device_bytes(const Reader& reader, std::span<const DevicePla
             slots.push_back(std::make_unique<Slot>(slot_bytes));
         }
         pin_phase.complete();
-        TransferCompletion completion{transfer_stream};
         std::size_t next_slot  = 0;
         std::size_t next_range = 0;
         LineBatch lines;

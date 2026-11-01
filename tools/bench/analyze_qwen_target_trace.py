@@ -1,4 +1,4 @@
-"""Compare full stored BF16 target logits and audit greedy acceptance, without NumPy."""
+"""Compare stored BF16/FP32 target logits and audit greedy acceptance, without NumPy."""
 import argparse
 import array
 import json
@@ -14,7 +14,14 @@ class NonfiniteLogitsError(ValueError):
 
 
 def tensor(folder, record):
-    a=array.array('H' if record['name'] in ['logits','hidden'] else 'i')
+    # The public GGUF head can produce FP32 logits. Interpreting their halves as
+    # BF16 invents NaNs and doubles the vocabulary extent.
+    dtype = record.get('dtype', 0 if record['name'] in ['logits','hidden'] else 2)
+    try:
+        code = {0: 'H', 1: 'f', 2: 'i'}[dtype]
+    except KeyError as error:
+        raise ValueError(f'unsupported trace dtype {dtype}') from error
+    a=array.array(code)
     a.frombytes((folder/record['file']).read_bytes())
     return a
 
@@ -27,6 +34,8 @@ def groups(folder):
 
 
 def floats(values):
+    if getattr(values, 'typecode', None) == 'f':
+        return values
     bits=array.array('I',(v<<16 for v in values)); f=array.array('f'); f.frombytes(bits.tobytes())
     return f
 

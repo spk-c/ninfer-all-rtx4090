@@ -59,7 +59,8 @@ OUT = ROOT / "out/graph_allowance"
 SUMMARY = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9 _/-]*?)\s{2,}(.+?)\s*$")
 # A bare "B" unit is not a formatting curiosity: the engine clamps a negative device-wide delta to
 # zero, so "0 B" is the signature of another process freeing VRAM during capture. It must parse.
-GRAPH_LINE = re.compile(r"CUDA Graph memory\s+([\d.]+)\s*([KMG]?i?B)\s*/\s*([\d.]+)\s*([KMG]?i?B)")
+GRAPH_USED = re.compile(r"CUDA Graph used\s+([\d.]+)\s*([KMG]?i?B)")
+GRAPH_ALLOWANCE = re.compile(r"CUDA Graph allowance\s+([\d.]+)\s*([KMG]?i?B)")
 GRAPH_ERROR = re.compile(
     r"CUDA Graph preparation consumed (\d+) bytes, exceeding the planned allowance of (\d+) bytes"
 )
@@ -93,7 +94,8 @@ def parse_bytes(value: str, unit: str) -> int:
 
 
 def measure(cli: Path, model: Path, capacity: int, spec: str | None, draft_tokens: int,
-            kv_dtype: str, prefill_chunk: int) -> dict:
+            kv_dtype: str, prefill_chunk: int, gdn_state_fp16: bool = False,
+            ngram_draft_tokens: int = 0) -> dict:
     command = [
         str(cli), str(model),
         "--prompt", "hi",
@@ -104,26 +106,32 @@ def measure(cli: Path, model: Path, capacity: int, spec: str | None, draft_token
         "--max-new", "1",
         "--greedy", "--no-thinking",
     ]
+    if gdn_state_fp16:
+        command += ["--gdn-state-fp16"]
     if spec:
-        command += ["--spec", spec, "--draft-tokens", str(draft_tokens), "--lm-head-draft"]
+        command += ["--spec", spec, "--draft-tokens", str(draft_tokens), "--lm-head-draft",
+                    "--ngram-draft-tokens", str(ngram_draft_tokens)]
 
+    started_unix_seconds = time.time()
     started = time.perf_counter()
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", check=False)
     wall = time.perf_counter() - started
 
     observed = allowance = None
     # A run that aborts still reports both figures, in exact bytes rather than the summary's
     # two-decimal MiB, so failures are the more precise data points.
     # Windows CLI and different logging backends may write the diagnostic to stdout.
-    combined = result.stderr + "\n" + result.stdout
+    combined = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr + "\n" + result.stdout)
     error = GRAPH_ERROR.search(combined)
     if error:
         observed, allowance = int(error.group(1)), int(error.group(2))
     else:
-        line = GRAPH_LINE.search(combined)
-        if line:
-            observed = parse_bytes(line.group(1), line.group(2))
-            allowance = parse_bytes(line.group(3), line.group(4))
+        used = GRAPH_USED.search(combined)
+        planned = GRAPH_ALLOWANCE.search(combined)
+        if used and planned:
+            observed = parse_bytes(used.group(1), used.group(2))
+            allowance = parse_bytes(planned.group(1), planned.group(2))
 
     return {
         "capacity": capacity,
@@ -135,6 +143,9 @@ def measure(cli: Path, model: Path, capacity: int, spec: str | None, draft_token
         # This table only models ordinary graphs, not MTP/DFlash2 variants.
         "predicted_graphs": ordinary_graph_count(capacity) if spec is None else None,
         "wall_s": round(wall, 2),
+        "started_unix_seconds": started_unix_seconds,
+        "completed_unix_seconds": time.time(),
+        "output": combined,
         "stderr_tail": result.stderr.strip().splitlines()[-1] if result.returncode else "",
         # A run that neither reports a figure nor aborts is the one case this sweep cannot
         # interpret, so keep its output rather than recording a silent None.
@@ -152,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--draft-tokens", type=int, default=DRAFT_TOKENS)
     parser.add_argument("--kv-dtype", default=KV_DTYPE)
     parser.add_argument("--prefill-chunk", type=int, default=PREFILL_CHUNK)
+    parser.add_argument("--gdn-state-fp16", action="store_true")
+    parser.add_argument("--ngram-draft-tokens", type=int, default=0,
+                        help="explicit copy-proposal width; 0 measures only the named drafter")
     parser.add_argument("--output", type=Path, default=OUT)
     args = parser.parse_args(argv)
     spec = None if args.spec == "none" else args.spec
@@ -161,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--capacities must contain positive integers")
     if args.draft_tokens < 1 or args.prefill_chunk < 1:
         parser.error("--draft-tokens and --prefill-chunk must be positive")
+    if not 0 <= args.ngram_draft_tokens <= 63:
+        parser.error("--ngram-draft-tokens must be in 0..63")
     if not args.cli.is_file():
         parser.error(f"engine binary not found: {args.cli}")
     if not args.model.is_file():
@@ -173,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     for capacity in args.capacities:
         runs = [
             measure(args.cli, args.model, capacity, spec, args.draft_tokens,
-                    args.kv_dtype, args.prefill_chunk)
+                    args.kv_dtype, args.prefill_chunk, args.gdn_state_fp16,
+                    args.ngram_draft_tokens)
             for _ in range(args.repeats)
         ]
         rows.extend(runs)
@@ -187,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
         spread = max(seen) - min(seen)
         allowance = next(r["allowance_bytes"] for r in runs if r["allowance_bytes"] is not None)
         blocked = sum(1 for r in runs if r["graph_blocked"])
-        verdict = "ok" if blocked == 0 and len(seen) == len(runs) else (
+        failed = sum(r["returncode"] != 0 for r in runs)
+        verdict = "ok" if failed == 0 and len(seen) == len(runs) else (
             f"BLOCKED {blocked}/{len(runs)}" if blocked else "INCOMPLETE"
         )
         graph_label = "n/a" if graphs is None else str(graphs)
@@ -202,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
             "cli": str(args.cli), "model": str(args.model), "repeats": args.repeats,
             "spec": spec, "draft_tokens": args.draft_tokens if spec else None,
             "kv_dtype": args.kv_dtype, "prefill_chunk": args.prefill_chunk,
+            "gdn_state_fp16": args.gdn_state_fp16,
+            "ngram_draft_tokens": args.ngram_draft_tokens,
             "capacities": args.capacities,
         },
         "runs": rows,
@@ -209,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     destination = args.output / f"graph-allowance-{args.spec}-{args.kv_dtype}.json"
     destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"\nwrote {destination}")
-    return 0 if all(r["observed_bytes"] is not None for r in rows) else 2
+    return 0 if all(r["returncode"] == 0 and r["observed_bytes"] is not None
+                    for r in rows) else 2
 
 
 if __name__ == "__main__":

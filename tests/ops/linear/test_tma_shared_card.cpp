@@ -8,6 +8,8 @@
 // concurrent output with its reference bit for bit. On an RTX 5090 the FP8 shares reach the A8
 // route's 32x64, 64x64, 64x128 and 128x64 tiles, where the race showed most; the NVFP4 share runs
 // the A4 TMA route, which has the same release.
+// On builds without those instructions, retain the concurrent-stream ownership check using the
+// admitted A16 policy. That qualifies the portable route, not Blackwell's TMA stage release.
 
 #include "core/arena.h"
 #include "core/device.h"
@@ -40,6 +42,13 @@ struct Share {
     std::uint32_t seed;
 };
 
+bool tma_routes = false;
+
+ops::LinearPolicy share_policy(QType qtype) {
+    if (!tma_routes) { return ops::LinearPolicy::A16Only; }
+    return qtype == QType::NVFP4 ? ops::LinearPolicy::AllowA4 : ops::LinearPolicy::AllowA8;
+}
+
 struct Operands {
     DeviceBuffer weight_bytes;
     Weight weight{};
@@ -50,8 +59,7 @@ struct Operands {
 
     Operands(const Share& share, std::size_t capacity)
         : workspace(capacity),
-          policy(share.qtype == QType::NVFP4 ? ops::LinearPolicy::AllowA4
-                                             : ops::LinearPolicy::AllowA8),
+          policy(share_policy(share.qtype)),
           outputs(static_cast<std::size_t>(share.rows) * kTokens) {
         qw::PatternedWeightOptions options;
         if (share.qtype == QType::NVFP4) {
@@ -89,9 +97,7 @@ struct Operands {
 std::size_t capacity(const Share& share) {
     return std::max<std::size_t>(
         ops::linear_workspace_capacity_bytes(share.qtype, share.rows, kK,
-                                             share.qtype == QType::NVFP4
-                                                 ? ops::LinearPolicy::AllowA4
-                                                 : ops::LinearPolicy::AllowA8,
+                                             share_policy(share.qtype),
                                              kTokens, kTokens),
         256);
 }
@@ -148,6 +154,17 @@ int main() {
         return 77;
     }
     try {
+        int device = 0;
+        cudaDeviceProp properties{};
+        CUDA_CHECK(cudaGetDevice(&device));
+        CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
+        tma_routes = properties.major >= 10;
+#if defined(NINFER_SM8X_COMPAT) && !defined(NINFER_SM120_FP8)
+        tma_routes = false;
+#endif
+        if (!tma_routes) {
+            std::cout << "Concurrent A16 shares; this device/build cannot qualify Blackwell TMA stages\n";
+        }
         const QType fp8 = QType::FP8_E4M3FN_ROW_BF16;
         int failures    = 0;
         for (const std::int32_t rows : {256, 512, 704, 1024})
@@ -155,7 +172,7 @@ int main() {
         failures += run_pair({fp8, 1024, 6107U}, {fp8, 3072, 6211U});
         failures += run_pair({QType::NVFP4, 8704, 6113U}, {QType::NVFP4, 8704, 6217U});
         failures += run_pair({QType::NVFP4, 8704, 6119U}, {fp8, 1024, 6221U});
-        std::cout << (failures == 0 ? "OK" : "FAIL") << " TMA shares on one card\n";
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " concurrent Linear shares on one card\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << "TMA shares on one card: " << error.what() << '\n';

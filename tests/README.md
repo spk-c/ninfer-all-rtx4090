@@ -32,6 +32,12 @@ added up to tens of GB. Each test keeps its name as a program in the bundle and 
 own process under CTest. Run one by hand with `build/tests/ninfer_tests <name> [args...]`;
 `ninfer_tests --list` prints the names. `ninfer_jinja_test` and
 `ninfer_artifact_materialization_test` stay standalone because Python tests invoke them by path.
+`ninfer_artifact_selected_upload_stress_test` runs that standalone binary with `--selected-stress`:
+256 rounds of selected uploads with alignment padding and panel layouts, checked byte-for-byte
+against Host selection and an independent CPU permutation. It guards the default-stream memset
+versus nonblocking-upload race. The ordinary materialization case also covers a transcode-only
+rank's zero tail. Build `ninfer_artifact_materialization_test` explicitly for focused changes;
+building the bundle alone does not rebuild this standalone test.
 A test's helpers and entry function must be internal (anonymous namespace) so that programs do not
 collide at link time. The mechanism is `cmake/NinferBundles.cmake`.
 `ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
@@ -88,6 +94,11 @@ Enable uniform floating-point error records when establishing or reviewing an Op
 NINFER_OP_REPORT_STATS=1 \
   ctest --test-dir build -V -R '^ninfer_(rmsnorm|softmax_attention)_test$'
 ```
+
+`ninfer_device_buffer_visibility_test` also checks the core mapped-host byte transfer exactly,
+including output guards, odd lengths, a grid-stride tail, changed source bytes across Graph
+replays and source bounds. This transfer keeps Windows hybrid-expert exchange payloads off the
+copy-engine queue while the supervisor uses that queue to prepare the request.
 
 Every participating comparison emits one `OP_ERROR_STATS` record containing the stable case label,
 actual error, active limit, and error-to-limit ratio. The switch changes reporting only; the same
@@ -305,6 +316,14 @@ Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. 
 tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as `vision`,
 `pressure-resume` or `concurrent`; the default is `all`. These integration checks
 use behavior and state accounting rather than another numerical path's generated tokens as a golden.
+The hybrid test accepts `NINFER_HYBRID_KV_DTYPE=rk4v4` and `NINFER_HYBRID_GDN_FP16=1`.
+Select `NINFER_HYBRID_REAL_SCENARIO=restore-exact-dflash2`, `turns-protocol` or
+`persist-dflash2` to qualify the respective tier restore, conversation or persistence behavior.
+The DFlash2 scenarios use five draft tokens. Flexible snapshot frontiers depend on the device's
+aligned prefill chunk; tier restores must agree and stay within the actual common prefix.
+`persist-dflash2` also checks incompatible identities, a smaller Host tier and abandoned saves.
+The concurrent Linear share test uses the admitted A16 route on SM89 and retains A8/A4 TMA
+checks on a supporting build/device; an A16 pass does not qualify Blackwell TMA stages.
 
 The capability-evaluation coordinator has its own environment and unittest entry point:
 

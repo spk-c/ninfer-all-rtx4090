@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -87,6 +91,32 @@ int run() {
             const ninfer::QueuedFileRead bad_file{2, 0, output[0]};
             refused<std::invalid_argument>([&] { queue->read(std::span(&bad_file, 1)); });
             queue->read({});
+            // Priming may run on a loader thread before a service worker takes the queue.
+            // The old caller can spin on a GPU/host handshake rather than block in the OS;
+            // its former IOCP association must not prevent the new reader from completing.
+            std::atomic<bool> finished{false};
+            std::exception_ptr worker_error;
+            std::thread worker([&] {
+                try { queue->read(reads); }
+                catch (...) { worker_error = std::current_exception(); }
+                finished.store(true, std::memory_order_release);
+            });
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!finished.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::atomic_signal_fence(std::memory_order_seq_cst);
+            }
+            const bool completed_while_caller_runnable = finished.load(std::memory_order_acquire);
+            // Blocking here also lets the old single-concurrency IOCP drain, so a regression
+            // fails instead of leaving a test thread stuck forever.
+            worker.join();
+            if (worker_error) { std::rethrow_exception(worker_error); }
+            require(completed_while_caller_runnable,
+                    "reader handoff blocked behind the prior runnable caller");
+            for (const auto& read : reads) {
+                require(std::equal(read.destination.begin(), read.destination.end(),
+                                   fixture.bytes.begin() + read.offset), "handoff bytes differ");
+            }
             std::cout << queue->backend() << " direct=" << direct << " depth=" << depth << " PASS\n";
         }
     }

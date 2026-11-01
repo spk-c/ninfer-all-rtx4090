@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 
@@ -50,24 +51,24 @@ bool is_geforce(const PeerDeviceFacts& facts) {
 
 } // namespace
 
-PeerDeviceFacts read_peer_device_facts(std::string_view sysfs_root, std::string_view name,
-                                       std::string_view pci_bus_id, std::uint64_t memory_bytes) {
+PeerDeviceFacts parse_peer_device_facts(std::string_view name, std::string_view pci_bus_id,
+                                        std::uint64_t memory_bytes,
+                                        std::optional<std::string_view> iommu_type,
+                                        std::optional<std::string_view> resource_text) {
     PeerDeviceFacts facts;
     facts.name         = std::string(name);
     facts.pci_bus_id   = std::string(pci_bus_id);
     facts.memory_bytes = memory_bytes;
-    const std::optional<std::string> address = sysfs_address(pci_bus_id);
-    if (!address) { return facts; }
-    const std::string device = std::string(sysfs_root) + "/bus/pci/devices/" + *address;
-
-    if (std::ifstream type(device + "/iommu_group/type"); type) {
+    if (iommu_type) {
+        std::istringstream type{std::string(*iommu_type)};
         std::string text;
         std::getline(type, text);
         facts.iommu_type = trimmed(text);
     }
     // One line per BAR: start, end and flags in hex; an unused BAR reads all zeros. A 64-bit BAR
     // takes two BAR registers, so BAR1 is the second line and the third stays zero.
-    if (std::ifstream resource(device + "/resource"); resource) {
+    if (resource_text) {
+        std::istringstream resource{std::string(*resource_text)};
         std::string line;
         for (int index = 0; index < 2 && std::getline(resource, line); ++index) {
             if (index != 1) { continue; }
@@ -79,6 +80,25 @@ PeerDeviceFacts read_peer_device_facts(std::string_view sysfs_root, std::string_
         }
     }
     return facts;
+}
+
+PeerDeviceFacts read_peer_device_facts(std::string_view sysfs_root, std::string_view name,
+                                       std::string_view pci_bus_id, std::uint64_t memory_bytes) {
+    const auto address = sysfs_address(pci_bus_id);
+    if (!address) {
+        return parse_peer_device_facts(name, pci_bus_id, memory_bytes, std::nullopt, std::nullopt);
+    }
+    const std::string device = std::string(sysfs_root) + "/bus/pci/devices/" + *address;
+    const auto read = [](const std::string& path) -> std::optional<std::string> {
+        std::ifstream input(path);
+        if (!input) { return std::nullopt; }
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    const auto type = read(device + "/iommu_group/type");
+    const auto resource = read(device + "/resource");
+    return parse_peer_device_facts(name, pci_bus_id, memory_bytes,
+        type ? std::optional<std::string_view>(*type) : std::nullopt,
+        resource ? std::optional<std::string_view>(*resource) : std::nullopt);
 }
 
 std::string peer_preflight_refusal(const PeerDeviceFacts& from, const PeerDeviceFacts& to) {

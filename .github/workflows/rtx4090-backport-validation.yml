@@ -1,0 +1,51 @@
+name: RTX 4090 staged backport validation
+on:
+  push:
+    branches:
+      - 'feature/rtx4090-upstream-stability-cache-profiling'
+    paths:
+      - 'src/core/layout.cpp'
+      - 'tests/test_layout.cpp'
+      - 'tests/test_openai_schema.cpp'
+      - 'tools/bench/rtx4090_kernel_share.py'
+      - 'tests/test_rtx4090_kernel_share.py'
+      - 'scripts/measure-rtx4090-regressions.ps1'
+      - '.github/workflows/rtx4090-backport-validation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  python-performance-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Run GPU-free graph-memory and IQ4_XS tests
+        run: >-
+          python -m pytest -q
+          tests/test_graph_allowance_sweep.py
+          tests/test_compare_graph_allowance_sweeps.py
+          tests/test_rtx4090_kernel_share.py
+      - name: Check Python syntax
+        run: python -m py_compile tools/bench/rtx4090_kernel_share.py tests/test_rtx4090_kernel_share.py
+
+  powershell-parse:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse the RTX 4090 measurement script
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $pwd 'scripts/measure-rtx4090-regressions.ps1'),
+            [ref]$tokens, [ref]$errors)
+          if($errors.Count){throw ($errors | Out-String)}
+          Write-Host 'PowerShell syntax validated'

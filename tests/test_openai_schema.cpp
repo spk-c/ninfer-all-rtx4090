@@ -1648,6 +1648,35 @@ int test_prompt_cache_key_grants_long_anchor() {
     keyed["prompt_cache_key"] = "pi-session-1";
     failures += check(parse(keyed).generation.private_cache_boundary_at_prompt_end,
                       "a Chat prompt_cache_key grants a long anchor at the end of the prompt");
+    // Qwen Code extends an assistant/tool exchange across multiple requests without
+    // appending a new user turn. Both streamed and aggregate Chat requests must retain
+    // the private end-of-prompt anchor rather than re-prefilling the tool exchange.
+    Json tools = base_request();
+    tools["prompt_cache_key"] = "qwen-code-session-1";
+    tools["messages"] = Json::array(
+        {Json{{"role", "user"}, {"content", "Read the build log"}},
+         Json{{"role", "assistant"},
+              {"content", nullptr},
+              {"tool_calls", Json::array(
+                  {Json{{"id", "call_1"},
+                        {"type", "function"},
+                        {"function", Json{{"name", "read_log"},
+                                           {"arguments", R"({"file":"build.log"})"}}}}})}},
+         Json{{"role", "tool"}, {"tool_call_id", "call_1"}, {"content", "Done"}}});
+    for (const bool stream : {false, true}) {
+        tools["stream"] = stream;
+        const auto parsed = parse(tools);
+        failures += check(parsed.generation.private_cache_boundary_at_prompt_end &&
+                              parsed.generation.has_tool_history() && parsed.stream == stream,
+                          "prompt_cache_key must anchor both streaming and aggregate tool exchanges");
+    }
+    tools["prompt_cache_options"] = Json{{"mode", "explicit"}};
+    failures += check(parse(tools).generation.private_cache_boundary_at_prompt_end,
+                      "explicit cache mode must not erase the keyed private continuation anchor");
+
+    keyed["prompt_cache_key"] = 42;
+    failures += check(api_error([&] { (void)parse(keyed); }).param == "prompt_cache_key",
+                      "a numeric prompt_cache_key must be rejected instead of silently ignored");
     keyed["prompt_cache_key"] = nullptr;
     failures += check(!parse(keyed).generation.private_cache_boundary_at_prompt_end,
                       "a null prompt_cache_key names no conversation");

@@ -30,6 +30,7 @@
 
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/decode_graph.h"
 
 #include <cuda_runtime.h>
 
@@ -66,6 +67,49 @@ int check(cudaError_t status, const char* what) {
     return 1;
 }
 
+int check_mapped_copy(cudaStream_t stream) {
+    for (const std::size_t bytes : {std::size_t(1), std::size_t(255), std::size_t(256),
+                                    std::size_t(257), std::size_t(4099), std::size_t(1048593)}) {
+        PinnedHostBuffer source(bytes, true);
+        DeviceBuffer destination(bytes + 16);
+        auto* input = static_cast<unsigned char*>(source.data());
+        DecodeGraphDefinition definition;
+        definition.capture(stream, [&] {
+            source.copy_to_device_using_kernel(static_cast<unsigned char*>(destination.p) + 7,
+                                                bytes, stream);
+        });
+        DecodeGraphExecutable graph;
+        graph.instantiate(definition);
+        for (unsigned repeat = 0; repeat < 3; ++repeat) {
+            for (std::size_t at = 0; at < bytes; ++at) {
+                input[at] = static_cast<unsigned char>((at * 37 + repeat * 19) % 251);
+            }
+            destination.fill(0xA5);
+            if (repeat == 0) {
+                source.copy_to_device_using_kernel(static_cast<unsigned char*>(destination.p) + 7,
+                                                    bytes, stream);
+            } else { graph.launch(stream); }
+            if (check(cudaStreamSynchronize(stream), "mapped copy sync")) { return 1; }
+            std::vector<unsigned char> actual(bytes + 16);
+            destination.copy_to_host(actual.data(), actual.size());
+            for (std::size_t at = 0; at < actual.size(); ++at) {
+                const auto expected = at >= 7 && at < bytes + 7 ? input[at - 7] : 0xA5;
+                if (actual[at] != expected) {
+                    std::printf("FAIL mapped exact copy: size=%zu repeat=%u at=%zu\n", bytes, repeat, at);
+                    return 1;
+                }
+            }
+        }
+        bool rejected = false;
+        try { source.copy_to_device_using_kernel(destination.p, bytes + 1, stream); }
+        catch (const std::out_of_range&) { rejected = true; }
+        if (!rejected) { std::printf("FAIL mapped source bounds\n"); return 1; }
+        source.copy_to_device_using_kernel(nullptr, 0, stream);
+    }
+    std::printf("MAPPED_HOST_EXACT_COPY_PASS\n");
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -79,6 +123,7 @@ int main() {
     cudaStream_t stream = nullptr;
     if (check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "stream create"))
         return 1;
+    if (check_mapped_copy(stream)) { return 1; }
 
     DeviceBuffer payload(sizeof(std::uint16_t) * kElements);
     DeviceBuffer counter(sizeof(int));

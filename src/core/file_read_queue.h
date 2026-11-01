@@ -17,6 +17,8 @@ struct QueuedFileRead {
 // A bounded OS queue for positioned reads into host memory. Call read() from the owning
 // worker to overlap a batch with device execution. Output ranges must not overlap and stay
 // alive until read() returns. Even a failed read drains every submitted operation first.
+// Calls are serialized by the owner, but successive batches may move between threads
+// (for example, startup priming followed by the service worker).
 class FileReadQueue {
 public:
     // Linux: io_uring; Windows: overlapped reads and IOCP. Returns null when the OS or its

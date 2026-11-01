@@ -3,6 +3,8 @@
 #include "core/dtype.h"
 #include "core/tensor.h"
 
+#include <cuda_runtime_api.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -142,7 +144,7 @@ private:
 
 class PinnedHostBuffer {
 public:
-    explicit PinnedHostBuffer(std::size_t size_bytes);
+    explicit PinnedHostBuffer(std::size_t size_bytes, bool mapped = false);
     ~PinnedHostBuffer();
 
     PinnedHostBuffer(const PinnedHostBuffer&)            = delete;
@@ -152,6 +154,10 @@ public:
 
     void* data() const noexcept;
     std::size_t size() const noexcept;
+    // Exact, capturable transfer through an SM kernel, avoiding copy-engine queue dependencies
+    // around GPU/host handshakes. Requires a mapped allocation and borrows its bytes until done.
+    void copy_to_device_using_kernel(void* destination, std::size_t bytes,
+                                      cudaStream_t stream) const;
 
 private:
     void* data_       = nullptr;

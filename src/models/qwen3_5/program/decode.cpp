@@ -1,3 +1,4 @@
+#include "../../../../tools/bench/qwen_cache_trace.h"
 #include "models/qwen3_5/program/structured_round.h"
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
@@ -93,6 +94,7 @@ void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
                            DecodeGraphExecutable* executable) {
     auto body = ordinary_batch_body(state, batch_size, envelope);
     run_prepared(state, executable, body);
+    diagnostic::target_trace("plain", {{"logits", state.frame.logits.slice(1,0,batch_size)}, {"ids", state.frame.tokens.slice(0,0,batch_size)}, {"positions", state.frame.cache_positions.slice(0,0,batch_size)}, {"sampled", state.frame.sampled_tokens.slice(0,0,batch_size)}}, state.execution.device.stream);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

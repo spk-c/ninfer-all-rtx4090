@@ -97,7 +97,12 @@ struct FileReadQueue::Impl {
 #ifdef _WIN32
         positions.resize(slots.size());
         files.reserve(paths.size());
-        port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
+        // A batch has one caller, but priming and service may use different threads. IOCP keeps
+        // a prior dequeuer associated while it remains runnable (including a handshake spin),
+        // so a concurrency limit of one can prevent the new caller from draining its reads.
+        // The caller already owns batch serialization; the port must not throttle former callers.
+        port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0,
+                                      static_cast<DWORD>(std::numeric_limits<LONG>::max()));
         if (port == nullptr) { throw std::runtime_error("file read queue: cannot create IOCP"); }
         for (const auto& path : paths) {
             DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_RANDOM_ACCESS;

@@ -26,6 +26,12 @@ struct PeerDeviceFacts {
     std::optional<std::uint64_t> bar1_bytes; // second line of the device's sysfs resource file
 };
 
+// Interpret optional sysfs contents independently of the host filesystem. This also permits
+// qualification on hosts whose native filenames cannot represent PCI sysfs addresses.
+[[nodiscard]] PeerDeviceFacts parse_peer_device_facts(
+    std::string_view name, std::string_view pci_bus_id, std::uint64_t memory_bytes,
+    std::optional<std::string_view> iommu_type, std::optional<std::string_view> resource);
+
 // Reads the IOMMU group type and BAR1 size of `pci_bus_id` under `sysfs_root` (normally "/sys").
 // Missing files leave the fields unset.
 [[nodiscard]] PeerDeviceFacts read_peer_device_facts(std::string_view sysfs_root,

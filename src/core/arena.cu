@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <limits>
@@ -12,6 +13,14 @@
 
 namespace ninfer {
 namespace {
+
+__global__ void copy_mapped_bytes(unsigned char* destination, const unsigned char* source,
+                                  std::size_t bytes) {
+    for (std::size_t at = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; at < bytes;
+         at += std::size_t(gridDim.x) * blockDim.x) {
+        destination[at] = source[at];
+    }
+}
 
 std::string cuda_error_message(const char* prefix, cudaError_t err) {
     return std::string(prefix) + ": " + cudaGetErrorName(err) + ": " + cudaGetErrorString(err);
@@ -398,7 +407,7 @@ ScopedArenaRank::~ScopedArenaRank() noexcept {
     if (arena_.active_rank() != previous_rank_) { arena_.activate_rank(previous_rank_); }
 }
 
-PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
+PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes, bool mapped) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
     // A pending error from an earlier call is returned by whatever runs next, so read and clear it
@@ -411,7 +420,8 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     // capturable. (The error text below keeps its `cudaMallocHost` wording: launcher docs and the
     // test guard match on it.)
     void* ptr             = nullptr;
-    const cudaError_t err = cudaHostAlloc(&ptr, size_bytes, cudaHostAllocPortable);
+    const cudaError_t err = cudaHostAlloc(&ptr, size_bytes,
+        cudaHostAllocPortable | (mapped ? cudaHostAllocMapped : 0U));
     if (err != cudaSuccess) {
         // Say the size, and say which memory. `cudaErrorMemoryAllocation: out of memory` reads as
         // a VRAM shortfall and sends people to nvidia-smi when the shortfall is pinned system RAM.
@@ -493,5 +503,24 @@ PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept
 void* PinnedHostBuffer::data() const noexcept { return data_; }
 
 std::size_t PinnedHostBuffer::size() const noexcept { return size_; }
+
+void PinnedHostBuffer::copy_to_device_using_kernel(void* destination, std::size_t bytes,
+                                                   cudaStream_t stream) const {
+    if (bytes > size_) { throw std::out_of_range("mapped host copy exceeds source allocation"); }
+    if (bytes == 0) { return; }
+    if (!destination) { throw std::invalid_argument("mapped host copy destination is null"); }
+    void* source = nullptr;
+    const auto mapped = cudaHostGetDevicePointer(&source, data_, 0);
+    if (mapped != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("mapped host copy address failed", mapped));
+    }
+    const auto blocks = static_cast<unsigned>(std::min<std::size_t>((bytes - 1) / 256 + 1, 4096));
+    copy_mapped_bytes<<<blocks, 256, 0, stream>>>(static_cast<unsigned char*>(destination),
+        static_cast<const unsigned char*>(source), bytes);
+    const auto launched = cudaGetLastError();
+    if (launched != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("mapped host copy launch failed", launched));
+    }
+}
 
 } // namespace ninfer

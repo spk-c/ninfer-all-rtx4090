@@ -1,3 +1,4 @@
+#include "../../../../../tools/bench/qwen_cache_trace.h"
 // Hybrid prefix cache orchestration inside the Qwen3.5 Program
 // (docs/maintainer/hybrid-prefix-cache-spec.md). Admission (staging, Host restores, activation),
 // block publication, prefill taps and terminal snapshots; the index and physical bindings live in
@@ -1134,6 +1135,10 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
         request.prefill->elapsed_seconds =
             std::chrono::duration<double>(Clock::now() - started).count();
         request.lifecycle = Lifecycle::Prefilling;
+        if (reuse != 0 && std::getenv("NINFER_TARGET_TRACE")) {
+            if (transaction.restore_ticket) hybrid_->order_after_restore(transaction.restore_ticket, device.stream);
+            diagnostic::cache_state_trace("resume-"+std::to_string(reuse), *state_images, state_store->physical_slot(sequence.state.read), text_kv_view(sequence), decoder->text_kv.layers(), reuse, device.stream);
+        }
 
         HybridCacheCounters& counters = hybrid_->counters();
         ++counters.admissions;

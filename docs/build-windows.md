@@ -95,6 +95,14 @@ build option, untested:
 |---|---|
 | `NINFER_DIRECTSTORAGE=ON` | fetches the DirectStorage 1.3 runtime and offers `--disk-kv-directstorage` for disk-tier restores |
 
+Windows native hybrid-expert exchanges transfer their small prepared tables, partition masks
+and CPU result buffers through exact mapped-host copy kernels. Captured H2D copies after a
+GPU/host wait can otherwise block the copy queue ahead of the expert DMA that releases that
+wait. The expert weights still use DMA; the CPU/GPU partition and arithmetic stay with the
+model. `ninfer_device_buffer_visibility_test` checks exact copy bytes and guards, and
+`ninfer_qwen4_exp_hybrid_experts_test` checks the exchange against its FP64 oracle, fixed-partition
+Graph replay and cancellation. The transfer choice has not established an offload throughput gain.
+
 The other build options are in the [Linux guide](build-linux.md#build-options).
 
 For a dedicated RTX 4090 build with a selected CUDA 13.4 toolkit and reproducible

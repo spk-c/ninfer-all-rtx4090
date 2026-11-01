@@ -1,3 +1,4 @@
+#include "../../../../tools/bench/qwen_cache_trace.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/attention.h"
@@ -2102,6 +2103,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
                 project(last_xf, *lm_head_, logits, work_, s);
+                diagnostic::target_trace("prefill", {{"logits",logits},{"hidden",last_xf}},s);
                 // The token's logprob records, gathered before sampling adds it to the penalty
                 // counts; a device no-op unless the request asked for them.
                 if (sampling_config_ != nullptr && io_.logprob_active.data != nullptr) {

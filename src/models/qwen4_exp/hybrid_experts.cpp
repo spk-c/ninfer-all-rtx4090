@@ -22,6 +22,11 @@ namespace ninfer::models::qwen4_exp {
 namespace {
 constexpr std::size_t kHidden = 2560, kTop = 10, kCpuTokens = 16;
 constexpr std::uint64_t kMargin = 1536ULL << 20;
+#ifdef _WIN32
+constexpr bool kMappedExchange = true;
+#else
+constexpr bool kMappedExchange = false;
+#endif
 constexpr std::size_t aligned(std::size_t bytes) { return (bytes + 255) & ~std::size_t(255); }
 
 // Native experts' CPU products differ from the GPU's, so only an explicit share moves misses to
@@ -230,9 +235,9 @@ struct HybridExperts::Impl {
         routes = std::make_unique<PinnedHostBuffer>(kTop * tokens * sizeof(std::int32_t));
         activations = std::make_unique<PinnedHostBuffer>(kCpuTokens * kHidden * sizeof(std::uint16_t));
         route_weights = std::make_unique<PinnedHostBuffer>(kCpuTokens * kTop * sizeof(float));
-        selection = std::make_unique<PinnedHostBuffer>(kTop * tokens);
-        entries = std::make_unique<PinnedHostBuffer>(3 * max_experts * sizeof(Weight));
-        sum = std::make_unique<PinnedHostBuffer>(kCpuTokens * kHidden * sizeof(float));
+        selection = std::make_unique<PinnedHostBuffer>(kTop * tokens, kMappedExchange);
+        entries = std::make_unique<PinnedHostBuffer>(3 * max_experts * sizeof(Weight), kMappedExchange);
+        sum = std::make_unique<PinnedHostBuffer>(kCpuTokens * kHidden * sizeof(float), kMappedExchange);
         staging_bytes = std::max<std::size_t>(32U << 20, max_slot_bytes);
         if (std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return !layer.inputs.registered; })) {
             for (auto& block : staging) { block = std::make_unique<PinnedHostBuffer>(staging_bytes); }
@@ -592,10 +597,18 @@ struct HybridExperts::Impl {
                                 cpu_allowed ? 1U : 0U, stream);
         rank.handshake->wait_prepared(stream);
         const auto count = layer.inputs.experts.size();
-        CUDA_CHECK(cudaMemcpyAsync(rank.tables.p, entries->data(), 3 * count * sizeof(Weight),
-                                   cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(rank.parts.p, selection->data(), kTop * tokens,
-                                   cudaMemcpyHostToDevice, stream));
+        if constexpr (kMappedExchange) {
+            // A captured H2D node behind the prepared wait can occupy WDDM's copy queue before
+            // the supervisor's expert DMA, which must finish to release that wait. Keep these
+            // small handshake payloads on the compute queue instead of creating that cycle.
+            entries->copy_to_device_using_kernel(rank.tables.p, 3 * count * sizeof(Weight), stream);
+            selection->copy_to_device_using_kernel(rank.parts.p, kTop * tokens, stream);
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(rank.tables.p, entries->data(), 3 * count * sizeof(Weight),
+                                       cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(rank.parts.p, selection->data(), kTop * tokens,
+                                       cudaMemcpyHostToDevice, stream));
+        }
         banks.gate.experts = static_cast<const Weight*>(rank.tables.p);
         banks.up.experts = banks.gate.experts + count;
         banks.down.experts = banks.up.experts + count;
@@ -606,8 +619,12 @@ struct HybridExperts::Impl {
         }
         rank.handshake->wait_completed(stream);
         if (cpu_allowed) {
-            CUDA_CHECK(cudaMemcpyAsync(rank.cpu_sum.p, sum->data(), tokens * kHidden * 4,
-                                       cudaMemcpyHostToDevice, stream));
+            if constexpr (kMappedExchange) {
+                sum->copy_to_device_using_kernel(rank.cpu_sum.p, tokens * kHidden * 4, stream);
+            } else {
+                CUDA_CHECK(cudaMemcpyAsync(rank.cpu_sum.p, sum->data(), tokens * kHidden * 4,
+                                           cudaMemcpyHostToDevice, stream));
+            }
             const Tensor partial(rank.cpu_sum.p, DType::FP32, {static_cast<std::int32_t>(kHidden), static_cast<std::int32_t>(tokens)});
             ops::residual_add(partial, output, stream);
         }

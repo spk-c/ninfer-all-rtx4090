@@ -1,3 +1,4 @@
+#include "../../../../tools/bench/qwen_cache_trace.h"
 #include "runtime/contract/lookup_draft.h"
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
@@ -1345,6 +1346,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
                     split_frontier = *hybrid_split;
                 }
+                diagnostic::cache_trace_split(staged.cursor, split_frontier);
                 if (staged.drafter_frontier && *staged.drafter_frontier > staged.cursor &&
                     *staged.drafter_frontier < staged.prompt_tokens &&
                     (!split_frontier || *staged.drafter_frontier < *split_frontier)) {
@@ -1390,6 +1392,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 // Prompt transitions are canonical immediately. If this was the first write after
                 // an immutable source, close the Fork before potentially freezing a new rewrite.
                 settle_state_fork(sequence);
+                diagnostic::cache_state_trace("chunk-"+std::to_string(staged.cursor), *state_images, state_store->physical_slot(sequence.state.write), text_kv_view(sequence), decoder->text_kv.layers(), staged.cursor, device.stream);
                 if (hybrid_lane != nullptr && !result.finalized) {
                     // A branched read's frontier is a tap position too (its branches follow it).
                     hybrid_after_prefill_chunk(sequence, staged.cursor,

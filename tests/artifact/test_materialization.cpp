@@ -1,7 +1,7 @@
 #include "artifact/binder.h"
 #include "artifact/fixture.h"
-#include "artifact/permute_row_split.h"
 #include "artifact/selection.h"
+#include "artifact/transcode.h"
 #include "artifact/views.h"
 #include "core/device.h"
 #include "core/evictable_weight_pool.h"
@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -289,6 +290,13 @@ void selected_upload(DeviceContext& device) {
             std::vector<std::byte> got(want.size());
             CUDA_CHECK(cudaMemcpy(got.data(), backing.device_parent(pieces[i]).data, got.size(),
                                   cudaMemcpyDeviceToHost));
+            if (got != want) {
+                const auto mismatch = std::mismatch(got.begin(), got.end(), want.begin());
+                std::cerr << "selection " << count << '/' << i << " mismatch byte "
+                          << (mismatch.first - got.begin()) << " got="
+                          << std::to_integer<unsigned>(*mismatch.first) << " expected="
+                          << std::to_integer<unsigned>(*mismatch.second) << '\n';
+            }
             require(got == want, "a selected piece differs from its selected bytes");
         }
     }
@@ -375,8 +383,27 @@ void selected_panel(DeviceContext& device) {
     Reader reader(fixture.entry);
     // Two loads: the piece as stored, then with the panel layout.
     const ObjectSelection rows{.rows = {{0, 4}}, .columns = {{0, 65}}};
-    std::vector<std::byte> want;
-    std::vector<std::byte> got;
+    const auto source = reader.read_object(reader.find("q5"));
+    const auto geometry = selected_geometry(reader.geometry(reader.find("q5")), rows);
+    std::vector<std::byte> want(geometry.bytes);
+    for (const auto& run : selected_runs(reader.geometry(reader.find("q5")), rows)) {
+        std::memcpy(want.data() + run.destination, source.data() + run.source, run.bytes);
+    }
+    auto panel_want = want;
+    const auto groups = geometry.padded_columns / geometry.group_size;
+    const auto permute_plane = [&](std::uint64_t offset, std::uint64_t row_bytes) {
+        const auto record = row_bytes / groups;
+        for (std::uint64_t row = 0; row < 4; ++row) {
+            for (std::uint64_t group = 0; group < groups; ++group) {
+                for (std::uint64_t byte = 0; byte < record; ++byte) {
+                    panel_want[offset + (group * 4 + row) * record + byte] =
+                        want[offset + row * row_bytes + group * record + byte];
+                }
+            }
+        }
+    };
+    permute_plane(0, geometry.code_bytes_per_row);
+    permute_plane(geometry.high_offset, geometry.high_bytes_per_row);
     for (const bool panel : {false, true}) {
         Binder binder(reader);
         const ObjectHandle piece = binder.select_device(reader.find("q5"), rows, 0);
@@ -386,20 +413,56 @@ void selected_panel(DeviceContext& device) {
         require(parent.geometry.layout ==
                     (panel ? QuantLayout::RowSplitPanel : QuantLayout::RowSplit),
                 "a selected piece's layout ignored its panel request");
-        std::vector<std::byte>& bytes = panel ? got : want;
-        bytes.resize(parent.geometry.bytes);
-        if (!panel) {
-            void* scratch = nullptr;
-            CUDA_CHECK(cudaMalloc(&scratch, bytes.size()));
-            CUDA_CHECK(cudaMemcpy(scratch, parent.data, bytes.size(), cudaMemcpyDeviceToDevice));
-            permute_row_split_to_panel(parent.geometry, static_cast<std::byte*>(scratch), nullptr);
-            CUDA_CHECK(cudaMemcpy(bytes.data(), scratch, bytes.size(), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaFree(scratch));
-        } else {
-            CUDA_CHECK(cudaMemcpy(bytes.data(), parent.data, bytes.size(), cudaMemcpyDeviceToHost));
+        std::vector<std::byte> got(parent.geometry.bytes);
+        CUDA_CHECK(cudaMemcpy(got.data(), parent.data, got.size(), cudaMemcpyDeviceToHost));
+        const auto& expected = panel ? panel_want : want;
+        if (got != expected) {
+            const auto mismatch = std::mismatch(got.begin(), got.end(), expected.begin());
+            std::cerr << "selected panel=" << panel << " mismatch byte "
+                      << (mismatch.first - got.begin())
+                      << " got=" << std::to_integer<unsigned>(*mismatch.first)
+                      << " expected=" << std::to_integer<unsigned>(*mismatch.second) << '\n';
         }
+        require(got == expected, "a selected piece differs from its independently permuted bytes");
     }
-    require(got == want, "a selected piece in the panel layout is not its permuted bytes");
+}
+
+// A transcode-only rank has no file-upload ranges. Its reserved tail still belongs to the
+// completed upload transaction and must be zero when materialize returns.
+void transcode_tail(DeviceContext& device) {
+    Fixture fixture;
+    const std::uint64_t shape[] = {2, 128};
+    const auto source_geometry = weight_geometry(QType::Q8_G32_FP16, QuantLayout::RowSplit, shape);
+    fixture.root["objects"][1]["shape"] = {2, 128};
+    fixture.root["objects"][1]["format"] = "q8_g32_fp16";
+    fixture.root["objects"][1]["bytes"] = source_geometry.bytes;
+    fixture.root["bindings"] = {{"matrix", {{"object", "q5"}}}};
+    fixture.root["uses"] = Json::array();
+    std::vector<std::byte> source(source_geometry.bytes);
+    for (std::size_t i = 0; i < source_geometry.code_bytes; ++i) {
+        source[i] = std::byte(static_cast<unsigned char>(static_cast<int>(i % 31) - 15));
+    }
+    for (std::size_t at = source_geometry.scale_offset; at < source.size(); at += 2) {
+        source[at] = std::byte{0};
+        source[at + 1] = std::byte{0x38}; // FP16 0.5.
+    }
+    std::copy(source.begin(), source.end(), fixture.payload.begin() + 256);
+    fixture.write(true);
+    Reader reader(fixture.entry);
+    Binder binder(reader);
+    const auto object = reader.find("q5");
+    binder.require_device(object);
+    binder.transcode_device(object, QType::Q4_G64_FP16);
+    binder.device_tail(object, 64);
+    auto backing = materialize(reader, std::move(binder).finish(), device);
+    const auto& parent = backing.device_parent(object);
+    // This is an upload/order check: the transcode's mathematical oracle lives in the Op test.
+    std::vector<std::byte> expected(parent.geometry.bytes + 64);
+    transcode_row_split(QType::Q4_G64_FP16, shape, source,
+                        std::span<std::byte>(expected).first(parent.geometry.bytes));
+    std::vector<std::byte> actual(expected.size());
+    CUDA_CHECK(cudaMemcpy(actual.data(), parent.data, actual.size(), cudaMemcpyDeviceToHost));
+    require(actual == expected, "a transcode-only upload lost its encoded bytes or zero tail");
 }
 
 void file_roundtrip(DeviceContext& device, const std::filesystem::path& path, bool writer_fixture) {
@@ -600,13 +663,21 @@ int main(int argc, char** argv) {
         }
         CUDA_CHECK(result);
         DeviceContext device;
+        if (argc == 2 && std::string_view(argv[1]) == "--selected-stress") {
+            for (int round = 0; round < 256; ++round) {
+                selected_upload(device);
+                selected_panel(device);
+            }
+            std::cout << "selected materialization stress passed\n";
+            return 0;
+        }
         if (argc == 3 && (std::string_view(argv[1]) == "--artifact" ||
                           std::string_view(argv[1]) == "--writer-fixture")) {
             file_roundtrip(device, argv[2], std::string_view(argv[1]) == "--writer-fixture");
             return 0;
         }
         if (argc != 1) {
-            throw std::invalid_argument("expected [--artifact|--writer-fixture PATH]");
+            throw std::invalid_argument("expected [--artifact PATH|--writer-fixture PATH|--selected-stress]");
         }
         materialization(device);
         failure_and_host_only(device);
@@ -614,6 +685,7 @@ int main(int argc, char** argv) {
         selected_upload(device);
         selected_nvfp4(device);
         selected_panel(device);
+        transcode_tail(device);
         pipeline_rank_placement();
 #if defined(NINFER_TEST_LINK_WRAP)
         ninfer::test::materialization_cuda_errors(device);

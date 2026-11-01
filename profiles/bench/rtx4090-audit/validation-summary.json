@@ -1,0 +1,115 @@
+{
+  "implementation_sha": "b6c0e4d2416542ac32e2f474077cb9049852bb47",
+  "starting_sha": "8b66e2536f30717cc84547424c079f261a465b63",
+  "branch": "feature/rtx4090-upstream-stability-cache-profiling",
+  "remote": "https://github.com/spk-c/ninfer-all-rtx4090.git",
+  "hardware": {
+    "gpu": "RTX 4090 24564 MiB WDDM",
+    "driver": "617.42",
+    "cpu": "Ryzen 9 9950X3D"
+  },
+  "toolchain": {
+    "cuda": "13.4",
+    "nvcc": "13.4.92",
+    "architecture": "native SM89",
+    "msvc": "14.44.35207 VS2022 Build Tools",
+    "python": "3.11.9",
+    "cmake": "3.29.2",
+    "ninja": "1.12.0",
+    "nsight_systems_required": "2026.1.3.425",
+    "nsight_compute": "2026.3.1"
+  },
+  "full_ctest": {
+    "command": "ctest --test-dir build-rtx4090 -j2 --output-on-failure --output-junit profiles/bench/rtx4090-audit/ctest-revalidated.xml",
+    "exit_code": 0,
+    "total": 372,
+    "passed": 340,
+    "skipped": 32,
+    "failed": 0,
+    "seconds": 2087.68,
+    "skipped_names": [
+      "ninfer_engine_logprobs_real_test",
+      "ninfer_ngram_graph_planning_real",
+      "ninfer_ngram_lifecycle_real",
+      "ninfer_ngram_archive_real",
+      "ninfer_ngram_thinking_real",
+      "ninfer_ngram_stop_chat_real",
+      "ninfer_ngram_concurrent_real",
+      "ninfer_qwen_native_streaming_real_test",
+      "ninfer_qwen3_5_loading_real_test",
+      "ninfer_qwen3_5_dflash_prefill_real_test",
+      "ninfer_qwen3_5_prefix_real_test",
+      "ninfer_qwen3_5_hybrid_prefix_real_test",
+      "ninfer_qwen3_5_score_real_test",
+      "ninfer_qwen3_5_vision_cpu_real_test",
+      "ninfer_qwen3_5_vision_overlay_real_test",
+      "ninfer_qwen3_5_vision_workspace_test",
+      "ninfer_qwen3_5_dflash2_real_test",
+      "ninfer_qwen3_5_moe_real_test",
+      "ninfer_qwen3_5_stages_real_test",
+      "ninfer_qwen3_5_suspend_real_test",
+      "ninfer_qwen3_5_dflash_real_test",
+      "ninfer_qwen4_exp_slice_real",
+      "ninfer_qwen4_exp_generate_real",
+      "ninfer_qwen4_exp_engine_real",
+      "ninfer_qwen4_exp_long_context_real",
+      "ninfer_gemma4_assistant_real_test",
+      "ninfer_gemma4_residency_real_test",
+      "ninfer_gemma4_vision_real_test",
+      "ninfer_flint_branches_real_test",
+      "ninfer_deepseek_v41_vision_real_test",
+      "ninfer_nvfp4_int8_real_test",
+      "ninfer_nvfp4_tma_staging_race_test"
+    ],
+    "skip_reasons": "31 optional artifact/fixture environments absent; 1 no NVFP4 Blackwell TMA route. Three selected real-model cache scenarios executed separately.",
+    "raw_log": "ctest-revalidated.log",
+    "raw_junit": "ctest-revalidated.xml"
+  },
+  "earlier_complete_campaigns": [
+    {
+      "passed": 337,
+      "skipped": 32,
+      "failed": 2,
+      "seconds": 3451.33,
+      "disposition": "gguf dependency and unsupported TMA test selection repaired"
+    },
+    {
+      "passed": 338,
+      "skipped": 32,
+      "failed": 1,
+      "seconds": 2083.4,
+      "disposition": "selected-upload padding race repaired with independent CPU oracle and stress regression"
+    }
+  ],
+  "other_verification": {
+    "local_tool_tests_passed": 25,
+    "tooling_ci_tests_passed": 20,
+    "artifact_stress_rounds": 2560,
+    "real_model_scenarios": [
+      "restore-exact-dflash2",
+      "turns-protocol",
+      "persist-dflash2"
+    ],
+    "live_http_scenarios_per_arm": 48,
+    "live_http_arms": 2,
+    "current_graph_starts": 15,
+    "current_alternating_graph_eager_pairs": 5,
+    "current_ncu_captures": 6
+  },
+  "unverified": [
+    "MSVC GNU --wrap fault-injection subcases compiled out",
+    "Linux-only transport assertions",
+    "other artifacts and vision",
+    "physical multi-GPU",
+    "Blackwell TMA",
+    "real offloaded-model throughput",
+    "Host RSS",
+    "complete CPU execution and causal GPU idle time",
+    "universal cache-mode greedy text equality"
+  ],
+  "protected_refs": {
+    "master": "a85c597f0b96686197712c4118deb2647ba7a75c",
+    "release_tag_object": "4ddc76ae318b88ef6cfe99dcb9f3750ecd8b7f42",
+    "user_script_sha256": "769CA68FD37868339AFF8EB87B7486FA4D9FCF8BEBD81BC12228AA9E736F55EE"
+  }
+}

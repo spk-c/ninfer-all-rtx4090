@@ -32,12 +32,17 @@ DeviceSpan LayoutRegion::bind(DeviceSpan backing) const {
     if (!is_power_of_two(alignment)) {
         throw std::logic_error("layout region has an invalid alignment");
     }
-    const auto base = reinterpret_cast<std::uintptr_t>(backing.data);
-    if ((base + offset) % alignment != 0) {
-        throw std::invalid_argument("layout backing does not satisfy region alignment");
-    }
+    // Reject an invalid range before using offset in address arithmetic. A bogus oversized
+    // layout must never be able to wrap the integer address and pass the alignment check.
     if (offset > backing.bytes || bytes > backing.bytes - offset) {
         throw std::out_of_range("layout region exceeds its backing allocation");
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(backing.data);
+    if (offset > std::numeric_limits<std::uintptr_t>::max() - base) {
+        throw std::overflow_error("layout backing address overflow");
+    }
+    if ((base + offset) % alignment != 0) {
+        throw std::invalid_argument("layout backing does not satisfy region alignment");
     }
     return DeviceSpan{static_cast<unsigned char*>(backing.data) + offset, bytes};
 }
