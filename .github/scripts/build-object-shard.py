@@ -31,7 +31,8 @@ def main():
     args = parser.parse_args()
     commands = json.loads(subprocess.check_output(
         ["ninja", "-C", str(args.build), "-t", "compdb-targets",
-         "ninfer", "ninfer-serve", "ninfer_bench"], text=True))
+         "ninfer", "ninfer-serve", "ninfer_bench", "ninfer-calibrate",
+         "ninfer-perplexity", "ninfer-ngram-profile"], text=True))
     objects = select_objects(commands, args.shard, args.count)
     if not objects:
         raise ValueError("The release object shard is empty")
