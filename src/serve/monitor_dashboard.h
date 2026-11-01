@@ -62,10 +62,15 @@ th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #2a3d48}th{color:
 <div class="row"><span class="muted">Rejected / failed</span><strong id="errors">–</strong></div>
 <div class="row"><span class="muted">Reused prompt tokens</span><strong id="reused">–</strong></div>
 <div class="row"><span class="muted">Uptime</span><strong id="uptime">–</strong></div></section>
+<section class="card" style="grid-column:1/-1"><h2>Recent requests (last 50)</h2><div class="scroll">
+<table><thead><tr><th>Time</th><th>Status</th><th>Prompt</th><th>Cached</th><th>Output</th><th>Decode tok/s</th><th>Total duration</th></tr></thead>
+<tbody id="recentRequests"><tr><td colspan="7">No requests recorded</td></tr></tbody></table></div>
+<p class="note">Metadata only: no prompts or generated text are stored. History resets when the server restarts.</p>
+</section>
 <section class="card" style="grid-column:1/-1"><h2>Recent activity (aggregate samples)</h2><div class="scroll">
 <table><thead><tr><th>Time</th><th>Completed Δ</th><th>Decode Δ</th><th>Prefill Δ</th><th>Running</th><th>Waiting</th></tr></thead>
 <tbody id="activity"><tr><td colspan="6">Waiting for samples…</td></tr></tbody></table></div>
-<p class="note">Data is stored only in this tab (120 samples). The optional Python sidecar tools/monitor/monitor.py provides per-request JSONL history, CPU/RAM and further sensor metrics.</p>
+<p class="note">Data is stored only in this tab (120 samples). The optional Python sidecar tools/monitor/monitor.py provides full per-request JSONL logs, CPU/RAM and further sensor metrics.</p>
 </section></div></main>
 <script>
 'use strict';
@@ -117,6 +122,24 @@ function graph(id,a,b,ceiling){
  c.fillText(new Date(samples[samples.length-1].time).toLocaleTimeString(),Math.max(p.left,width-85),h-4)}
 }
 function draw(){graph('rates','decodeRate','prefillRate',0);graph('gpuChart','gpuUtil','gpuTemp',100)}
+function requestRows(events){
+ const body=$('recentRequests');body.replaceChildren();
+ if(!Array.isArray(events)||!events.length){
+  const tr=document.createElement('tr'),td=document.createElement('td');
+  td.colSpan=7;td.textContent='No requests recorded';tr.appendChild(td);body.appendChild(tr);return;
+ }
+ for(const event of events){
+  const tr=document.createElement('tr');
+  const decodeRate=n(event.decode_seconds)>0&&n(event.output_tokens)>1?
+   (event.output_tokens-1)/event.decode_seconds:null;
+  const cells=[new Date(event.time_unix_ms).toLocaleTimeString(),event.status,
+   event.prompt_tokens,event.cached_tokens,event.output_tokens,decodeRate,
+   n(event.total_seconds)!==null?format(event.total_seconds)+' s':'–'];
+  for(const v of cells){const td=document.createElement('td');
+   td.textContent=typeof v==='string'?v:format(v);tr.appendChild(td)}
+  body.appendChild(tr);
+ }
+}
 function activity(){
  const body=$('activity');body.replaceChildren();
  for(const row of samples.slice(-15).reverse()){
@@ -132,8 +155,10 @@ async function refresh(){
  try{
   const model=$('selectedModel').value.trim();
   const query=model?'?model='+encodeURIComponent(model):'';
-  const results=await Promise.all([fetchApi('/stats'+query),fetchApi('/metrics'+query)]);
+  const results=await Promise.all([
+    fetchApi('/stats'+query),fetchApi('/metrics'+query),fetchApi('/monitor/requests')]);
   const stats=await results[0].json(),metrics=metricMap(await results[1].text());
+  const recent=await results[2].json();
   let gpu={available:false};
   try{const idx=Math.min(7,Math.max(0,Number($('gpuIndex').value)||0));
     gpu=await(await fetchApi('/monitor/gpu?index='+idx)).json();
@@ -173,7 +198,7 @@ async function refresh(){
   samples.push({time:curr.time,decodeRate,prefillRate,decodeDelta,prefillDelta,completeDelta,
    running:curr.running,waiting:curr.waiting,gpuUtil:n(gpu.utilization_pct),gpuTemp:n(gpu.temperature_c)});
   if(samples.length>120)samples.shift();
-  draw();activity();
+  draw();activity();requestRows(recent);
   $('state').className='pill ok';txt('state','Online');txt('message','');
  }catch(e){$('state').className='pill bad';txt('state','Offline');txt('message',e.message||String(e))}
  finally{polling=false}
