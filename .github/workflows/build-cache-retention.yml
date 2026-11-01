@@ -25,6 +25,8 @@ concurrency:
 
 jobs:
   prune:
+    # Do not attempt to prune upstream's private HF bucket from downstream forks.
+    if: github.repository == 'iamwavecut/ninfer-all'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

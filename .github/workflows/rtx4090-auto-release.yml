@@ -1,0 +1,164 @@
+# Tag-driven binary release; requires a registered, dedicated Windows RTX 4090 runner.
+name: RTX 4090 automatic Windows release
+on:
+  push:
+    tags: ['rtx4090-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (rtx4090-vX.Y.Z)
+        required: true
+        type: string
+      publish:
+        description: Publish if validated (manual dispatch only)
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: rtx4090-windows-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository == 'spk-c/ninfer-all-rtx4090'
+    runs-on: [self-hosted, windows, x64, rtx4090]
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REQUESTED_TAG: ${{ inputs.tag }}
+      MODEL_OVERRIDE: ${{ vars.NINFER_RELEASE_MODEL }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify immutable tag, runner and tools
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'push') { $env:GITHUB_REF -replace '^refs/tags/','' } else { $env:REQUESTED_TAG }
+          if ($tag -notmatch '^rtx4090-v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release tag: $tag" }
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -ne (git rev-parse "refs/tags/$tag^{commit}").Trim()) { throw 'Release source mismatch' }
+          git merge-base --is-ancestor HEAD origin/master
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged source is not part of master' }
+          foreach ($command in 'git','gh','cmake','ninja','7z','nvidia-smi') {
+            if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { throw "Missing tool: $command" }
+          }
+          if (-not (& nvidia-smi --query-gpu=name --format=csv,noheader | Select-String 'RTX 4090')) {
+            throw 'This runner does not have an RTX 4090'
+          }
+          $model = if ($env:MODEL_OVERRIDE) { $env:MODEL_OVERRIDE } else {
+            'C:\ninfer-all\models\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer'
+          }
+          if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw "Test model missing: $model" }
+          if (@(Get-Process -Name ninfer-serve -ErrorAction SilentlyContinue).Count) {
+            throw 'An inference server is running: retry release when the GPU is idle'
+          }
+          "NINFER_VERSION=$tag" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$sha" >> $env:GITHUB_ENV
+          "RELEASE_MODEL=$model" >> $env:GITHUB_ENV
+          "RELEASE_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+      - name: Install Python regression test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest jinja2 numpy safetensors gguf tokenizers transformers
+          python -m pip install --disable-pip-version-check --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Compile native SM89, run CTest and package binaries
+        timeout-minutes: 310
+        run: |
+          # Persist build directory outside checkout so that incremental CUDA builds survive
+          # the git clean performed by actions/checkout in the next tagged workflow run.
+          $build = 'C:\ninfer-ci\build-rtx4090-release'
+          & .\scripts\build.ps1 -Arch 89 -CudaVersion 13.4 -BuildDir $build -PythonExecutable $env:RELEASE_PYTHON -Jobs 8 -Test -Package
+          if (-not $?) { throw 'Build, CTest or packaging failed' }
+      - name: Verify archived binaries and run real DFlash2 GPU inference
+        timeout-minutes: 15
+        run: |
+          $prefix = "ninfer-windows-x64-cuda13.4-sm89-$($env:RELEASE_SHA.Substring(0,12))"
+          $folder = Join-Path $pwd "dist\$prefix"
+          $info = Get-Content (Join-Path $folder 'BUILD-INFO.json') -Raw | ConvertFrom-Json
+          if ($info.source_revision -ne $env:RELEASE_SHA -or $info.version -ne $env:NINFER_VERSION -or
+              $info.cuda -ne '13.4' -or $info.modified_sources -or
+              @($info.architectures).Count -ne 1 -or $info.architectures[0] -ne '89') {
+            throw 'Package build identity does not match the tagged release'
+          }
+          $parts = @(Get-ChildItem dist -File | Where-Object {
+            $_.Name -match ('^'+[regex]::Escape($prefix)+'[.]7z[.][0-9]{3}$')
+          } | Sort-Object Name)
+          $manifest = Join-Path $pwd "dist\SHA256SUMS-$prefix.txt"
+          if (-not $parts.Count -or -not (Test-Path $manifest)) { throw 'Release assets missing' }
+          $rows = @(Get-Content $manifest | Where-Object { $_ -match '\S' })
+          if ($rows.Count -ne $parts.Count) { throw 'SHA256 manifest does not cover all archive parts' }
+          for ($i=0; $i -lt $parts.Count; $i++) {
+            $fields = $rows[$i] -split '\s{2,}',2
+            if ($fields.Count -ne 2 -or $fields[1] -ne $parts[$i].Name -or
+                $fields[0].ToLowerInvariant() -ne (Get-FileHash $parts[$i].FullName -Algorithm SHA256).Hash.ToLowerInvariant()) {
+              throw "Archive hash mismatch: $($parts[$i].Name)"
+            }
+          }
+          & 7z t $parts[0].FullName | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '7-Zip verification failed' }
+          & .\scripts\test-rtx4090-release-smoke.ps1 -PackageDirectory $folder -Model $env:RELEASE_MODEL
+          if (-not $?) { throw 'Real-model GPU smoke test failed' }
+      - name: Publish tested archive as stable release
+        if: github.event_name == 'push' || inputs.publish == true
+        timeout-minutes: 45
+        run: |
+          $tag=$env:NINFER_VERSION
+          $sha=$env:RELEASE_SHA
+          if ((git rev-parse HEAD).Trim() -ne $sha) { throw 'Source changed' }
+          # Lightweight tags point directly at a commit; annotated tags need ^{}.
+          $remote=@(git ls-remote origin "refs/tags/$tag^{}")
+          if ($LASTEXITCODE -ne 0) { throw 'Remote tag lookup failed' }
+          if (-not $remote.Count) {
+            $remote=@(git ls-remote origin "refs/tags/$tag")
+          }
+          if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 1 -or -not $remote[0].StartsWith($sha)) {
+            throw 'Release tag changed during compilation'
+          }
+          $prefix="ninfer-windows-x64-cuda13.4-sm89-$($sha.Substring(0,12))"
+          $parts=@(Get-ChildItem dist -File | Where-Object {
+            $_.Name -match ('^'+[regex]::Escape($prefix)+'[.]7z[.][0-9]{3}$')
+          } | Sort-Object Name)
+          $manifest=Get-Item (Join-Path $pwd "dist\SHA256SUMS-$prefix.txt")
+          if (-not $parts.Count) { throw 'Missing release archives' }
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY --json url *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists; refusing to replace assets" }
+          $notes=Join-Path $env:RUNNER_TEMP "$tag-notes.md"
+          @(
+            "# NInfer RTX 4090 $tag"
+            "Windows x64, CUDA 13.4, native SM89"
+            "Immutable source: $sha"
+            "Native CTest, archive, checksum and RTX 4090 DFlash2 inference verified."
+            "Model weights not included. Real-model tests for other architectures remain outside scope."
+          ) | Set-Content -LiteralPath $notes -Encoding utf8
+          $assets=@($parts | ForEach-Object FullName)+@($manifest.FullName)
+          & gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --verify-tag --prerelease --notes-file $notes --title "NInfer RTX 4090 $tag - CUDA 13.4 Windows"
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed; inspect any partial prerelease before retrying' }
+          $release=& gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets,isPrerelease | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isPrerelease) { throw 'Staged release not found' }
+          foreach ($asset in $assets) {
+            $file=Get-Item $asset
+            if (@($release.assets | Where-Object { $_.name -eq $file.Name -and $_.size -eq $file.Length }).Count -ne 1) {
+              throw "Unverified remote asset: $($file.Name)"
+            }
+          }
+          & gh release edit $tag --repo $env:GITHUB_REPOSITORY --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot mark verified release stable' }
+          $final=& gh release view $tag --repo $env:GITHUB_REPOSITORY --json isPrerelease,url | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $final.isPrerelease) { throw 'Release not stable' }
+          Write-Host "STABLE RELEASE: $($final.url)"
+      - name: Keep CTest failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtx4090-windows-test-logs
+          path: |
+            C:/ninfer-ci/build-rtx4090-release/Testing/Temporary/LastTest.log
+            C:/ninfer-ci/build-rtx4090-release/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 7

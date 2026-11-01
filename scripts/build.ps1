@@ -36,6 +36,7 @@ param(
     [string]$Target,
     [ValidateRange(0, 256)][int]$Jobs = 0,
     [string]$BuildDir,
+    [string]$PythonExecutable,
     [ValidateSet('12.8', '12.9', '13.1', '13.2', '13.3', '13.4')][string]$CudaVersion,
     [ValidateSet('75', '80', '86', '89')][string]$Arch = '86'
 )
@@ -136,6 +137,13 @@ try {
     $SfuOption = if ($ExperimentalFastSfu) { 'ON' } else { 'OFF' }
     $VectorSiluOption = if ($ExperimentalVectorSilu) { 'ON' } else { 'OFF' }
     $GgufIq3sT6LoopOption = if ($ExperimentalGgufIq3sT6Loop) { 'ON' } else { 'OFF' }
+    $PythonArgs = @()
+    if ($PythonExecutable) {
+        if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
+            throw "Selected Python executable does not exist: $PythonExecutable"
+        }
+        $PythonArgs = @("-DPython3_EXECUTABLE=$((Resolve-Path -LiteralPath $PythonExecutable).Path.Replace('\', '/'))")
+    }
     cmake -S . -B $BuildDir -G Ninja '-DCMAKE_BUILD_TYPE=Release' "-DCMAKE_CUDA_ARCHITECTURES=$Arch" `
           "-DCMAKE_RC_COMPILER=$RcCmake" `
           "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain" '-DVCPKG_TARGET_TRIPLET=x64-windows' `
@@ -143,7 +151,7 @@ try {
           "-DBUILD_TESTING=$TestsOption" `
           "-DNINFER_SFU_SIGMOID_SILU=$SfuOption" "-DNINFER_SFU_SOFTPLUS=$SfuOption" `
           "-DNINFER_ADA_SILU_BF16X8=$VectorSiluOption" `
-          "-DNINFER_ADA_GGUF_IQ3S_T6_LOOP=$GgufIq3sT6LoopOption"
+          "-DNINFER_ADA_GGUF_IQ3S_T6_LOOP=$GgufIq3sT6LoopOption" @PythonArgs
     if ($LASTEXITCODE -ne 0) { throw "configure failed ($LASTEXITCODE)" }
 
     $buildArgs = @('--build', $BuildDir)
