@@ -33,10 +33,10 @@ class ShardCacheTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    def pack(self, index, payload=None):
+    def pack(self, index, payload=None, filename=None):
         cache = self.root / f"src-cache-{index}"
         (cache / "0").mkdir(parents=True)
-        (cache / "0" / f"cache-{index}").write_bytes(
+        (cache / "0" / (filename or f"cache-{index}")).write_bytes(
             payload if payload is not None else f"cache-object-{index}".encode())
         objects = self.build / "object-shard.json"
         objects.write_text(json.dumps(select(None, index, 2)), encoding="utf-8")
@@ -51,6 +51,39 @@ class ShardCacheTests(unittest.TestCase):
         SHARDS.restore(self.downloads, target, self.build, REVISION, 2)
         self.assertEqual((target / "0/cache-0").read_bytes(), b"cache-object-0")
         self.assertEqual((target / "0/cache-1").read_bytes(), b"cache-object-1")
+
+    def test_conflicting_ccache_keys_are_discarded_not_chosen(self):
+        self.pack(0, b"first result", filename="shared-key")
+        self.pack(1, b"second result", filename="shared-key")
+        target = self.root / "merged"
+        SHARDS.restore(self.downloads, target, self.build, REVISION, 2)
+        self.assertFalse((target / "0/shared-key").exists())
+
+    def test_identical_ccache_keys_are_reused(self):
+        self.pack(0, b"same result", filename="shared-key")
+        self.pack(1, b"same result", filename="shared-key")
+        target = self.root / "merged"
+        SHARDS.restore(self.downloads, target, self.build, REVISION, 2)
+        self.assertEqual((target / "0/shared-key").read_bytes(), b"same result")
+
+    def test_conflicting_ccache_payload_is_still_verified(self):
+        self.pack(0, b"first result", filename="shared-key")
+        second = self.pack(1, b"second result", filename="shared-key")
+        with zipfile.ZipFile(second) as archive:
+            manifest = archive.read("manifest.json")
+        with zipfile.ZipFile(second, "w") as archive:
+            archive.writestr("manifest.json", manifest)
+            archive.writestr("cache/0/shared-key", b"tampered")
+        with self.assertRaisesRegex(ValueError, "Corrupted artifact"):
+            SHARDS.restore(self.downloads, self.root / "merged", self.build, REVISION, 2)
+
+    def test_duplicate_zip_entry_name_is_rejected(self):
+        first = self.pack(0)
+        self.pack(1)
+        with zipfile.ZipFile(first, "a") as archive:
+            archive.writestr("cache/0/cache-0", b"cache-object-0")
+        with self.assertRaisesRegex(ValueError, "Duplicate ZIP member"):
+            SHARDS.restore(self.downloads, self.root / "merged", self.build, REVISION, 2)
 
     def test_missing_shard_fails_closed(self):
         self.pack(0)

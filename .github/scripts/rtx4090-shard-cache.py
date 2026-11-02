@@ -98,6 +98,9 @@ def restore(input_root, destination, build, sha, count):
     expected = [selector(commands, i, count) for i in range(count)]
     all_objects = set()
     all_files = {}
+    # If two independent workers produce different bytes for one cache key,
+    # neither version is trusted. Both become normal cache misses at link time.
+    conflicts = set()
     destination.mkdir(parents=True, exist_ok=True)
     for index in range(count):
         archive_file = input_root / f"rtx4090-objects-{index}" / "cache.zip"
@@ -129,25 +132,59 @@ def restore(input_root, destination, build, sha, count):
                     raise ValueError("Duplicate archive member")
                 permitted.add(member)
                 target = destination / Path(*PurePosixPath(name).parts)
-                if name in all_files:
-                    if all_files[name] != item["sha256"]:
-                        raise ValueError(f"ccache hash collision with different data: {name}")
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output, 1024 * 1024)
-                if target.stat().st_size != item["size"] or hash_file(target) != item["sha256"]:
-                    target.unlink(missing_ok=True)
-                    raise ValueError(f"Corrupted artifact: {name}")
-                all_files[name] = item["sha256"]
-            if set(archive.namelist()) != permitted:
+                write_target = None
+                if name not in conflicts:
+                    if name in all_files:
+                        if all_files[name] != item["sha256"]:
+                            # Same key, different valid result: invalidate BOTH.
+                            # Blindly choosing the first shard could serve
+                            # incorrect cached compiler output.
+                            conflicts.add(name)
+                            del all_files[name]
+                            target.unlink(missing_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        write_target = target
+
+                # Verify ALL archive payloads, including duplicates and keys
+                # discarded after a collision. Never accept unverified bytes.
+                digest = hashlib.sha256()
+                length = 0
+                try:
+                    with archive.open(member) as source:
+                        if write_target is None:
+                            for block in iter(lambda: source.read(1024 * 1024), b""):
+                                length += len(block)
+                                digest.update(block)
+                        else:
+                            with write_target.open("wb") as output:
+                                for block in iter(lambda: source.read(1024 * 1024), b""):
+                                    length += len(block)
+                                    digest.update(block)
+                                    output.write(block)
+                    if length != item["size"] or digest.hexdigest() != item["sha256"]:
+                        raise ValueError(f"Corrupted artifact: {name}")
+                except Exception:
+                    if write_target is not None:
+                        write_target.unlink(missing_ok=True)
+                    raise
+                if write_target is not None:
+                    all_files[name] = item["sha256"]
+            members = archive.namelist()
+            if set(members) != permitted:
                 raise ValueError("Undeclared file in cache artifact")
+            if len(members) != len(permitted):
+                raise ValueError("Duplicate ZIP member in cache artifact")
         print(f"Validated shard {index + 1}/{count}: {len(expected[index])} Ninja objects", flush=True)
     wanted = set().union(*map(set, expected))
     if all_objects != wanted or not wanted:
         raise ValueError("Incomplete shard coverage")
     print(f"Validated {len(wanted)} unique compile outputs and "
-          f"{len(all_files)} content-verified compiler cache files", flush=True)
+          f"{len(all_files)} unambiguous compiler cache files; "
+          f"discarded {len(conflicts)} conflicting cache keys", flush=True)
+    if conflicts:
+        print("Conflicting ccache keys (recompiled on cache miss): "
+              + ", ".join(sorted(conflicts)[:10]), flush=True)
 
 
 def check_hits(minimum, min_ratio=0.6):

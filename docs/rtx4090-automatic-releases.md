@@ -18,6 +18,13 @@ native SM89 object graph using build-object-shard.py.
 4. The final Windows worker checks all four artifact identities, full Ninja
    object ownership, cache SHA256 and path safety. Missing/corrupt or stale
    artifacts cause a hard failure.
+   If two shards export the same ccache pathname with different **valid**
+   SHA256 payloads, the merge discards that cache key from every shard.
+   It never selects an arbitrary compiler result; the final compiler must
+   rebuild that key. All archive entries are verified, even discarded
+   collisions and identical duplicates. The minimum cache-hit guard remains
+   mandatory, so excessive collisions cause a failure rather than an
+   unexpectedly expensive cold CUDA build.
 5. The final worker restores the compiler caches, links the six portable
    programs and checks that cached compilation was actually reused.
    It builds the native test targets and runs CPU-only CTest. Tests that
