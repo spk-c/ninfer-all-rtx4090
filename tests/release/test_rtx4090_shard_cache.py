@@ -82,7 +82,7 @@ class ShardCacheTests(unittest.TestCase):
         self.pack(1)
         with zipfile.ZipFile(first, "a") as archive:
             archive.writestr("cache/0/cache-0", b"cache-object-0")
-        with self.assertRaisesRegex(ValueError, "duplicated file"):
+        with self.assertRaisesRegex(ValueError, "Duplicate ZIP member"):
             SHARDS.restore(self.downloads, self.root / "merged", self.build, REVISION, 2)
 
     def test_missing_shard_fails_closed(self):
