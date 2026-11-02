@@ -73,4 +73,5 @@ jobs:
           }
       - run: python -m unittest discover -s tests/release -p test_build_lifecycle.py -v
       - run: python -m unittest discover -s tests/release -p test_windows_kernel_dll.py -v
+      - run: python -m unittest discover -s tests/release -p test_windows_runtime_dlls.py -v
       - run: python -m unittest discover -s tests/release -p test_portable_runtime.py -v
