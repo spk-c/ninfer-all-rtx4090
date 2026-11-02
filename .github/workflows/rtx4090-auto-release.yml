@@ -4,6 +4,8 @@ name: RTX 4090 automatic Windows release
 on:
   push:
     tags: ['rtx4090-v*']
+    # Build-only test trigger: never creates or publishes a release.
+    branches: ['ci/rtx4090-shard-test/**']
   workflow_dispatch:
     inputs:
       tag:
@@ -45,18 +47,31 @@ jobs:
         run: |
           set -euo pipefail
           tag="$REQUESTED_TAG"
+          dry_branch=false
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-            tag="$(echo "$GITHUB_REF" | sed 's|^refs/tags/||')"
+            if [[ "$GITHUB_REF" == refs/heads/ci/rtx4090-shard-test/* ]]; then
+              tag='rtx4090-v0.1.2'
+              dry_branch=true
+            else
+              tag="$(echo "$GITHUB_REF" | sed 's|^refs/tags/||')"
+            fi
           fi
           [[ "$tag" =~ ^rtx4090-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           sha="$(git rev-parse HEAD)"
-          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && -n "$TEST_REF" ]]; then
+          if [[ "$dry_branch" == true ]]; then
+            # Only a test branch descended from master is accepted.
+            git fetch --quiet origin master
+            git merge-base --is-ancestor origin/master "$sha" ||
+              { echo 'Dry-run branch is not based on current master' >&2; exit 1; }
+          elif [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && -n "$TEST_REF" ]]; then
             [[ "$PUBLISH" != 'true' ]] || { echo 'Dry run cannot publish' >&2; exit 1; }
+            git fetch --quiet origin master
+            git merge-base --is-ancestor "$sha" origin/master || exit 1
           else
             [[ "$sha" == "$(git rev-parse "refs/tags/$tag^{commit}")" ]] || exit 1
+            git fetch --quiet origin master
+            git merge-base --is-ancestor "$sha" origin/master || exit 1
           fi
-          git fetch --quiet origin master
-          git merge-base --is-ancestor "$sha" origin/master || exit 1
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   release-tools:
@@ -203,7 +218,8 @@ jobs:
             build-release/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
   publish:
-    if: github.event_name == 'push' || inputs.publish == true
+    # Branch-only dry runs can NEVER publish; manual publishing also forbids test_ref.
+    if: startsWith(github.ref, 'refs/tags/rtx4090-v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.test_ref == '')
     needs: [source, release-tools, objects, package]
     runs-on: ubuntu-24.04
     permissions:
