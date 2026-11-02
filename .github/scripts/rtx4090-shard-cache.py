@@ -170,9 +170,11 @@ def restore(input_root, destination, build, sha, count):
                     raise
                 if write_target is not None:
                     all_files[name] = item["sha256"]
-            if (set(archive.namelist()) != permitted
-                    or len(archive.namelist()) != len(permitted)):
-                raise ValueError("Undeclared or duplicated file in cache artifact")
+            members = archive.namelist()
+            if set(members) != permitted:
+                raise ValueError("Undeclared file in cache artifact")
+            if len(members) != len(permitted):
+                raise ValueError("Duplicate ZIP member in cache artifact")
         print(f"Validated shard {index + 1}/{count}: {len(expected[index])} Ninja objects", flush=True)
     wanted = set().union(*map(set, expected))
     if all_objects != wanted or not wanted:
