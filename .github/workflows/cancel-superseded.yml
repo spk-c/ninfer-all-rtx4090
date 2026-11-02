@@ -40,7 +40,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           runs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SHA&per_page=100" \
-            --jq '.workflow_runs[] | select(.status != "completed") | "\(.id) \(.name)"')"
+            --jq '.workflow_runs[] | select(.event == "pull_request" and .status != "completed") | "\(.id) \(.name)"')"
           while read -r id name; do
             [[ -n "$id" && "$id" != "$GITHUB_RUN_ID" ]] || continue
             if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/cancel" --silent; then
