@@ -1,5 +1,7 @@
 # RTX 4090 attention precision and benchmark stability
 
+> Historical qualification record from October 2026. Mentions of `spk-c/ninfer-all`, archived PRs and local worktree paths refer to the repository name and evidence locations used at the time. The active fork is [`spk-c/ninfer-all-rtx4090`](https://github.com/spk-c/ninfer-all-rtx4090); historical source identities and artifact hashes are intentionally preserved.
+
 This is the stabilization follow-up to [Draft PR #3](https://github.com/spk-c/ninfer-all/pull/3).
 It changes documentation, independent tests and observability, not CUDA arithmetic,
 dispatch schedules, device profiles or experimental defaults. The existing artifact
@@ -21,7 +23,7 @@ The independently reviewable commits are:
 | Commit | Scope |
 |---|---|
 | `3d6db9fa` | Windows compiler PATH, vcpkg/SDK resource compiler, target-only test builds, optional bounded build parallelism, MSVC-compatible spelling of the same half-to-float conversion |
-| `e7f22084` | Observed TTFT/schema19, readers16â€“19, per-repetition benchmark NVTX markers and reader tests |
+| `e7f22084` | Observed TTFT/schema19, readers16Ã¢â‚¬â€œ19, per-repetition benchmark NVTX markers and reader tests |
 | `7a6905cf` | Correct precision contract, independent attention qualification and exact near-tie argmax fixtures |
 | Follow-up diagnostic commit | Reproducible trace matrix, explicit verification audit, phase analysis and this report |
 
@@ -199,7 +201,7 @@ DFlash2 repeats) supply12 measured repetitions. Workload: pp2048+tg128,
 rk4v4, max context16384, CUDA Graphs, two Engine warmups per process;
 DFlash2 draft5, n-gram drafts0. There was no concurrent compilation or
 numerical GPU job. Requested limits were2100/10501 MHz and450 W, with entry
-at most52 C. Entry temperatures were36–41 C. Idle entry clock samples can
+at most52 C. Entry temperatures were36â€“41 C. Idle entry clock samples can
 be lower; every sampled measured phase reports2100/10501 MHz. Engine warmups
 standardize execution/cache preparation, but do not prove identical L2 contents;
 the OS model-file cache is warm, not flushed between processes.
@@ -224,7 +226,7 @@ measurements. Native times and NVTX scope times are kept distinct.
 
 Plain native decode varies3.43% (max/min minus one), while its kernel union
 varies0.12%. The outside-CUDA part falls from197.16 to123.56 ms and host
-submit wall time from172.73 to102.33 ms; wait wall time stays1985.86–1988.92 ms.
+submit wall time from172.73 to102.33 ms; wait wall time stays1985.86â€“1988.92 ms.
 This localizes most of that Plain variation to intervals outside recorded CUDA
 activity. Submit/wait include driver and scheduling waits; this does not identify
 a CPU instruction hotspot or prove WDDM preemption.
@@ -234,7 +236,7 @@ initial repetitions have the same24 rounds and103 accepted drafts. In the two
 targeted repeat processes the largest decode is630.60 ms, again with increased
 kernel elapsed time, so the symptom is not dismissed as noise. Across all eight
 DFlash2 repetitions, native decode varies16.04% and prefill13.37%; decode kernel
-union varies13.64% (555.65–631.46 ms), while outside-CUDA decode varies23.78–41.14 ms.
+union varies13.64% (555.65â€“631.46 ms), while outside-CUDA decode varies23.78â€“41.14 ms.
 This differs from Plain's predominantly uncovered intervals. Fixed sampled clocks
 and matching acceptance counts do not explain the kernel elapsed increase;
 preemption, competing activity, residency and profiler effects remain unseparated.
@@ -252,7 +254,7 @@ repetition's throughput, TTFT, scope residuals, submit/wait intervals and phase
 telemetry. Sampled board peak VRAM per process is retained too; it includes the
 desktop/other allocations and is not an exact per-process allocation peak.
 Raw JSON contains Engine-owned resource peaks. Half-second board sampling has
-only1–4 observations in many short phases and cannot rule out excursions.
+only1â€“4 observations in many short phases and cannot rule out excursions.
 
 
 ## Reproduction and checks
