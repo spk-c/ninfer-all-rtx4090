@@ -96,19 +96,17 @@ endfunction()
 # before main (0xC0000135). Stage the full closure next to each binary so it runs
 # standalone.
 
-# Collect the FFMPEG + libcurl runtime DLLs from the vcpkg bin tree into <out_var>.
+# Collect the entire vcpkg runtime DLL closure, including transitive dependencies of
+# FFmpeg and curl (OpenSSL, Brotli, codecs, etc.). Staging only their direct DLLs
+# makes the Windows loader abort before main with STATUS_DLL_NOT_FOUND (0xC0000135).
 function(ninfer_runtime_dll_list out_var)
   set(_list "")
   if(WIN32 AND NINFER_WINDOWS_KERNEL_DLL AND TARGET ninfer_kernels)
     list(APPEND _list "$<TARGET_FILE:ninfer_kernels>")
   endif()
   if(WIN32 AND DEFINED FFMPEG_VCPKG_TREE)
-    foreach(_ninfer_dll_glob
-      "avutil-*.dll" "avcodec-*.dll" "avformat-*.dll" "swscale-*.dll"
-      "swresample-*.dll" "libcurl*.dll" "z.dll")
-      file(GLOB _ninfer_dlls "${FFMPEG_VCPKG_TREE}/bin/${_ninfer_dll_glob}")
-      list(APPEND _list ${_ninfer_dlls})
-    endforeach()
+    file(GLOB _ninfer_dlls "${FFMPEG_VCPKG_TREE}/bin/*.dll")
+    list(APPEND _list ${_ninfer_dlls})
     list(REMOVE_DUPLICATES _list)
   endif()
   set(${out_var} "${_list}" PARENT_SCOPE)
@@ -127,10 +125,10 @@ function(ninfer_stage_runtime_dlls target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       ${_ninfer_rt_dlls} $<TARGET_FILE_DIR:${target}>
-    COMMENT "Staging runtime DLLs (ffmpeg/curl) next to ${target}")
+    COMMENT "Staging vcpkg runtime DLL closure next to ${target}")
 endfunction()
 
-# Stage the shared FFMPEG/curl closure once next to the test executables. All test
+# Stage the complete vcpkg DLL closure once next to the test executables. All test
 # exes share a single per-config runtime directory, so one copy serves every one of
 # them (anchored on any always-built test target for the directory).
 function(ninfer_stage_test_runtime_dlls anchor_target)
@@ -145,5 +143,5 @@ function(ninfer_stage_test_runtime_dlls anchor_target)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_ninfer_test_rt_dlls}
             "$<TARGET_FILE_DIR:${anchor_target}>"
-    COMMENT "Staging runtime DLLs (ffmpeg/curl) next to test executables")
+    COMMENT "Staging vcpkg runtime DLL closure next to test executables")
 endfunction()
