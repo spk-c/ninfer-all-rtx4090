@@ -379,6 +379,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install Debian build dependencies and official CUDA Toolkit
         run: .github/scripts/install-linux-release-tools.sh
+      - name: Clean APT cache and verify disk space
+        run: |
+          apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/cuda-keyring.deb
+          free_gb=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ')
+          echo "Available disk: $(( free_gb / 1024 / 1024 / 1024 )) GiB"
+          if (( free_gb < 25 * 1024 * 1024 * 1024 )); then
+            echo "::error::Only $(( free_gb / 1024 / 1024 / 1024 )) GiB free; need at least 25 GiB for a 5-arch build with ccache"
+            df -h
+            exit 1
+          fi
       - id: compiler-cache
         name: Install pinned object cache
         run: python3.11 .github/scripts/install-compiler-cache.py
