@@ -11,6 +11,7 @@ COMPILER_INPUTS = {
     'scripts/build-native.bat', 'scripts/build.ps1',
 }
 RUNTIME_INPUTS = {
+    'cmake/NinferTargets.cmake',
     'scripts/run.sh', 'scripts/run.bat', 'scripts/download-model.sh',
     'scripts/download-model.bat', 'scripts/package-release.ps1',
     'scripts/package-linux-release.py', 'scripts/assemble-universal-release.py',

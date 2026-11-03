@@ -697,6 +697,68 @@ their specific coverage limits are disclosed in their sections.
 
 ## Concrete next optimization questions
 
+### 2026-11-03: IQ4_XS register-cap screen
+
+A local, isolated probe tested the existing dense IQ4_XS vector kernel at
+`K=5120, T=6`, changing only its launch bounds to require four resident
+128-thread blocks. Both variants use `ggml_bridge_vec.cuh` from master
+`237cdff9`; the candidate copies its kernel and adds the second launch-bound
+argument, four. RTX 4090, driver 617.42, CUDA 13.4, MSVC 14.44:
+registers fell from 134 to 128, computed resident blocks increased from
+three to four, and neither variant spilled. No production kernel or route
+was changed. The candidate is rejected.
+
+Inputs were independently generated stored IQ4_XS blocks (random six-bit scale
+codes, non-linear nibble values, fixed exactly represented block scale
+1/512) and Q8 activation integers with scale 1/256. A naive FP64 dot decoded
+every stored weight independently. At all ten shapes below, both kernels
+passed relative RMS <1e-5 and maximum error/reference RMS <1e-4; worst
+observed values were 1.23e-8 and 3.08e-7. Their FP32 outputs were bit-identical.
+This checks these represented inputs, not arbitrary scales or other routes.
+The oracle covers the first weight bank of each shape; the seven other
+timing banks were not compared numerically.
+Retained artifact metadata identifies IQ4_XS objects with K=5120 and
+N=1024,6144,7168,10240,16384,17408,34816. Some objects supply bound views;
+these are physical object shapes, not a complete runtime-call inventory.
+N=255,257,5120 are additional synthetic controls at this K. Only the
+unfused dense T6 kernel is screened.
+
+Nine order-alternating event-timed pairs per shape, 256 launches per arm,
+rotated eight weight banks. Times are CUDA event microseconds per launch,
+including any host-submission gaps; paired changes
+are candidate/baseline duration, so positive means slower.
+The initial screen covered N=255,257,5120,17408. The other six shapes were
+added after checking the artifact metadata; the original pairs are retained.
+
+| N | Baseline median us | Candidate median us | Paired median change | Full pair range | Slower pairs |
+|---|---:|---:|---:|---:|---:|
+| 255 | 6.263 | 6.212 | +0.53% | -12.18 to +56.47% | 5/9 |
+| 257 | 6.248 | 5.932 | -6.77% | -28.33 to +10.82% | 2/9 |
+| 1024 | 7.955 | 8.448 | +11.55% | -30.86 to +32.15% | 5/9 |
+| 5120 | 18.312 | 20.676 | +8.16% | +6.40 to +22.94% | 9/9 |
+| 6144 | 23.868 | 24.060 | -4.05% | -19.54 to +15.84% | 4/9 |
+| 7168 | 27.868 | 26.832 | -4.26% | -15.68 to +9.51% | 4/9 |
+| 10240 | 38.043 | 36.763 | -2.03% | -10.36 to +7.69% | 3/9 |
+| 16384 | 57.755 | 59.136 | +1.70% | -3.51 to +7.07% | 6/9 |
+| 17408 | 59.008 | 62.956 | +1.19% | -1.57 to +13.65% | 7/9 |
+| 34816 | 119.044 | 123.055 | +0.31% | -11.90 to +18.75% | 5/9 |
+
+Clocks were not locked: the desktop GPU moved from 330/810 MHz before the
+first screen to 2535/10501 MHz afterwards, at 42–43 C. The shape extension
+moved from 360/810 to 2685/10501 MHz, at 41–57 C. CPU compilation and another
+application were active; no CPU/WDDM attribution was collected. Short
+shapes have substantial spread, and eight small matrices fit in L2, unlike
+the larger shapes. These are bounded screening results, not stable
+production latency estimates. All adverse pairs remain in the results.
+Some artifact shapes have favorable paired medians, but every added shape
+also has slower pairs. The regressions and spread give no reason to advance this candidate to
+whole-Engine A/B or broader qualification. No end-to-end change is claimed.
+
+Probe source, compile log, raw pairs and GPU snapshots remain locally under
+`profiles/bench/rtx4090-release-20261103/iq4-probe/`.
+
+### Remaining questions
+
 - IQ4_XS is the next weight-format group:18.49% DFlash2 GPU kernel time,
  134 registers and 24% occupancy in the captured T6 route. Investigate schedules
  for actual matrix shapes and instruction/register lifetime, with DRAM already

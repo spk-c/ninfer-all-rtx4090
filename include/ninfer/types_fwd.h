@@ -53,6 +53,9 @@ enum class SuspendWeightSource : std::uint8_t;
 struct ModelSuspendOptions;
 struct HybridExpertOptions;
 struct NgramTableOptions;
+struct LoraAdapterSource;
+struct ControlVectorSource;
+struct ControlVectorLayers;
 struct EngineOptions;
 
 // ninfer/request.h
@@ -72,6 +75,7 @@ struct ExecutionOptions;
 struct OutputOptions;
 struct NgramSessionHints;
 struct RequestOptions;
+struct LoraScale;
 enum class MediaKind : std::uint8_t;
 enum class ImageResizePolicy : std::uint8_t;
 enum class ImageDetail : std::uint8_t;

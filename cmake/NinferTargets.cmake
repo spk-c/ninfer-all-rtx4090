@@ -96,13 +96,25 @@ endfunction()
 # before main (0xC0000135). Stage the full closure next to each binary so it runs
 # standalone.
 
-# Collect the entire vcpkg runtime DLL closure, including transitive dependencies of
+# Collect the vcpkg and cuBLAS runtime DLL closures, including transitive dependencies of
 # FFmpeg and curl (OpenSSL, Brotli, codecs, etc.). Staging only their direct DLLs
 # makes the Windows loader abort before main with STATUS_DLL_NOT_FOUND (0xC0000135).
 function(ninfer_runtime_dll_list out_var)
   set(_list "")
   if(WIN32 AND NINFER_WINDOWS_KERNEL_DLL AND TARGET ninfer_kernels)
     list(APPEND _list "$<TARGET_FILE:ninfer_kernels>")
+  endif()
+  if(WIN32 AND TARGET CUDA::cublas)
+    # CUDA 13 puts redistributable DLLs in bin/x64; older Toolkits use bin.
+    # Do not rely on the Toolkit being on PATH, including on driverless CI hosts.
+    foreach(_name cublas cublasLt)
+      find_file(_ninfer_cuda_dll
+        NAMES "${_name}64_${CUDAToolkit_VERSION_MAJOR}.dll"
+        PATHS "${CUDAToolkit_BIN_DIR}" "${CUDAToolkit_BIN_DIR}/x64"
+        NO_DEFAULT_PATH NO_CACHE REQUIRED)
+      list(APPEND _list "${_ninfer_cuda_dll}")
+      unset(_ninfer_cuda_dll)
+    endforeach()
   endif()
   if(WIN32 AND DEFINED FFMPEG_VCPKG_TREE)
     file(GLOB _ninfer_dlls "${FFMPEG_VCPKG_TREE}/bin/*.dll")
@@ -125,10 +137,10 @@ function(ninfer_stage_runtime_dlls target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       ${_ninfer_rt_dlls} $<TARGET_FILE_DIR:${target}>
-    COMMENT "Staging vcpkg runtime DLL closure next to ${target}")
+    COMMENT "Staging Windows runtime DLL closure next to ${target}")
 endfunction()
 
-# Stage the complete vcpkg DLL closure once next to the test executables. All test
+# Stage the complete runtime DLL closure once next to the test executables. All test
 # exes share a single per-config runtime directory, so one copy serves every one of
 # them (anchored on any always-built test target for the directory).
 function(ninfer_stage_test_runtime_dlls anchor_target)
@@ -140,8 +152,9 @@ function(ninfer_stage_test_runtime_dlls anchor_target)
     return()
   endif()
   add_custom_target(ninfer_stage_test_runtime_dlls ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${anchor_target}>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_ninfer_test_rt_dlls}
             "$<TARGET_FILE_DIR:${anchor_target}>"
-    COMMENT "Staging vcpkg runtime DLL closure next to test executables")
+    COMMENT "Staging Windows runtime DLL closure next to test executables")
 endfunction()
