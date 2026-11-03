@@ -161,12 +161,12 @@ jobs:
             archs: '70;75;80;86;89'
             cuda: 12.9.2
             installer: cuda_12.9.2_windows_x86_64_network.exe
-            packages: nvcc cudart cublas_dev nvtx thrust cuda_profiler_api
+            packages: nvcc cudart cublas cublas_dev nvtx thrust cuda_profiler_api
           - label: sm_75;80;86;89;120a
             archs: '75;80;86;89;120a'
             cuda: 13.4.3
             installer: cuda_13.4.3_windows_x86_64_network.exe
-            packages: nvcc crt nvvm cudart cublas_dev nvtx thrust cuda_profiler_api
+            packages: nvcc crt nvvm cudart cublas cublas_dev nvtx thrust cuda_profiler_api
     steps:
       - uses: actions/checkout@v7
       # The compiler, runtime, cuBLAS import library and the NVTX and CCCL headers: a configure and
