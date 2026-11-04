@@ -168,6 +168,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test dependencies unavailable' }
           cmake --build build-release --parallel 2
           if ($LASTEXITCODE -ne 0) { throw 'Native test compilation failed' }
+          # Check loader dependencies before starting hundreds of CTest processes.
+          $testProgram=Join-Path $pwd 'build-release/tests/ninfer_tests.exe'
+          $savedPath=$env:PATH
+          try {
+            $env:PATH="$env:SystemRoot\System32;$env:SystemRoot"
+            & $testProgram --list | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Test bundle cannot start without Toolkit on PATH; check staged DLLs' }
+          } finally {
+            $env:PATH=$savedPath
+          }
           ctest --test-dir build-release --parallel 2 --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'Native CTest failed' }
       - name: Package and verify Windows CUDA 13.4 SM89 release

@@ -19,6 +19,7 @@ on:
       - 'scripts/assemble-universal-release.py'
       - 'apps/launcher/**'
       - 'cmake/NinferRuntime.cmake'
+      - 'cmake/NinferTargets.cmake'
       - 'cmake/runtime_dispatch.cpp.in'
       - 'tests/release/**'
   workflow_call:

@@ -40,6 +40,12 @@ constexpr int kSteps = 4096;
 } // namespace
 
 int main(int argc, char** argv) {
+    // GPU-only correctness test: no device on hosted Windows runners is a skip, not a crash.
+    // Real GPU hosts still execute the complete numerical checks below.
+    if (ninfer::test::cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
     const int width = argc > 1 ? std::atoi(argv[1]) : 1; // tokens per call: 1 = decode, 4 = MTP3
     if (argc > 2 && std::string_view(argv[2]) == "--two-stage") {
         // Prefill widths through the two-stage kernels, which stage an FP16 state through FP32.

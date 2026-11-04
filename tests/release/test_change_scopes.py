@@ -56,6 +56,12 @@ class ChangeScopesTest(unittest.TestCase):
         self.assertTrue(result['calculator'])
         self.assertFalse(result['changed'])
 
+    def test_runtime_dll_staging_changes_run_release_checks(self):
+        result = SCOPES.classify(['cmake/NinferTargets.cmake'])
+        self.assertTrue(result['native'])
+        self.assertTrue(result['changed'])
+        self.assertTrue(result['release_tools'])
+
 
 class BuildInputsTest(unittest.TestCase):
     def setUp(self):

@@ -113,6 +113,12 @@ int window_case(const char* name, std::int32_t pages, std::int32_t table_count,
 } // namespace
 
 int main() {
+    // GPU-only correctness test: no device on hosted Windows runners is a skip, not a crash.
+    // Real GPU hosts still execute the complete numerical checks below.
+    if (ninfer::test::cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
     int failures = 0;
     // One row deep into a long history: the sink page, then the pages from the window on.
     failures += window_case("deep single row", 4096, 3, {2}, {200000}, 1, nullptr, 1, 4096);

@@ -151,6 +151,12 @@ int run_k(std::int32_t k) {
 } // namespace
 
 int main() {
+    // GPU-only correctness test: no device on hosted Windows runners is a skip, not a crash.
+    // Real GPU hosts still execute the complete numerical checks below.
+    if (ninfer::test::cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
     try {
         const int failures = run_k(6144) + run_k(17408);
         std::cout << (failures == 0 ? "OK" : "FAIL")
