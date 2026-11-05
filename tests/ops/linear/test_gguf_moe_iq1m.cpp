@@ -238,6 +238,12 @@ int run(const char* name, int rows, int k, int tokens, int column_group, std::mt
 } // namespace
 
 int main() {
+    // GPU-dependent test; hosted Windows CI does not provide a CUDA GPU.
+    int devices = 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
     try {
         int device = 0;
         check(cudaGetDevice(&device), "device");
