@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string]$UpstreamExe,
     [Parameter(Mandatory = $true)][string]$ForkExe,
     [ValidateRange(2, 30)][int]$Repetitions = 6,
-    [ValidateRange(1, 15)][int]$DraftTokens = 5,
+    [ValidateRange(1, 7)][int]$DraftTokens = 5,
     [ValidateSet('dflash2', 'none')][string]$Spec = 'dflash2',
     [string]$OutputDir
 )
@@ -73,8 +73,10 @@ $Manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Outpu
 # The runner alternates AB/BA within repetitions. Both CLIs remain next to
 # their own runtime DLLs; the opt-in preflight validates --version on each.
 $Prompt = 'Explain CUDA graph launch overhead and GPU memory bandwidth in five sentences.'
-$BaseArgs = '{exe} "' + $Model + '" --prompt "' + $Prompt + '" --max-new 256 --max-context 8192 --kv-dtype rk4v4 --greedy --gdn-state-fp16'
-$Configs = @('plain:' + $BaseArgs)
+$BaseArgs = '{exe} "' + $Model + '" --prompt "' + $Prompt + '" --max-new 256 --max-context 8192 --kv-dtype rk4v4 --greedy --gdn-state-fp16 --ngram-draft-tokens 0'
+# Auto-speculation may activate DFlash2 for eligible model artifacts unless --spec is explicit.
+# Keep the non-speculative baseline genuinely plain for both builds.
+$Configs = @('plain:' + $BaseArgs + ' --spec none')
 if ($Spec -eq 'dflash2') {
     $Configs += 'dflash2-k' + $DraftTokens + ':' + $BaseArgs + ' --spec dflash2 --draft-tokens ' + $DraftTokens
 }
