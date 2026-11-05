@@ -77,3 +77,5 @@ jobs:
       - run: python -m unittest discover -s tests/release -p test_windows_kernel_dll.py -v
       - run: python -m unittest discover -s tests/release -p test_windows_runtime_dlls.py -v
       - run: python -m unittest discover -s tests/release -p test_portable_runtime.py -v
+
+# Test branch validates the upstream/fork A/B script with the Windows PowerShell parser.
