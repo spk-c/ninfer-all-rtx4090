@@ -7,8 +7,9 @@
 #   12.8's host_config.h rejects outright - it accepts 1910-1949. If a VS 2026 cl.exe wins on
 #   PATH you get a wall of host_config errors that say nothing about the compiler version.
 #
-#   CUDA 12.8, forced through CUDACXX. If an older toolkit is also installed it is picked up from
-#   PATH instead and the configure step fails the CMakeLists version guard.
+#   The selected CUDA toolkit is forced through CUDACXX, avoiding a different nvcc on PATH.
+#   The existing default prefers CUDA 12.8/12.9; -CudaVersion selects a newer installed toolkit
+#   explicitly without silently changing the toolchain of existing builds.
 #
 #   The Ninja generator. MSBuild's CUDA integration needs CUDA_PATH_V12_8, which the CUDA
 #   installer does not always set; without it CudaToolkitDir resolves empty and every .cu fails.
@@ -22,14 +23,21 @@
 #   .\scripts\build.ps1 -Benchmarks      ... include bench\ (implied by -Package)
 #   .\scripts\build.ps1 -Clean           delete the build directory first
 #   .\scripts\build.ps1 -Target ninfer-serve
+#   .\scripts\build.ps1 -Arch 89 -CudaVersion 13.4 -Benchmarks -BuildDir build-rtx4090
 [CmdletBinding()]
 param(
     [switch]$Test,
     [switch]$Package,
     [switch]$Clean,
     [switch]$Benchmarks,
+    [switch]$ExperimentalFastSfu,
+    [switch]$ExperimentalVectorSilu,
+    [switch]$ExperimentalGgufIq3sT6Loop,
     [string]$Target,
+    [ValidateRange(0, 256)][int]$Jobs = 0,
     [string]$BuildDir,
+    [string]$PythonExecutable,
+    [ValidateSet('12.8', '12.9', '13.1', '13.2', '13.3', '13.4')][string]$CudaVersion,
     [ValidateSet('75', '80', '86', '89')][string]$Arch = '86'
 )
 
@@ -68,12 +76,16 @@ $CudaCandidates = @(
     'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe',
     'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe'
 )
+if ($CudaVersion) {
+    $CudaCandidates = @("C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$CudaVersion\bin\nvcc.exe")
+}
 $Nvcc = $CudaCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $Nvcc) {
     throw @"
-No CUDA 12.8+ toolkit found. Looked in:
+No suitable CUDA toolkit found. Looked in:
 $($CudaCandidates -join "`n")
-CMakeLists requires CUDA >= 12.8. Set CUDACXX yourself if your toolkit lives elsewhere.
+CMakeLists requires CUDA >= 12.8. Choose an installed version with -CudaVersion
+(or install CUDA 12.8/12.9 to use the existing default).
 "@
 }
 
@@ -89,13 +101,32 @@ $VcVars could not select MSVC toolset 14.44 (MSVC 19.44), the oldest qualified c
 Update Visual Studio 2022 to 17.14, or install its 14.44 build tools in the Visual Studio Installer.
 "@
 }
+# Windows can expose both PATH and Path. Keep the vcvars MSVC path and
+# import all other variables without allowing a mixed-case Path to replace it.
+$VcPath = $VcVarsOutput | Where-Object {
+    $_ -match '^PATH=' -and $_ -match 'MSVC\\[^;]+\\bin\\HostX64\\x64'
+} | Select-Object -First 1
+if (-not $VcPath) { throw 'vcvars64 did not return the expected MSVC PATH' }
 $VcVarsOutput | ForEach-Object {
-    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
+    if ($_ -match '^([^=]+)=(.*)$' -and $Matches[1] -ine 'PATH') {
+        Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2]
+    }
 }
+$env:PATH = $VcPath.Substring(5)
 $env:CUDACXX = $Nvcc
+
+$VcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { 'C:\vcpkg' }
+$VcpkgToolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+if (-not (Test-Path -LiteralPath $VcpkgToolchain -PathType Leaf)) {
+    throw "vcpkg toolchain not found: $VcpkgToolchain (set VCPKG_ROOT)"
+}
 
 $cl = (Get-Command cl.exe -ErrorAction SilentlyContinue)
 if ($cl) { Write-Host "toolchain: $($cl.Source)" }
+$rc = (Get-Command rc.exe -ErrorAction SilentlyContinue)
+if (-not $rc) { throw 'Windows SDK rc.exe was not found in the VS 2022 build environment' }
+Write-Host "toolchain: $($rc.Source)"
+$RcCmake = $rc.Source.Replace('\', '/')
 
 # --- configure and build ----------------------------------------------------------------------
 
@@ -110,16 +141,34 @@ try {
     # that begins with "-D", and cmake then sees the literal "$Arch".
     $RuntimeOption = if ($Package) { 'ON' } else { 'OFF' }
     $BenchmarksOption = if ($BuildBenchmarks) { 'ON' } else { 'OFF' }
+    $TestsOption = if ($Test) { 'ON' } else { 'OFF' }
+    $SfuOption = if ($ExperimentalFastSfu) { 'ON' } else { 'OFF' }
+    $VectorSiluOption = if ($ExperimentalVectorSilu) { 'ON' } else { 'OFF' }
+    $GgufIq3sT6LoopOption = if ($ExperimentalGgufIq3sT6Loop) { 'ON' } else { 'OFF' }
+    $PythonArgs = @()
+    if ($PythonExecutable) {
+        if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
+            throw "Selected Python executable does not exist: $PythonExecutable"
+        }
+        $PythonArgs = @("-DPython3_EXECUTABLE=$((Resolve-Path -LiteralPath $PythonExecutable).Path.Replace('\', '/'))")
+    }
     cmake -S . -B $BuildDir -G Ninja '-DCMAKE_BUILD_TYPE=Release' "-DCMAKE_CUDA_ARCHITECTURES=$Arch" `
-          "-DNINFER_BUILD_BENCHMARKS=$BenchmarksOption" "-DNINFER_SHARED_RUNTIME=$RuntimeOption"
+          "-DCMAKE_RC_COMPILER=$RcCmake" `
+          "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain" '-DVCPKG_TARGET_TRIPLET=x64-windows' `
+          "-DNINFER_BUILD_BENCHMARKS=$BenchmarksOption" "-DNINFER_SHARED_RUNTIME=$RuntimeOption" `
+          "-DBUILD_TESTING=$TestsOption" `
+          "-DNINFER_SFU_SIGMOID_SILU=$SfuOption" "-DNINFER_SFU_SOFTPLUS=$SfuOption" `
+          "-DNINFER_ADA_SILU_BF16X8=$VectorSiluOption" `
+          "-DNINFER_ADA_GGUF_IQ3S_T6_LOOP=$GgufIq3sT6LoopOption" @PythonArgs
     if ($LASTEXITCODE -ne 0) { throw "configure failed ($LASTEXITCODE)" }
 
     $buildArgs = @('--build', $BuildDir)
+    if ($Jobs) { $buildArgs += @('--parallel', [string]$Jobs) }
     if ($Target) { $buildArgs += @('--target', $Target) }
     cmake @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 
-    if ($Test) {
+    if ($Test -and -not $Target) {
         # One GPU, so keep the parallelism low: unrelated CUDA tests contend for memory and
         # produce failures that do not reproduce when the test is run on its own.
         ctest --test-dir $BuildDir -j2 --output-on-failure
