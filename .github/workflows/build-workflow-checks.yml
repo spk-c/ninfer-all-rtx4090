@@ -12,6 +12,7 @@ on:
       - '.github/workflows/linux-cache-bootstrap.yml'
       - 'scripts/package-release.ps1'
       - 'scripts/build.ps1'
+      - 'scripts/compare-upstream-rtx4090.ps1'
       - 'scripts/test-rtx4090-release-smoke.ps1'
       - '.github/workflows/rtx4090-auto-release.yml'
       - '.github/actions/windows-sm89/**'
@@ -67,7 +68,7 @@ jobs:
       - name: Parse Windows release and build scripts
         shell: pwsh
         run: |
-          foreach ($path in 'scripts/package-release.ps1', 'scripts/build.ps1', 'scripts/test-rtx4090-release-smoke.ps1') {
+          foreach ($path in 'scripts/package-release.ps1', 'scripts/build.ps1', 'scripts/test-rtx4090-release-smoke.ps1', 'scripts/compare-upstream-rtx4090.ps1') {
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $path), [ref]$null, [ref]$parseErrors) | Out-Null
             if ($parseErrors.Count) { throw ($path + ": " + ($parseErrors | Out-String)) }
