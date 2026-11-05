@@ -2,14 +2,23 @@
 // pinned host memory or on disk), feed chat prompts and greedy-decode short answers, checking that
 // each answer names the expected fact and reporting prefill and decode throughput. Where decode
 // replays CUDA graphs (experts not on disk), the prompts run again on an eager executor and every
-// generated token must be the same. An artifact with its MTP block also decodes the prompts by
+// generated token must be the same. Sequences that take single steps or speculative rounds in
+// turn, which moves the graphs the sequences share from one to the next at every step, must decode
+// exactly as each did alone. An artifact with its MTP block also decodes the prompts by
 // speculative rounds (MTP drafts, one verification, the greedy run kept, the rest dropped by the
-// commit), alone and two sequences at once: fixed-mode repeats must match; differences from plain
-// decode or another batch composition are reported. The context cache's
-// sequence images (live and at a snapshot) must continue as the sequence they were taken from.
+// commit), alone and two sequences at once (also with each row verifying its own number of drafts,
+// from none to all): fixed-mode repeats must match; differences from plain
+// decode or another batch composition are reported. After plain steps of two sequences at once,
+// which advance the MTP block by its catch-up alone, drafts must survive at least half as often
+// as after the prompts. An artifact with its DFlash2 drafter takes the same checks with the
+// DFlash2 block proposing the drafts from its ring of committed target features. Prompts of
+// several sequences packed in one span (host or disk experts on one device) must leave each piece
+// the logits it gets alone, bit for bit. The context cache's sequence images (live and at a
+// snapshot) must continue as the sequence they were taken from.
 //
 //   NINFER_QWEN4_EXP_ARTIFACT  the model's .ninfer (required; skips without it)
 //   NINFER_QWEN4_EXP_DRAFTS    MTP drafts a round (default 3; 0 skips the speculative check)
+//   NINFER_QWEN4_EXP_DFLASH2_DRAFTS  DFlash2 drafts a round (default 7; 0 skips its check)
 //   NINFER_QWEN4_EXP_DEVICES   comma-separated device ids, one pipeline stage each (default 0)
 //   NINFER_QWEN4_EXP_EXPERTS   device | host | disk (default device)
 //   NINFER_QWEN4_EXP_NGRAM_TABLE  the n-gram table artifact of a model stored without its table
@@ -36,6 +45,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -245,6 +255,26 @@ int check_batch_and_snapshot(const Model& model, DeviceContext& device, Executor
         if (repetition == 0) { first_batch = together; }
     }
     int failures = 0;
+    // Single steps of the sequences in turn: each step's graphs ran the sequence before it.
+    std::vector<std::vector<int>> turns(texts.size());
+    for (std::uint32_t s = 0; s < texts.size(); ++s) {
+        executor.reset(s);
+        turns[s].push_back(prefill(executor, model, s, texts[s], logits));
+    }
+    for (int step = 1; step < kSteps; ++step) {
+        for (std::uint32_t s = 0; s < texts.size(); ++s) {
+            const std::int32_t token = turns[s].back();
+            executor.forward(s, std::span(&token, 1), 1);
+            read_logits(executor, logits);
+            turns[s].push_back(argmax(logits, model.resources().public_token_count));
+        }
+    }
+    for (std::size_t s = 0; s < texts.size(); ++s) {
+        const bool same = turns[s] == alone[s];
+        std::cout << (same ? "OK   " : "FAIL ") << "steps in turn decode as alone, sequence " << s
+                  << '\n';
+        failures += same ? 0 : 1;
+    }
     for (std::size_t s = 0; s < texts.size(); ++s) {
         const bool same = together[s] == alone[s];
         std::cout << (same ? "SAME " : "DIFF ") << "batched versus alone, sequence " << s << ": \""
@@ -267,24 +297,131 @@ int check_batch_and_snapshot(const Model& model, DeviceContext& device, Executor
     return failures;
 }
 
+// How two logit vectors differ: the positions that differ and the largest difference.
+std::string difference(const std::vector<__nv_bfloat16>& a, const std::vector<__nv_bfloat16>& b) {
+    std::size_t count = 0;
+    float largest     = 0.0F;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const float x = __bfloat162float(a[i]);
+        const float y = __bfloat162float(b[i]);
+        if (std::memcmp(&a[i], &b[i], 2) != 0) {
+            ++count;
+            largest = std::max(largest, std::fabs(x - y));
+        }
+    }
+    return " (" + std::to_string(count) + " logits differ, by up to " + std::to_string(largest) +
+           ")";
+}
+
+// Prompts of several sequences in one span, as the Engine packs prompt steps with host or disk
+// experts on one device: each piece's logits must equal those of its prompt fed alone bit for bit,
+// and each sequence must then decode as it did alone. The pieces take one to two chunks, one is a
+// few tokens (the decode form of the experts) between others, one ends in a chunk of 37 tokens
+// (which the staged misses take when the CPU shares them), and one stops at a chunk boundary of its
+// prompt, whose rest is fed alone after the span.
+int check_packed_prompts(const Model& model, DeviceContext& device, ExecutorOptions options) {
+    options.sequences = 4;
+    Executor executor(model, device, options);
+    if (!executor.packs_prompts()) {
+        std::cout << "packed prompts: not checked (no prompt spans)\n";
+        return 0;
+    }
+    const std::uint32_t c = options.prefill_chunk;
+    const std::array<std::size_t, 4> lengths = {c + 37, 2 * c + c / 3, c / 2 + 1, 6};
+    std::vector<std::vector<std::int32_t>> prompts;
+    for (std::size_t s = 0; s < lengths.size(); ++s) {
+        std::string text = "<|im_start|>user\nWhich room was warmest? Answer with its number.\n";
+        for (std::size_t i = 0; i < lengths[1] / 8 + 16; ++i) {
+            text += "Reading " + std::to_string(s * 1000 + i) + ": room " +
+                    std::to_string((s * 7 + i * 3) % 23) + " stood at " +
+                    std::to_string((s * 13 + i * 37) % 41) + " degrees.\n";
+        }
+        const auto ids = model.resources().tokenizer->encode(text, {.parse_added_tokens = true});
+        if (ids.size() < lengths[s]) { throw std::runtime_error("packed prompts: short fixture"); }
+        prompts.emplace_back(ids.begin(), ids.begin() + std::ptrdiff_t(lengths[s]));
+    }
+    constexpr int kSteps = 8;
+    const std::size_t vocab = model.config().vocab_size;
+    std::vector<__nv_bfloat16> logits(vocab);
+    std::vector<std::vector<__nv_bfloat16>> alone_logits;
+    std::vector<std::vector<int>> alone;
+    for (std::uint32_t s = 0; s < prompts.size(); ++s) {
+        executor.reset(s);
+        executor.forward(s, prompts[s], 1);
+        read_logits(executor, logits);
+        alone_logits.push_back(logits);
+        alone.push_back(decode_alone(executor, model, s,
+                                     argmax(logits, model.resources().public_token_count), kSteps,
+                                     logits));
+    }
+    // Sequence 2 (one chunk), 3 (six tokens), 0 (two chunks) and the first two chunks of 1.
+    for (std::uint32_t s = 0; s < prompts.size(); ++s) { executor.reset(s); }
+    const std::array<std::uint32_t, 4> order = {2, 3, 0, 1};
+    std::vector<PromptPiece> pieces;
+    for (const std::uint32_t s : order) {
+        const std::size_t n = s == 1 ? 2 * std::size_t(c) : prompts[s].size();
+        pieces.push_back({.sequence = s, .tokens = std::span(prompts[s]).first(n)});
+    }
+    executor.forward_pieces(pieces);
+    std::vector<__nv_bfloat16> packed(vocab * pieces.size());
+    if (cudaStreamSynchronize(executor.head_stream()) != cudaSuccess ||
+        cudaMemcpy(packed.data(), executor.logits(std::uint32_t(pieces.size())).data,
+                   packed.size() * 2, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        throw std::runtime_error("reading the packed logits failed");
+    }
+    const std::size_t domain = model.resources().public_token_count;
+    int failures = 0;
+    std::array<int, 4> firsts{};
+    for (std::size_t p = 0; p < order.size(); ++p) {
+        const std::uint32_t s = order[p];
+        const std::vector<__nv_bfloat16> column(packed.begin() + std::ptrdiff_t(p * vocab),
+                                                packed.begin() + std::ptrdiff_t((p + 1) * vocab));
+        firsts[s] = argmax(column, domain);
+        if (s == 1) { continue; }
+        const bool same = std::memcmp(column.data(), alone_logits[s].data(), vocab * 2) == 0;
+        std::cout << (same ? "OK   " : "FAIL ") << "packed piece logits equal alone, sequence "
+                  << s << ", " << prompts[s].size() << " tokens"
+                  << (same ? std::string() : difference(column, alone_logits[s])) << '\n';
+        failures += same ? 0 : 1;
+    }
+    executor.forward(1, std::span(prompts[1]).subspan(2 * std::size_t(c)), 1);
+    read_logits(executor, logits);
+    const bool rest = std::memcmp(logits.data(), alone_logits[1].data(), vocab * 2) == 0;
+    std::cout << (rest ? "OK   " : "FAIL ") << "prompt continued after a packed piece equals alone"
+              << (rest ? std::string() : difference(logits, alone_logits[1])) << '\n';
+    failures += rest ? 0 : 1;
+    firsts[1] = argmax(logits, domain);
+    for (std::uint32_t s = 0; s < prompts.size(); ++s) {
+        const bool same = decode_alone(executor, model, s, firsts[s], kSteps, logits) == alone[s];
+        std::cout << (same ? "OK   " : "FAIL ") << "sequence " << s
+                  << " decodes after a packed prompt as alone\n";
+        failures += same ? 0 : 1;
+    }
+    return failures;
+}
+
 // Greedy tokens of one speculative round per step for `sequences` (prefilled, their first tokens
-// in `rows`), until each row holds `steps` tokens: the MTP block drafts from each row's last
-// token, the target verifies the anchor and the drafts, the drafts up to the first that differs
-// from the verification's argmax are accepted with the argmax after them, and the commit keeps the
-// tokens fed up to there. Counts the drafts proposed and accepted.
+// in `rows`), until each row holds `steps` tokens: the drafter (the MTP block or DFlash2) drafts
+// from each row's last token, the target verifies the anchor and the drafts, the drafts up to the
+// first that differs from the verification's argmax are accepted with the argmax after them, and
+// the commit keeps the tokens fed up to there. Counts the drafts proposed and accepted.
 // With `wrong`, one draft of each round (a different one each round) is replaced by another
-// token, so rounds keep every number of tokens from one to all.
+// token, so rounds keep every number of tokens from one to all. With `packed`, sequence j
+// verifies (round + j) % (k + 1) of its drafts in round `round`, the rows packed at their own
+// widths as the Engine packs a batch: every width from the anchor alone to all k drafts, and
+// different widths within a round. Runs at most `rounds` rounds.
 void decode_speculative(Executor& executor, const Model& model,
                         std::span<const std::uint32_t> sequences,
                         std::vector<std::vector<int>>& rows, int steps, std::uint64_t& drafted,
-                        std::uint64_t& accepted, bool wrong = false) {
+                        std::uint64_t& accepted, bool wrong = false, bool packed = false,
+                        std::size_t rounds = SIZE_MAX) {
     const std::size_t k      = executor.draft_tokens();
     const std::size_t w      = k + 1;
     const std::size_t b      = sequences.size();
     const std::size_t vocab  = model.config().vocab_size;
     const std::size_t domain = model.resources().public_token_count;
     std::vector<__nv_bfloat16> logits(vocab * w * b);
-    for (std::size_t round = 0;; ++round) {
+    for (std::size_t round = 0; round < rounds; ++round) {
         std::vector<std::uint32_t> live;
         std::vector<std::size_t> index;
         for (std::size_t j = 0; j < b; ++j) {
@@ -303,35 +440,41 @@ void decode_speculative(Executor& executor, const Model& model,
                 draft       = (draft + 1) % static_cast<std::int32_t>(domain);
             }
         }
+        std::vector<std::uint32_t> widths;
         for (std::size_t r = 0; r < live.size(); ++r) {
+            const std::size_t own = packed ? (round + index[r]) % (k + 1) : k;
+            widths.push_back(std::uint32_t(own + 1));
             tokens.push_back(anchors[r]);
             tokens.insert(tokens.end(), proposed.begin() + std::ptrdiff_t(r * k),
-                          proposed.begin() + std::ptrdiff_t((r + 1) * k));
+                          proposed.begin() + std::ptrdiff_t(r * k + own));
         }
-        executor.verify(live, tokens);
-        const std::size_t columns = live.size() * w;
+        executor.verify(live, tokens, widths);
+        const std::size_t columns = tokens.size();
         if (cudaStreamSynchronize(executor.head_stream()) != cudaSuccess ||
             cudaMemcpy(logits.data(), executor.logits(std::uint32_t(columns)).data,
                        columns * vocab * 2, cudaMemcpyDeviceToHost) != cudaSuccess) {
             throw std::runtime_error("reading the verification logits failed");
         }
         std::vector<std::uint32_t> kept;
+        std::size_t start = 0;
         for (std::size_t r = 0; r < live.size(); ++r) {
-            auto& row       = rows[index[r]];
-            std::size_t col = 0;
+            const std::size_t own = widths[r] - 1;
+            auto& row             = rows[index[r]];
+            std::size_t col       = 0;
             for (;; ++col) {
                 const std::vector<__nv_bfloat16> column(
-                    logits.begin() + std::ptrdiff_t((r * w + col) * vocab),
-                    logits.begin() + std::ptrdiff_t((r * w + col + 1) * vocab));
+                    logits.begin() + std::ptrdiff_t((start + col) * vocab),
+                    logits.begin() + std::ptrdiff_t((start + col + 1) * vocab));
                 const int target = argmax(column, domain);
                 row.push_back(target);
-                if (col == k || target != proposed[r * k + col] || int(row.size()) >= steps) {
+                if (col == own || target != proposed[r * k + col] || int(row.size()) >= steps) {
                     break;
                 }
             }
-            drafted += k;
-            accepted += col < k ? col : k;
+            drafted += own;
+            accepted += col < own ? col : own;
             kept.push_back(std::uint32_t(col + 1));
+            start += widths[r];
         }
         executor.commit(live, kept);
     }
@@ -422,14 +565,14 @@ int check_speculative(const Model& model, DeviceContext& device, ExecutorOptions
     std::array<SequenceSnapshot, 2> snapshots;
     executor.snapshot(0, snapshots[0]);
     executor.snapshot(1, snapshots[1]);
-    auto repeated = rows;
-    decode_speculative(executor, model, both, rows, int(std::max(plain[0].size(), plain[1].size())),
-                       drafted, accepted);
+    const auto prompted = rows;
+    auto repeated       = rows;
+    const int steps     = int(std::max(plain[0].size(), plain[1].size()));
+    decode_speculative(executor, model, both, rows, steps, drafted, accepted);
     executor.restore(0, snapshots[0]);
     executor.restore(1, snapshots[1]);
     std::uint64_t ignored = 0, kept = 0;
-    decode_speculative(executor, model, both, repeated,
-                       int(std::max(plain[0].size(), plain[1].size())), ignored, kept);
+    decode_speculative(executor, model, both, repeated, steps, ignored, kept);
     for (std::uint32_t s = 0; s < 2; ++s) {
         const bool repeat = rows[s] == repeated[s];
         rows[s].resize(std::min(rows[s].size(), plain[s].size()));
@@ -441,6 +584,100 @@ int check_speculative(const Model& model, DeviceContext& device, ExecutorOptions
         std::cout << ((repeat && fact) ? "OK   " : "FAIL ")
                   << "batched speculative repeat and expected fact " << s << '\n';
         failures += repeat && fact ? 0 : 1;
+    }
+    // The same rows packed at their own widths, as the Engine verifies a batch.
+    std::array<std::vector<std::vector<int>>, 2> packed;
+    for (auto& run : packed) {
+        executor.restore(0, snapshots[0]);
+        executor.restore(1, snapshots[1]);
+        run = prompted;
+        decode_speculative(executor, model, both, run, steps, ignored, kept, false, true);
+    }
+    for (std::uint32_t s = 0; s < 2; ++s) {
+        const bool repeat = packed[0][s] == packed[1][s];
+        auto& answer      = packed[0][s];
+        answer.resize(std::min(answer.size(), plain[s].size()));
+        std::cout << (answer == plain[s] ? "SAME " : "DIFF ")
+                  << "packed speculative versus plain, sequence " << s << "\n";
+        const bool fact = model.resources().tokenizer->decode(answer).find(prompts[s].expect) !=
+                          std::string::npos;
+        std::cout << ((repeat && fact) ? "OK   " : "FAIL ")
+                  << "packed speculative repeat and expected fact " << s << '\n';
+        failures += repeat && fact ? 0 : 1;
+    }
+    // Rounds of sequences 0 and 1 in turn, each alone: the drafts' and verifications' graphs move
+    // between them every round, and each must decode its prompt as sequence 0 did alone.
+    std::vector<std::vector<int>> turns;
+    for (std::uint32_t s = 0; s < 2; ++s) {
+        executor.reset(s);
+        turns.push_back({prefill(executor, model, s, prompts[s].text, logits)});
+    }
+    for (bool more = true; more;) {
+        more = false;
+        for (std::uint32_t s = 0; s < 2; ++s) {
+            std::vector<std::vector<int>> row{turns[s]};
+            decode_speculative(executor, model, std::span(&s, 1), row, int(plain[s].size()),
+                               ignored, kept, false, false, 1);
+            turns[s] = std::move(row[0]);
+            more     = more || turns[s].size() < plain[s].size();
+        }
+    }
+    for (std::uint32_t s = 0; s < 2; ++s) {
+        const bool same = turns[s] == speculative[s];
+        std::cout << (same ? "OK   " : "FAIL ") << "speculative rounds in turn decode as alone, "
+                  << "sequence " << s << '\n';
+        failures += same ? 0 : 1;
+    }
+    // Plain steps of both sequences at once, as the Engine runs requests that cannot draft (near
+    // the end of the context or of a budget): each MTP block advances by its catch-up alone, and
+    // the rounds after them draft from the state it left, their drafts surviving at least half as
+    // often as after the prompts above. Both sequences take the prompt with the longest answer, so
+    // that rounds follow the steps.
+    {
+        constexpr int kPlainSteps = 6;
+        const auto longest        = static_cast<std::size_t>(
+            std::max_element(plain.begin(), plain.end(),
+                             [](const auto& a, const auto& b) { return a.size() < b.size(); }) -
+            plain.begin());
+        std::vector<std::vector<int>> resumed;
+        for (std::uint32_t s = 0; s < 2; ++s) {
+            executor.reset(s);
+            resumed.push_back({prefill(executor, model, s, prompts[longest].text, logits)});
+        }
+        const std::size_t domain = model.resources().public_token_count;
+        std::vector<__nv_bfloat16> pair(logits.size() * 2);
+        for (int step = 0; step < kPlainSteps; ++step) {
+            const std::array<std::int32_t, 2> next{resumed[0].back(), resumed[1].back()};
+            executor.decode(both, next);
+            if (cudaStreamSynchronize(executor.head_stream()) != cudaSuccess ||
+                cudaMemcpy(pair.data(), executor.logits(2).data, pair.size() * 2,
+                           cudaMemcpyDeviceToHost) != cudaSuccess) {
+                throw std::runtime_error("reading the batch logits failed");
+            }
+            for (std::size_t s = 0; s < 2; ++s) {
+                const std::vector<__nv_bfloat16> column(
+                    pair.begin() + std::ptrdiff_t(s * logits.size()),
+                    pair.begin() + std::ptrdiff_t((s + 1) * logits.size()));
+                resumed[s].push_back(argmax(column, domain));
+            }
+        }
+        std::uint64_t later_drafted = 0, later_accepted = 0;
+        decode_speculative(executor, model, both, resumed, int(plain[longest].size()),
+                           later_drafted, later_accepted);
+        const double before = double(accepted) / double(std::max<std::uint64_t>(drafted, 1));
+        const double after =
+            double(later_accepted) / double(std::max<std::uint64_t>(later_drafted, 1));
+        bool facts = true;
+        for (std::uint32_t s = 0; s < 2; ++s) {
+            facts = facts && model.resources().tokenizer->decode(resumed[s]).find(
+                                 prompts[longest].expect) != std::string::npos;
+        }
+        const bool kept_up = later_drafted > 0 && after >= 0.5 * before;
+        std::cout << (kept_up && facts ? "OK   " : "FAIL ") << "drafts after " << kPlainSteps
+                  << " plain steps of both sequences: " << later_accepted << " of "
+                  << later_drafted << " accepted (" << after << ", " << before
+                  << " after the prompts), expected facts\n";
+        failures += kept_up && facts ? 0 : 1;
     }
     return failures;
 }
@@ -579,6 +816,10 @@ int run(const char* artifact_path) {
     const std::uint32_t drafts =
         drafts_env != nullptr ? static_cast<std::uint32_t>(std::stoul(drafts_env)) : 3;
     load.mtp   = drafts > 0 && reader.directory().components.contains("mtp");
+    const char* dflash2_env = std::getenv("NINFER_QWEN4_EXP_DFLASH2_DRAFTS");
+    const std::uint32_t dflash2_drafts =
+        dflash2_env != nullptr ? static_cast<std::uint32_t>(std::stoul(dflash2_env)) : 7;
+    load.dflash2 = dflash2_drafts > 0 && reader.directory().components.contains("dflash2");
     auto model = load_model(reader, load, device);
     device.synchronize();
     const auto loaded = Clock::now();
@@ -651,6 +892,7 @@ int run(const char* artifact_path) {
     int failures = 0;
     const auto replayed = generate(*model, device, options, prompts, failures);
     failures += check_batch_and_snapshot(*model, device, options);
+    failures += check_packed_prompts(*model, device, options);
     failures += check_images(*model, device, options, prompts, replayed);
     if (load.mtp) {
         ExecutorOptions speculative = options;
@@ -658,6 +900,15 @@ int run(const char* artifact_path) {
         failures += check_speculative(*model, device, speculative, prompts, replayed);
     } else {
         std::cout << "speculative decoding: not checked (no MTP block, or no drafts)\n";
+    }
+    if (load.dflash2) {
+        std::cout << "DFlash2 drafts:\n";
+        ExecutorOptions speculative = options;
+        speculative.draft_tokens    = dflash2_drafts;
+        speculative.dflash2         = true;
+        failures += check_speculative(*model, device, speculative, prompts, replayed);
+    } else {
+        std::cout << "DFlash2 speculative decoding: not checked (no drafter, or no drafts)\n";
     }
     if (load.experts != ExpertResidency::Disk) {
         std::cout << "eager decode (no CUDA graphs):\n";

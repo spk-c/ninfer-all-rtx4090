@@ -527,10 +527,11 @@ dominate a small one. A follow-up turn over the same picture reuses it without e
 ## Expert residency
 
 `--expert-residency device` keeps the routed GGUF banks on the GPU. `host` keeps them in pinned host
-memory and `disk` in the artifact's files, read through the OS page cache. Both run all expert
-arithmetic on the GPU with the resident kernels and outputs: top-8 GeGLU, the 704-wide middle, the
-dense branch and the sandwich norms. A 12 GB card runs the model this way; the GPU holds 1.7 GiB of
-other weights instead of 13.7 GiB.
+memory and `disk` in the artifact's files, read through the OS page cache. Both run the experts
+with the resident kernels and outputs (top-8 GeGLU, the 704-wide middle, the dense branch and the
+sandwich norms) on the GPU, except the share of decode and verification misses that CPU threads
+compute (the CPU share below). A 12 GB card runs the model this way; the GPU holds 1.7 GiB of other
+weights instead of 13.7 GiB.
 
 ```sh
 ninfer /models/gemma4.ninfer --expert-residency host
@@ -572,9 +573,13 @@ Experts reach the GPU through the shared transport (`core/expert_delivery`):
   IQ4_NL, IQ1_S, IQ1_M, IQ2_XXS, IQ2_S, IQ3_XXS, IQ3_S and IQ4_XS blocks have CPU products; other
   layers copy every miss.
   An expert the CPU computed takes no slot; the cache's rounds decide whether it enters.
-- **Calls.** Vector decode and verification run the cached pairs while the rest arrive, then the
-  rest; both add to one fixed-point sum, so outputs equal resident execution bit for bit. Prompt
-  chunks wait for their experts and run the existing matrix path.
+- **Calls.** Vector decode and verification run the cached pairs, then the block's dense MLP
+  while the rest arrive, then the rest; both expert stages add to one fixed-point sum, so outputs
+  equal resident execution bit for bit. A prompt chunk runs the dense MLP while its experts
+  arrive, then the existing matrix path. On one RTX 3090 with a 4 GiB cache, running the dense MLP
+  in that gap instead of before the routing raised decode from 70.5-71.1 to 72.6-72.9 tok/s after
+  a 1,032-token prompt and from 71.9-72.3 to 73.8-74.2 after a 6,906-token one, with the same
+  text (2026-11-04).
 - **Growing KV.** With an automatic cache, the full-attention blocks' value planes and a prompt
   chunk's derived keys, F16 values and mask are backed only as far as their sequences reach (in
   256-position tiles, on devices with CUDA virtual memory management), and the cache takes the rest

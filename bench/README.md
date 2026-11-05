@@ -348,6 +348,41 @@ one the table routes to:
 ./build/bench/ninfer_benches ninfer_linear_schedule_bench q8:2048x16384 --tokens 24,32,40,48 --only k32,mma
 ```
 
+A tensor-parallel share has no shape table; `ninfer_tp_share_linear_bench` times the Q4/Q5
+runtime-shape routes against the other small-T schedules at a share's rows and K, into BF16 or an
+FP32 partial:
+
+```bash
+./build/bench/ninfer_benches ninfer_tp_share_linear_bench q4 4352 5120 fp32 --tokens 1,2,3,4,8 --repeat 21
+./build/bench/ninfer_benches ninfer_tp_share_linear_bench q5 5120 1536 fp32 --tokens 1,4,8
+```
+
+`ninfer_gguf_cpu_rows_bench` times the host CPU's GGUF expert rows (`ops::gguf_cpu_rows`, the CPU
+share of host or disk experts' misses) on random stored blocks in a working set far larger than the
+caches, read in row order by one thread or by several that split the rows. It reports rows a
+second, stored bytes a second and nanoseconds a row for each format, token count and thread count;
+`test_gguf_expert_cpu` checks the products:
+
+```bash
+./build/bench/ninfer_benches ninfer_gguf_cpu_rows_bench --formats IQ3_S,IQ1_M,Q2_0 --tokens 1,2,8 --threads 1,16
+./build/bench/ninfer_benches ninfer_gguf_cpu_rows_bench --formats IQ4_NL,Q2_0 --k 640 --backend scalar
+```
+
+`ninfer_gguf_moe_matrix_bench` times a wide call's routed experts at DeepSeek-V4.1-Flash's shapes
+(or those `--hidden`, `--width`, `--top-k` and `--experts` give) on the integer matrix kernel and on
+the vector kernel in groups of eight columns, for each block type `--formats` lists (`all`: every
+type with both routes), each projection with its activation's quantization, over random routes to
+distinct experts. It reports both times, the active experts' weight bytes a second and the ratio;
+`ninfer_linear_gguf_moe_iq1m_test` checks IQ1_M's products on both routes. In one process a format
+timed after another can run its matrix kernel slower: on an RTX 4090 with 384 experts, IQ1_M's gate
+and up took 5,167 µs at 256 tokens alone and 6,426 µs after IQ1_S, and 5,359 and 6,631 µs at 544
+tokens; with 192 experts and 2048 tokens they took 6,644 µs alone and 6,567 µs after IQ2_XS and
+IQ2_XXS (both runs traced by Nsight Systems). Time one format per process:
+
+```bash
+./build/bench/ninfer_benches ninfer_gguf_moe_matrix_bench --formats IQ1_M --tokens 64,512,2048
+```
+
 A continuous small-T sweep reuses one packed weight and one maximum-T activation/output
 allocation:
 

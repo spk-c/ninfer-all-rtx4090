@@ -302,7 +302,7 @@ void TextContext::set_gdn_state_action(GdnStateAction action,
 }
 
 void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
-                                   const Tensor* input_embeddings, Tensor& x, Tensor& ah) {
+                                   const Tensor* input_embeddings, Tensor& x, Tensor* ah) {
     cudaStream_t s     = ctx_.stream;
     const int T        = ids.ne[0] * ids.ne[1];
     Tensor flat_ids    = ids.view({T});
@@ -335,8 +335,10 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
     x = roots.residual;
     project(fc_in, mtp_->input_projection, x, work_, s);
 
-    ah = roots.attention_hidden;
-    ops::rmsnorm(x, mtp_->input_norm, config_.rms_norm_eps, true, ah, s);
+    if (ah != nullptr) {
+        *ah = roots.attention_hidden;
+        ops::rmsnorm(x, mtp_->input_norm, config_.rms_norm_eps, true, *ah, s);
+    }
 }
 
 void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& positions,
@@ -345,6 +347,12 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
                                    Tensor& mtp_hidden) {
     cudaStream_t s = ctx_.stream;
     const int T    = x.ne[1];
+    if (!mtp_->rank_attention.empty()) {
+        mtp_divided_tail(x, positions, rope_positions, envelope);
+        Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
+        ops::rmsnorm(x, mtp_->final_norm, config_.rms_norm_eps, true, flat_mtp_hidden, s);
+        return;
+    }
 
     const auto projection = workspace::mtp_attention_projection(work_, config_, T);
     Tensor q              = projection.query.view({dimension(config_.attention->head_dim),
@@ -433,14 +441,459 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
 
     Tensor mh = post.post_mixer_hidden;
     ops::rmsnorm(x, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
-
-    {
-        auto post_mixer_scope = work_.scope();
-        ffn(mh, mtp_->ffn, x, {}, work_, s, true, false, InputBasis::Primal, false, experts_);
-    }
+    mtp_ffn(mh, x);
 
     Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
     ops::rmsnorm(x, mtp_->final_norm, config_.rms_norm_eps, true, flat_mtp_hidden, s);
+}
+
+// Divided, rank 0 sends `mh` to every rank, each projects its rows of the FFN into an FP32 partial,
+// and the exchange stores their sum, rounded once, in a buffer of every rank (the other ranks' copy
+// of `mh`, which nothing reads after); rank 0 adds it to `x`, as one device adds its BF16 down
+// projection. The exchange takes the next slot after the pass the drafts follow in one capture.
+void TextContext::mtp_ffn(const Tensor& mh, Tensor& x) {
+    auto scope = work_.scope();
+    if (mtp_->rank_ffn.empty()) {
+        ffn(mh, mtp_->ffn, x, {}, work_, ctx_.stream, true, false, InputBasis::Primal, false,
+            experts_);
+        return;
+    }
+    if (stage_runtime_ == nullptr || !stage_runtime_->tensor_parallel) {
+        throw std::logic_error("a divided MTP FFN needs the tensor-parallel runtime");
+    }
+    StageRuntime& runtime            = *stage_runtime_;
+    auto& tp                         = *runtime.tensor_parallel;
+    TensorParallelExchange& exchange = *tp.exchange;
+    const std::size_t ranks          = exchange.ranks();
+    if (mtp_->rank_ffn.size() + 1 != ranks || runtime.forward.size() + 1 != ranks ||
+        tp.joined.size() + 1 != ranks || ctx_.active_rank() != 0) {
+        throw std::logic_error("the MTP FFN's shares do not match the tensor-parallel ranks");
+    }
+    const std::int64_t values = static_cast<std::int64_t>(x.ne[0]) * x.ne[1];
+    const std::size_t bytes   = static_cast<std::size_t>(values) * sizeof(float);
+    if (bytes > exchange.slot_bytes() || mh.bytes() > runtime.forward.front().slot_bytes()) {
+        throw std::runtime_error("the MTP FFN exceeds the tensor-parallel links");
+    }
+    const std::uint32_t slot = runtime.next_slot;
+    runtime.next_slot = (slot + 1U) % static_cast<std::uint32_t>(runtime.forward.front().slots());
+    const std::size_t exchange_slot = tp.next_exchange;
+    tp.next_exchange ^= 1U;
+    const cudaStream_t entry = ctx_.stream;
+    for (std::size_t rank = 1; rank < ranks; ++rank) {
+        runtime.forward[rank - 1].send(mh.data, mh.bytes(), slot, entry);
+    }
+
+    std::vector<Tensor> sums(ranks);
+    std::vector<WorkspaceArena::Scope> rank_scopes;
+    rank_scopes.reserve(ranks - 1);
+    const auto on_rank = [&](std::size_t rank, const auto& step) {
+        std::optional<ScopedDeviceRank> device_guard;
+        std::optional<ScopedArenaRank> arena_guard;
+        if (rank != 0) {
+            device_guard.emplace(ctx_, rank);
+            arena_guard.emplace(work_, rank);
+        }
+        step();
+    };
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&] {
+            Tensor input = mh;
+            if (rank != 0) { rank_scopes.push_back(work_.scope()); }
+            sums[rank] = work_.alloc(DType::BF16, {x.ne[0], x.ne[1]});
+            if (rank != 0) {
+                runtime.forward[rank - 1].recv(sums[rank].data, mh.bytes(), slot, ctx_.stream);
+                input = sums[rank];
+            }
+            Tensor partial(exchange.partial(rank, exchange_slot), DType::FP32, {x.ne[0], x.ne[1]});
+            ffn(input, rank == 0 ? mtp_->ffn : mtp_->rank_ffn[rank - 1], sums[rank], {}, work_,
+                ctx_.stream, false, false, InputBasis::Primal, false, nullptr, nullptr, &partial);
+            exchange.publish(rank, exchange_slot, bytes, sums[rank].data, ctx_.stream,
+                             TensorParallelSum::StoreBf16);
+        });
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&] {
+            exchange.reduce(rank, exchange_slot, sums[rank].data, values, ranks, ctx_.stream,
+                            TensorParallelSum::StoreBf16);
+        });
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&] {
+            exchange.complete(rank, exchange_slot, sums[rank].data, values, ctx_.stream,
+                              TensorParallelSum::StoreBf16);
+            if (rank != 0) { tp.joined[rank - 1].record(ctx_.stream); }
+        });
+    }
+    for (std::size_t rank = 1; rank < ranks; ++rank) { tp.joined[rank - 1].wait(entry); }
+    ops::residual_add(sums[0], x, entry);
+}
+
+// Divided, the MTP layer runs as a text layer does under tensor parallelism: rank 0 sends the stem
+// output and the control tensors to every rank; each rank holding KV heads normalizes its copy,
+// attends with its heads over its planes of the MTP cache and projects its query heads' columns of
+// the output into an FP32 partial, and the exchange stores their sum, rounded once, in a buffer of
+// every rank, which each adds to its copy as one device adds its BF16 output projection. A divided
+// FFN then runs on every rank's copy and its exchange sums the shares for rank 0, as mtp_ffn's
+// does; an undivided one runs on rank 0. Each exchange takes the next slot.
+template <class Attend>
+void TextContext::mtp_divided_layer(Tensor& x, std::span<const Tensor* const> control,
+                                    std::int32_t columns, const Attend& attend) {
+    if (stage_runtime_ == nullptr || !stage_runtime_->tensor_parallel) {
+        throw std::logic_error("a divided MTP attention needs the tensor-parallel runtime");
+    }
+    StageRuntime& runtime             = *stage_runtime_;
+    auto& tp                          = *runtime.tensor_parallel;
+    TensorParallelExchange& exchange  = *tp.exchange;
+    const std::size_t ranks           = exchange.ranks();
+    const std::size_t attention_ranks = mtp_->rank_attention.size();
+    if (attention_ranks > ranks || mtp_->rank_input_norm.size() != ranks ||
+        mtp_->rank_post_attention_norm.size() != ranks || runtime.forward.size() + 1 != ranks ||
+        runtime.control.size() + 1 != ranks || tp.joined.size() + 1 != ranks ||
+        tp.shards.size() != ranks || ctx_.active_rank() != 0 ||
+        (!mtp_->rank_ffn.empty() && mtp_->rank_ffn.size() + 1 != ranks)) {
+        throw std::logic_error("the MTP layer's shares do not match the tensor-parallel ranks");
+    }
+    const std::int32_t T = x.ne[1];
+    if (columns < 0 || columns > T) {
+        throw std::logic_error("the MTP layer's output columns are out of range");
+    }
+    const std::int64_t values = static_cast<std::int64_t>(x.ne[0]) * columns;
+    const std::size_t bytes   = static_cast<std::size_t>(values) * sizeof(float);
+
+    // The control tensors, packed as for a text pass.
+    std::vector<std::int64_t> offset(control.size(), -1);
+    std::int64_t total = 0;
+    for (std::size_t i = 0; i < control.size(); ++i) {
+        const Tensor* tensor = control[i];
+        if (tensor == nullptr || tensor->data == nullptr) { continue; }
+        if (tensor->dtype != DType::I32 || !tensor->is_contiguous()) {
+            throw std::logic_error("an MTP control tensor is not contiguous int32");
+        }
+        offset[i] = total;
+        total += tensor->numel();
+    }
+    total                           = std::max<std::int64_t>((total + 3) & ~std::int64_t{3}, 4);
+    const std::size_t control_bytes = static_cast<std::size_t>(total) * sizeof(std::int32_t);
+    if (control_bytes > runtime.control.front().slot_bytes() ||
+        x.bytes() > runtime.forward.front().slot_bytes() || bytes > exchange.slot_bytes()) {
+        throw std::runtime_error("the MTP layer exceeds the tensor-parallel links");
+    }
+    const std::uint32_t slot = runtime.next_slot;
+    runtime.next_slot = (slot + 1U) % static_cast<std::uint32_t>(runtime.forward.front().slots());
+    const cudaStream_t entry = ctx_.stream;
+    auto entry_scope         = work_.scope();
+    Tensor pack              = work_.alloc(DType::I32, {static_cast<std::int32_t>(total)});
+    for (std::size_t i = 0; i < control.size(); ++i) {
+        if (offset[i] < 0) { continue; }
+        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(pack.data) + offset[i],
+                                   control[i]->data, control[i]->bytes(),
+                                   cudaMemcpyDeviceToDevice, entry));
+    }
+    for (std::size_t rank = 1; rank < ranks; ++rank) {
+        runtime.control[rank - 1].send(pack.data, control_bytes, slot, entry);
+        runtime.forward[rank - 1].send(x.data, x.bytes(), slot, entry);
+    }
+
+    // Each rank's copy of `x`, of the control tensors and its sums, in its own scratch.
+    struct Replica {
+        Tensor x;
+        Tensor sum;
+        std::vector<Tensor> control;
+    };
+    std::vector<Replica> replicas(ranks);
+    std::vector<WorkspaceArena::Scope> rank_scopes;
+    rank_scopes.reserve(ranks - 1);
+    const auto on_rank = [&](std::size_t rank, const auto& step) {
+        std::optional<ScopedDeviceRank> device_guard;
+        std::optional<ScopedArenaRank> arena_guard;
+        if (rank != 0) {
+            device_guard.emplace(ctx_, rank);
+            arena_guard.emplace(work_, rank);
+        }
+        step(replicas[rank]);
+    };
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            replica.control.resize(control.size());
+            if (rank == 0) {
+                replica.x = x;
+                for (std::size_t i = 0; i < control.size(); ++i) {
+                    if (offset[i] >= 0) { replica.control[i] = *control[i]; }
+                }
+            } else {
+                rank_scopes.push_back(work_.scope());
+                replica.x = work_.alloc(x.dtype, {x.ne[0], T});
+                runtime.forward[rank - 1].recv(replica.x.data, replica.x.bytes(), slot,
+                                               ctx_.stream);
+                Tensor received = work_.alloc(DType::I32, {static_cast<std::int32_t>(total)});
+                runtime.control[rank - 1].recv(received.data, control_bytes, slot, ctx_.stream);
+                for (std::size_t i = 0; i < control.size(); ++i) {
+                    if (offset[i] < 0) { continue; }
+                    replica.control[i]      = *control[i];
+                    replica.control[i].data = static_cast<std::int32_t*>(received.data) + offset[i];
+                }
+            }
+            if (columns != 0) { replica.sum = work_.alloc(DType::BF16, {x.ne[0], columns}); }
+        });
+    }
+    // Every rank's stream joins rank 0's before it goes on alone.
+    const auto join = [&] {
+        for (std::size_t rank = 1; rank < ranks; ++rank) {
+            on_rank(rank, [&](Replica&) { tp.joined[rank - 1].record(ctx_.stream); });
+            tp.joined[rank - 1].wait(entry);
+        }
+    };
+    const auto tail = [&](const Replica& replica) {
+        return replica.x.slice(1, T - columns, columns);
+    };
+
+    std::size_t attention_slot = 0;
+    if (columns != 0) {
+        attention_slot = tp.next_exchange;
+        tp.next_exchange ^= 1U;
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            const bool contributes = rank < attention_ranks;
+            if (contributes) {
+                auto scope = work_.scope();
+                Tensor ah  = work_.alloc(DType::BF16, {x.ne[0], T});
+                ops::rmsnorm(replica.x, mtp_->rank_input_norm[rank], config_.rms_norm_eps, true, ah,
+                             ctx_.stream);
+                const Tensor a = attend(rank, tp.shards[rank], ah,
+                                        std::span<const Tensor>(replica.control));
+                if (columns != 0) {
+                    const LinearParameters& output = mtp_->rank_attention[rank].output;
+                    Tensor partial(exchange.partial(rank, attention_slot), DType::FP32,
+                                   {x.ne[0], columns});
+                    ops::linear(a, output.weight, partial,
+                                residual_projection_policy(output, false), work_, ctx_.stream);
+                }
+            }
+            if (columns != 0) {
+                exchange.publish(rank, attention_slot, contributes ? bytes : 0, replica.sum.data,
+                                 ctx_.stream, TensorParallelSum::StoreBf16);
+            }
+        });
+    }
+    if (columns == 0) {
+        join();
+        return;
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            exchange.reduce(rank, attention_slot, replica.sum.data, values, attention_ranks,
+                            ctx_.stream, TensorParallelSum::StoreBf16);
+        });
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            exchange.complete(rank, attention_slot, replica.sum.data, values, ctx_.stream,
+                              TensorParallelSum::StoreBf16);
+            Tensor residual = tail(replica);
+            ops::residual_add(replica.sum, residual, ctx_.stream);
+        });
+    }
+
+    Tensor residual = tail(replicas[0]);
+    if (mtp_->rank_ffn.empty()) {
+        join();
+        Tensor mh = work_.alloc(DType::BF16, {x.ne[0], columns});
+        ops::rmsnorm(residual, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, entry);
+        ffn(mh, mtp_->ffn, residual, {}, work_, entry, true, false, InputBasis::Primal, false,
+            experts_);
+        return;
+    }
+    const std::size_t ffn_slot = tp.next_exchange;
+    tp.next_exchange ^= 1U;
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            auto scope    = work_.scope();
+            Tensor input  = tail(replica);
+            Tensor mh     = work_.alloc(DType::BF16, {x.ne[0], columns});
+            ops::rmsnorm(input, mtp_->rank_post_attention_norm[rank], config_.rms_norm_eps, true,
+                         mh, ctx_.stream);
+            Tensor partial(exchange.partial(rank, ffn_slot), DType::FP32, {x.ne[0], columns});
+            ffn(mh, rank == 0 ? mtp_->ffn : mtp_->rank_ffn[rank - 1], replica.sum, {}, work_,
+                ctx_.stream, false, false, InputBasis::Primal, false, nullptr, nullptr, &partial);
+            exchange.publish(rank, ffn_slot, bytes, replica.sum.data, ctx_.stream,
+                             TensorParallelSum::StoreBf16);
+        });
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            exchange.reduce(rank, ffn_slot, replica.sum.data, values, ranks, ctx_.stream,
+                            TensorParallelSum::StoreBf16);
+        });
+    }
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        on_rank(rank, [&](Replica& replica) {
+            exchange.complete(rank, ffn_slot, replica.sum.data, values, ctx_.stream,
+                              TensorParallelSum::StoreBf16);
+        });
+    }
+    join();
+    ops::residual_add(replicas[0].sum, residual, entry);
+}
+
+// Divided, a prompt chunk's MTP keys and values: rank 0 projects them whole, normalizes and rotates
+// the keys, and sends every other rank holding KV heads its heads' over its forward link with the
+// positions over its control link; every such rank appends its heads to its planes of the cache.
+void TextContext::mtp_divided_prefill_kv(const Tensor& ah, const Tensor& positions,
+                                         const Tensor& rope_positions) {
+    if (stage_runtime_ == nullptr || !stage_runtime_->tensor_parallel) {
+        throw std::logic_error("a divided MTP attention needs the tensor-parallel runtime");
+    }
+    StageRuntime& runtime             = *stage_runtime_;
+    auto& tp                          = *runtime.tensor_parallel;
+    const std::size_t attention_ranks = mtp_->rank_attention.size();
+    if (attention_ranks > runtime.forward.size() + 1 || tp.shares.size() < attention_ranks ||
+        ctx_.active_rank() != 0) {
+        throw std::logic_error("the MTP layer's shares do not match the tensor-parallel ranks");
+    }
+    const cudaStream_t entry = ctx_.stream;
+    const std::int32_t T     = ah.ne[1];
+    const AttentionConfig& attention = *config_.attention;
+    const auto head_dim              = dimension(attention.head_dim);
+    const auto kv_heads              = dimension(attention.num_key_value_heads);
+    auto scope    = work_.scope();
+    Tensor k_flat = work_.alloc(DType::BF16, {dimension(attention.key_width()), T});
+    Tensor v_flat = work_.alloc(DType::BF16, {dimension(attention.key_width()), T});
+    mtp_kv_rows_projection(ah, mtp_->whole_key, mtp_->whole_value, k_flat, v_flat, work_, entry);
+    Tensor kn = work_.alloc(DType::BF16, {head_dim, kv_heads, T});
+    ops::rmsnorm(k_flat.view({head_dim, kv_heads, T}), mtp_->key_norm, config_.rms_norm_eps, true,
+                 kn, entry);
+    text_rope(rope_positions, *config_.rope_parameters, rope_yarn_, kn, entry);
+
+    // Each rank's heads of every column, packed K then V, through one buffer of the widest share.
+    const auto heads_of = [&](std::size_t rank) {
+        return static_cast<std::int32_t>(tp.shares[rank].kv_head_end -
+                                         tp.shares[rank].kv_head_begin);
+    };
+    std::int32_t widest = 0;
+    for (std::size_t rank = 0; rank < attention_ranks; ++rank) {
+        widest = std::max(widest, heads_of(rank));
+    }
+    const std::size_t head_bytes = static_cast<std::size_t>(head_dim) * sizeof(__nv_bfloat16);
+    Tensor pack = work_.alloc(DType::BF16, {head_dim, widest, T, 2});
+    const auto pack_rank = [&](std::size_t rank) {
+        const std::size_t row = head_bytes * static_cast<std::size_t>(heads_of(rank));
+        const std::size_t from = head_bytes * tp.shares[rank].kv_head_begin;
+        const std::size_t pitch = head_bytes * static_cast<std::size_t>(kv_heads);
+        auto* out = static_cast<std::byte*>(pack.data);
+        CUDA_CHECK(cudaMemcpy2DAsync(out, row, static_cast<const std::byte*>(kn.data) + from, pitch,
+                                     row, static_cast<std::size_t>(T), cudaMemcpyDeviceToDevice,
+                                     entry));
+        CUDA_CHECK(cudaMemcpy2DAsync(out + row * T, row,
+                                     static_cast<const std::byte*>(v_flat.data) + from, pitch, row,
+                                     static_cast<std::size_t>(T), cudaMemcpyDeviceToDevice, entry));
+        return row * static_cast<std::size_t>(T);
+    };
+    const auto append = [&](std::size_t rank, const void* packed, const Tensor& rank_positions) {
+        const std::int32_t heads = heads_of(rank);
+        const std::size_t half   = head_bytes * static_cast<std::size_t>(heads) * T;
+        Tensor k(const_cast<void*>(packed), DType::BF16, {head_dim, heads, T});
+        Tensor v(static_cast<std::byte*>(const_cast<void*>(packed)) + half, DType::BF16,
+                 {head_dim, heads, T});
+        ops::kv_cache_append(k, v, rank_positions, mtp_kv_.layer_view(0, rank), ctx_.stream);
+    };
+    if (attention_ranks > 1) {
+        const std::uint32_t slot = runtime.next_slot;
+        runtime.next_slot =
+            (slot + 1U) % static_cast<std::uint32_t>(runtime.forward.front().slots());
+        if (positions.bytes() > runtime.control.front().slot_bytes() ||
+            2 * T * head_bytes * static_cast<std::size_t>(widest) >
+                runtime.forward.front().slot_bytes()) {
+            throw std::runtime_error("an MTP prompt chunk exceeds the tensor-parallel links");
+        }
+        for (std::size_t rank = 1; rank < attention_ranks; ++rank) {
+            const std::size_t half = pack_rank(rank);
+            runtime.control[rank - 1].send(positions.data, positions.bytes(), slot, entry);
+            runtime.forward[rank - 1].send(pack.data, 2 * half, slot, entry);
+            ScopedDeviceRank device_guard(ctx_, rank);
+            ScopedArenaRank arena_guard(work_, rank);
+            auto rank_scope         = work_.scope();
+            Tensor rank_positions   = work_.alloc(DType::I32, {T});
+            Tensor received         = work_.alloc(DType::BF16, {head_dim, heads_of(rank), T, 2});
+            runtime.control[rank - 1].recv(rank_positions.data, positions.bytes(), slot,
+                                           ctx_.stream);
+            runtime.forward[rank - 1].recv(received.data, 2 * half, slot, ctx_.stream);
+            append(rank, received.data, rank_positions);
+            tp.joined[rank - 1].record(ctx_.stream);
+        }
+    }
+    (void)pack_rank(0);
+    append(0, pack.data, positions);
+    for (std::size_t rank = 1; rank < attention_ranks; ++rank) { tp.joined[rank - 1].wait(entry); }
+}
+
+void TextContext::mtp_divided_tail(Tensor& x, const Tensor& positions,
+                                   const Tensor& rope_positions,
+                                   ops::CausalAttentionExecutionEnvelope envelope) {
+    const std::int32_t T = x.ne[1];
+    const bool batch     = active_sequence_batch_ != 0;
+    const std::int32_t width     = batch ? active_sequence_width_ : T;
+    const std::int32_t sequences = batch ? active_sequence_batch_ : 1;
+    if (batch && (width <= 0 || width * sequences != T ||
+                  active_backend_kv_table_rows_ == nullptr || active_valid_columns_ == nullptr)) {
+        throw std::logic_error("MTP sequence batch binding is incomplete");
+    }
+    const Tensor rope        = batch ? rope_positions.view({T}) : rope_positions;
+    const Tensor& table_rows = batch ? *active_backend_kv_table_rows_ : io_.backend_kv_table_row;
+    const Tensor* control[]  = {&positions, &rope, &table_rows,
+                                batch ? active_valid_columns_ : nullptr};
+    const auto scale =
+        static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim)));
+    mtp_divided_layer(x, control, T,
+                      [&](std::size_t rank, const TextConfig& share, const Tensor& ah,
+                          std::span<const Tensor> local) {
+        cudaStream_t s                   = ctx_.stream;
+        const AttentionParameters& p     = mtp_->rank_attention[rank];
+        const AttentionConfig& attention = *share.attention;
+        const auto head_dim              = dimension(attention.head_dim);
+        const auto heads                 = dimension(attention.num_attention_heads);
+        const auto kv_heads              = dimension(attention.num_key_value_heads);
+        const auto projection = workspace::mtp_attention_projection(work_, share, T);
+        Tensor q_flat         = projection.query;
+        Tensor gate_flat      = projection.gate;
+        Tensor k_flat         = projection.key;
+        Tensor v_flat         = projection.value;
+        attention_projection(ah, p, q_flat, gate_flat, k_flat, v_flat, work_, s);
+        Tensor q    = q_flat.view({head_dim, heads, T});
+        Tensor gate = gate_flat.view({head_dim, heads, T});
+        Tensor k    = k_flat.view({head_dim, kv_heads, T});
+        Tensor v    = v_flat.view({head_dim, kv_heads, T});
+
+        const auto results = workspace::mtp_attention_results(work_, share, T);
+        Tensor qn          = results.normalized_query.view({head_dim, heads, T});
+        Tensor kn          = results.normalized_key.view({head_dim, kv_heads, T});
+        text_qk_norm_rope(local[1], *config_.rope_parameters, attention, config_.rms_norm_eps,
+                          p.query_norm, p.key_norm, q, k, qn, kn, rope_yarn_, s);
+
+        Tensor a             = results.attention.view({head_dim, heads, T});
+        auto view            = batch_mtp_kv_->batch_layer_view(0, rank);
+        Tensor table         = local[2];
+        Tensor position_rows = local[0].view({width, sequences});
+        const Tensor valid   = batch ? local[3] : Tensor{};
+        if (mtp_attention_window_ != 0) {
+            window_mtp_attention(view, table, position_rows, valid);
+        }
+        if (batch) {
+            Tensor a_batch    = a.view({head_dim, heads, width, sequences});
+            Tensor gate_batch = gate.view({head_dim, heads, width, sequences});
+            ops::causal_softmax_attention(
+                qn.view({head_dim, heads, width, sequences}),
+                kn.view({head_dim, kv_heads, width, sequences}),
+                v.view({head_dim, kv_heads, width, sequences}), position_rows, valid, table,
+                {head_dim, heads, kv_heads}, scale, view, envelope, work_, a_batch, s,
+                &gate_batch);
+        } else {
+            ops::causal_softmax_attention(qn, kn, v, position_rows.view({T}), Tensor{}, table,
+                                          {head_dim, heads, kv_heads}, scale, view, envelope,
+                                          work_, a, s, &gate);
+        }
+        return a.view({dimension(attention.query_width()), T});
+    });
 }
 
 // The MTP draft attends to one sink page and the newest window, so its read stops growing with
@@ -471,7 +924,8 @@ void TextContext::mtp_forward_core(const Tensor& ids, const Tensor& hidden, cons
     auto scratch_scope = work_.scope();
     Tensor x;
     Tensor ah;
-    mtp_forward_stem(ids, hidden, input_embeddings, x, ah);
+    mtp_forward_stem(ids, hidden, input_embeddings, x,
+                     mtp_->rank_attention.empty() ? &ah : nullptr);
     mtp_forward_tail(x, ah, positions, rope_positions, envelope, mtp_hidden);
 }
 
@@ -511,6 +965,64 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
 
     cudaStream_t s     = ctx_.stream;
     auto scratch_scope = work_.scope();
+    if (!mtp_->rank_attention.empty()) {
+        // Divided: every rank appends its KV heads of the chunk, which rank 0 projects; a final
+        // chunk's last column then runs the rest of the layer on every rank.
+        Tensor x;
+        Tensor ah;
+        mtp_forward_stem(ids, hidden, input_embeddings, x, &ah);
+        mtp_divided_prefill_kv(ah, positions, rope_positions);
+        if (!final_chunk) { return; }
+        Tensor x_last        = x.slice(1, T - 1, 1);
+        Tensor last_position = positions.slice(0, T - 1, 1);
+        Tensor last_rope_position;
+        if (rope_positions.ne[1] == 1) {
+            last_rope_position = rope_positions.slice(0, T - 1, 1);
+        } else {
+            last_rope_position = work_.alloc(DType::I32, {1, 3});
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto* src = static_cast<const std::int32_t*>(rope_positions.data) +
+                                  static_cast<std::size_t>(axis) * T + (T - 1);
+                auto* dst = static_cast<std::int32_t*>(last_rope_position.data) + axis;
+                CUDA_CHECK(
+                    cudaMemcpyAsync(dst, src, sizeof(std::int32_t), cudaMemcpyDeviceToDevice, s));
+            }
+        }
+        const Tensor* control[] = {&last_position, &last_rope_position};
+        const auto scale =
+            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim)));
+        mtp_divided_layer(x_last, control, 1,
+                          [&](std::size_t rank, const TextConfig& share, const Tensor& rank_ah,
+                              std::span<const Tensor> local) {
+            cudaStream_t rank_stream         = ctx_.stream;
+            const AttentionParameters& p     = mtp_->rank_attention[rank];
+            const AttentionConfig& attention = *share.attention;
+            const auto head_dim              = dimension(attention.head_dim);
+            const auto heads                 = dimension(attention.num_attention_heads);
+            const auto kv_heads              = dimension(attention.num_key_value_heads);
+            const auto projection = workspace::mtp_attention_projection(work_, share, 1);
+            Tensor q_flat         = projection.query;
+            Tensor gate_flat      = projection.gate;
+            Tensor k_flat         = projection.key;
+            Tensor v_flat         = projection.value;
+            attention_projection(rank_ah, p, q_flat, gate_flat, k_flat, v_flat, work_,
+                                 rank_stream);
+            Tensor q    = q_flat.view({head_dim, heads, 1});
+            Tensor gate = gate_flat.view({head_dim, heads, 1});
+            Tensor qn   = work_.alloc(DType::BF16, {head_dim, heads, 1});
+            ops::rmsnorm(q, p.query_norm, config_.rms_norm_eps, true, qn, rank_stream);
+            text_rope(local[1], *config_.rope_parameters, rope_yarn_, qn, rank_stream);
+            Tensor a = work_.alloc(DType::BF16, {head_dim, heads, 1});
+            ops::causal_softmax_attention_cached(qn, local[0], {head_dim, heads, kv_heads}, scale,
+                                                 mtp_kv_.layer_view(0, rank), envelope, work_, a,
+                                                 rank_stream);
+            ops::sigmoid_mul(gate, a, rank_stream);
+            return a.view({dimension(attention.query_width()), 1});
+        });
+        ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, s);
+        proposal_argmax(*final_hidden, *logits, *draft_token);
+        return;
+    }
     Tensor x_last;
     Tensor ah_last;
     if (final_chunk) {
@@ -522,7 +1034,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         auto bulk_scope = work_.scope();
         Tensor x;
         Tensor ah;
-        mtp_forward_stem(ids, hidden, input_embeddings, x, ah);
+        mtp_forward_stem(ids, hidden, input_embeddings, x, &ah);
 
         Tensor k_flat = work_.alloc(DType::BF16, {dimension(config_.attention->key_width()), T});
         Tensor v_flat = work_.alloc(DType::BF16, {dimension(config_.attention->key_width()), T});
@@ -600,10 +1112,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
 
         Tensor mh = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
         ops::rmsnorm(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
-        {
-            auto post_mixer_scope = work_.scope();
-            ffn(mh, mtp_->ffn, x_last, {}, work_, s, true, false, InputBasis::Primal, false, experts_);
-        }
+        mtp_ffn(mh, x_last);
         ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, s);
         proposal_argmax(*final_hidden, *logits, *draft_token);
     }
@@ -1574,6 +2083,10 @@ namespace {
 // The device tensors layer kernels read that live in rank 0's memory.
 constexpr std::size_t kControlTensors = 6;
 
+// The narrowest piece a tensor-parallel prompt chunk is cut into (whole 64-column blocks): narrower
+// pieces lose more to their projections' narrower GEMMs than their exchanges' overlap gains.
+constexpr std::int32_t kTensorParallelPieceColumns = 384;
+
 // Points a TextContext's active control tensors at stage-local copies for one stage, and puts the
 // originals back after it.
 class ScopedControl {
@@ -1900,8 +2413,11 @@ void TextContext::run_tensor_parallel(Tensor& x, Phase ph, Tap& tap) {
         tensor_rank_ = 0;
     };
     // One exchange: ranks [0, contributors) project into their partials, every replica adds them.
-    std::size_t next_exchange = 0;
-    const auto exchange_step  = [&](std::size_t contributors, const auto& share) {
+    // A prompt chunk's partials cross host memory as `--tensor-parallel-prompt-partials` says.
+    const TensorParallelPartials partials =
+        ph == Phase::Prefill ? tp.prompt_partials : TensorParallelPartials::Fp32;
+    std::size_t& next_exchange = tp.next_exchange;
+    const auto exchange_step   = [&](std::size_t contributors, const auto& share) {
         const std::size_t exchange_slot = next_exchange;
         next_exchange ^= 1U;
         for (std::size_t rank = 0; rank < ranks; ++rank) {
@@ -1915,19 +2431,162 @@ void TextContext::run_tensor_parallel(Tensor& x, Phase ph, Tap& tap) {
                     residual_partial_ = nullptr;
                 }
                 exchange.publish(rank, exchange_slot, contributes ? partial_bytes : 0,
-                                 replica.data, ctx_.stream);
+                                 replica.data, ctx_.stream, TensorParallelSum::AddBf16, {},
+                                 partials);
             });
         }
         for (std::size_t rank = 0; rank < ranks; ++rank) {
             on_rank(rank, [&](Tensor& replica) {
                 exchange.reduce(rank, exchange_slot, static_cast<__nv_bfloat16*>(replica.data),
-                                values, contributors, ctx_.stream);
+                                values, contributors, ctx_.stream, TensorParallelSum::AddBf16, {},
+                                partials);
             });
         }
         for (std::size_t rank = 0; rank < ranks; ++rank) {
             on_rank(rank, [&](Tensor& replica) {
-                exchange.complete(rank, exchange_slot, replica.data, values, ctx_.stream);
+                exchange.complete(rank, exchange_slot, replica.data, values, ctx_.stream,
+                                  TensorParallelSum::AddBf16, {}, partials);
             });
+        }
+    };
+
+    // A text prompt chunk runs each exchange in pieces of whole 64-column blocks: a piece's
+    // partials cross on the ranks' side streams while their compute streams run the next piece
+    // (see Pieces in core/tensor_parallel.h). A piece attends over the keys up to its own last
+    // position and carries the Gated DeltaNet state on to the next, as a shorter chunk would.
+    struct Piece {
+        std::int32_t column  = 0;
+        std::int32_t columns = 0;
+        ops::CausalAttentionExecutionEnvelope envelope{};
+        std::vector<std::array<Tensor, 2>> positions;
+        std::vector<std::array<const Tensor*, kControlTensors>> control;
+    };
+    const std::int32_t T = x.ne[1];
+    std::vector<Piece> pieces;
+    // Dense FFNs only: a MoE layer serves each piece's tokens separately, and a piece of a long
+    // prompt routes to nearly every expert, so most expert weights would be read once per piece.
+    const bool dense = std::all_of(
+        parameters_.text.layers.begin(), parameters_.text.layers.end(),
+        [](const BlockParameters& block) { return std::holds_alternative<DenseParameters>(block.ffn); });
+    if (ph == Phase::Prefill && !Tap::enabled && dense && !positions && steering_ == nullptr &&
+        active_segments_.empty() && active_sequence_batch_ == 0 &&
+        active_causal_attention_envelope_ != nullptr && current[0] != nullptr &&
+        current[0]->numel() == T && current[1] != nullptr && current[1]->numel() == T &&
+        current[3] == nullptr && T >= 2 * kTensorParallelPieceColumns) {
+        const auto count = std::min<std::int32_t>(
+            static_cast<std::int32_t>(TensorParallelExchange::kPieces),
+            T / kTensorParallelPieceColumns);
+        const std::int32_t width = (T + count - 1) / count;
+        const std::int32_t step  = (width + 63) / 64 * 64;
+        for (std::int32_t column = 0; column < T; column += step) {
+            Piece piece;
+            piece.column   = column;
+            piece.columns  = std::min(step, T - column);
+            piece.envelope = *active_causal_attention_envelope_;
+            const auto behind = static_cast<std::uint32_t>(T - piece.column - piece.columns);
+            piece.envelope.min_visible_keys -= behind;
+            piece.envelope.max_visible_keys -= behind;
+            piece.positions.resize(ranks);
+            piece.control.resize(ranks);
+            for (std::size_t rank = 0; rank < ranks; ++rank) {
+                piece.control[rank] = rank == 0 ? current : replicas[rank].control;
+                for (std::size_t i = 0; i < 2; ++i) {
+                    piece.positions[rank][i] =
+                        piece.control[rank][i]->slice(0, piece.column, piece.columns);
+                }
+            }
+            pieces.push_back(std::move(piece));
+        }
+        // The control pointers into each piece's own position slices, now that they stay put.
+        for (Piece& piece : pieces) {
+            for (std::size_t rank = 0; rank < ranks; ++rank) {
+                for (std::size_t i = 0; i < 2; ++i) {
+                    piece.control[rank][i] = &piece.positions[rank][i];
+                }
+            }
+        }
+    }
+    // One exchange in pieces: each rank computes a piece on its compute stream and hands it to its
+    // side stream, which publishes, reduces and completes it there while the next piece computes.
+    // A rank's next step on a piece waits for that piece's exchange.
+    bool first_piece_step = true;
+    const auto piece_step = [&](std::size_t contributors, const auto& share) {
+        const std::size_t exchange_slot = next_exchange;
+        next_exchange ^= 1U;
+        for (std::size_t index = 0; index < pieces.size(); ++index) {
+            const Piece& piece = pieces[index];
+            const std::int64_t piece_values = static_cast<std::int64_t>(x.ne[0]) * piece.columns;
+            const std::int64_t offset = static_cast<std::int64_t>(x.ne[0]) * piece.column;
+            const TensorParallelPiece fence{.index = index, .offset = offset};
+            for (std::size_t rank = 0; rank < ranks; ++rank) {
+                std::optional<ScopedDeviceRank> device_guard;
+                std::optional<ScopedArenaRank> arena_guard;
+                if (rank != 0) {
+                    device_guard.emplace(ctx_, rank);
+                    arena_guard.emplace(work_, rank);
+                }
+                ScopedControl control_guard(current, piece.control[rank], slots);
+                ScopedValue<const ops::CausalAttentionExecutionEnvelope*> envelope_guard(
+                    active_causal_attention_envelope_, &piece.envelope);
+                // Later pieces continue the Gated DeltaNet state the earlier ones wrote.
+                ScopedValue<std::int32_t> state_guard(
+                    linear_state_source_slot_,
+                    index == 0 ? linear_state_source_slot_ : linear_state_destination_slot_);
+                if (!first_piece_step) {
+                    CUDA_CHECK(
+                        cudaStreamWaitEvent(ctx_.stream, exchange.piece_done(rank, index), 0));
+                }
+                const bool contributes = rank < contributors;
+                Tensor sub             = replicas[rank].x.slice(1, piece.column, piece.columns);
+                tensor_rank_           = rank;
+                try {
+                    auto scope = work_.scope();
+                    if (contributes) {
+                        Tensor partial(exchange.partial(rank, exchange_slot) + offset, DType::FP32,
+                                       {x.ne[0], piece.columns});
+                        residual_partial_ = &partial;
+                        share(rank, sub);
+                        residual_partial_ = nullptr;
+                    }
+                } catch (...) {
+                    tensor_rank_      = 0;
+                    residual_partial_ = nullptr;
+                    throw;
+                }
+                tensor_rank_            = 0;
+                const cudaStream_t side = exchange.side_stream(rank);
+                CUDA_CHECK(cudaEventRecord(exchange.piece_ready(rank, index), ctx_.stream));
+                CUDA_CHECK(cudaStreamWaitEvent(side, exchange.piece_ready(rank, index), 0));
+                exchange.publish(rank, exchange_slot,
+                                 contributes ? static_cast<std::size_t>(piece_values) * sizeof(float)
+                                             : 0,
+                                 sub.data, side, TensorParallelSum::AddBf16, fence, partials);
+            }
+            for (std::size_t rank = 0; rank < ranks; ++rank) {
+                std::optional<ScopedDeviceRank> device_guard;
+                if (rank != 0) { device_guard.emplace(ctx_, rank); }
+                exchange.reduce(rank, exchange_slot,
+                                static_cast<__nv_bfloat16*>(replicas[rank].x.data) + offset,
+                                piece_values, contributors, exchange.side_stream(rank),
+                                TensorParallelSum::AddBf16, fence, partials);
+            }
+            for (std::size_t rank = 0; rank < ranks; ++rank) {
+                std::optional<ScopedDeviceRank> device_guard;
+                if (rank != 0) { device_guard.emplace(ctx_, rank); }
+                const cudaStream_t side = exchange.side_stream(rank);
+                exchange.complete(rank, exchange_slot,
+                                  static_cast<__nv_bfloat16*>(replicas[rank].x.data) + offset,
+                                  piece_values, side, TensorParallelSum::AddBf16, fence, partials);
+                CUDA_CHECK(cudaEventRecord(exchange.piece_done(rank, index), side));
+            }
+        }
+        first_piece_step = false;
+    };
+    const auto run_step = [&](std::size_t contributors, const auto& share) {
+        if (pieces.empty()) {
+            exchange_step(contributors, share);
+        } else {
+            piece_step(contributors, share);
         }
     };
 
@@ -1991,16 +2650,16 @@ void TextContext::run_tensor_parallel(Tensor& x, Phase ph, Tap& tap) {
                                       attention_gates[rank], ph);
                 });
             } else if (full) {
-                exchange_step(attention_ranks, [&](std::size_t rank, Tensor& replica) {
+                run_step(attention_ranks, [&](std::size_t rank, Tensor& replica) {
                     attn_mix(block(rank), replica, compact, ph);
                 });
             } else {
-                exchange_step(ranks, [&](std::size_t rank, Tensor& replica) {
+                run_step(ranks, [&](std::size_t rank, Tensor& replica) {
                     gdn_mix(block(rank), replica, compact, ph);
                 });
             }
             steer_replicas(ops::SteerResidualStep::Write, mixer_steering_site(layer), -1);
-            exchange_step(ranks, [&](std::size_t rank, Tensor& replica) {
+            run_step(ranks, [&](std::size_t rank, Tensor& replica) {
                 mlp_tail(block(rank), replica, ph,
                          rank == 0 && layer + 1 < layers
                              ? next_projection_hints(static_cast<int>(layer))
@@ -2020,7 +2679,14 @@ void TextContext::run_tensor_parallel(Tensor& x, Phase ph, Tap& tap) {
                                      error.what());
         }
     }
-    // A captured pass ends with every rank joined back into rank 0's stream.
+    // Each compute stream takes its pieces' last exchanges back before the pass ends; a captured
+    // pass ends with every rank joined back into rank 0's stream.
+    for (std::size_t index = 0; index < pieces.size(); ++index) {
+        for (std::size_t rank = 0; rank < ranks; ++rank) {
+            CUDA_CHECK(cudaStreamWaitEvent(ctx_.stream_for_rank(rank),
+                                           exchange.piece_done(rank, index), 0));
+        }
+    }
     for (std::size_t rank = 1; rank < ranks; ++rank) {
         tp.joined[rank - 1].record(ctx_.stream_for_rank(rank));
         tp.joined[rank - 1].wait(entry_stream);

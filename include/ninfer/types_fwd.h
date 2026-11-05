@@ -21,8 +21,10 @@ enum class EmbeddingResidency : std::uint8_t;
 enum class ExpertResidency : std::uint8_t;
 enum class TensorAttention : std::uint8_t;
 enum class TensorParallelTransport : std::uint8_t;
+enum class TensorParallelPartials : std::uint8_t;
 enum class NgramResidency : std::uint8_t;
 enum class NgramIo : std::uint8_t;
+enum class PrefillTail : std::uint8_t;
 
 // ninfer/kv_cache_storage.h
 enum class KvCacheStorage : std::uint8_t;

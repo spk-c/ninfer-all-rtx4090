@@ -1,7 +1,8 @@
-// How tensor-parallel ranks divide a dimension (split_shares) and the work by speed and room
-// (fill_shares). The expected splits are worked out by hand from the stated rule: every inner end is
-// the allowed position nearest its weight's target, the lower one on a tie, leaving each later share
-// a position.
+// How tensor-parallel ranks divide a dimension (split_shares), the work by speed beside rank 0's
+// own work (shares_beside_first) and by speed and room (fill_shares), and delivered experts by
+// cache room and bus (delivery_shares). The expected splits are worked out by hand from the stated
+// rule: every inner end is the allowed position nearest its weight's target, the lower one on a
+// tie, leaving each later share a position.
 
 #include "core/tensor_split.h"
 
@@ -82,6 +83,29 @@ void split_cases() {
                  "a position at the end");
 }
 
+void beside_first_cases() {
+    // Four equal ranks, rank 0 also running an eighth of the divided work (a shared expert of
+    // 512 rows beside 8 routed experts of 512): (s + 1/8) on rank 0 and s on the others meet at
+    // 9/32, so rank 0 takes 9/32 - 1/8 = 5/32.
+    check(near(ninfer::shares_beside_first(std::vector<double>{1, 1, 1, 1}, 0.125),
+               {5.0 / 32.0, 9.0 / 32.0, 9.0 / 32.0, 9.0 / 32.0}),
+          "rank 0 sheds its own work");
+    // A faster rank 0 keeps more: speeds 2 and 1, first 0.5, level 1.5 / 3 = 0.5 per unit of speed.
+    check(near(ninfer::shares_beside_first(std::vector<double>{2, 1}, 0.5), {0.5, 0.5}),
+          "speeds weigh the level");
+    check(near(ninfer::shares_beside_first(std::vector<double>{3, 1}, 0.0), {0.75, 0.25}),
+          "no own work follows speed");
+    // Rank 0's own work alone outlasts the others' shares: it keeps almost nothing.
+    const std::vector<double> lone = ninfer::shares_beside_first(std::vector<double>{1, 1}, 2.0);
+    check(lone[0] > 0.0 && lone[0] < 1e-5 && std::abs(lone[1] - 1.0) < 1e-12,
+          "own work past the others' shares");
+    check(near(ninfer::shares_beside_first(std::vector<double>{1}, 0.25), {1.0}), "one rank");
+    check_throws([] { (void)ninfer::shares_beside_first(std::vector<double>{1, 1}, -0.1); },
+                 "negative own work");
+    check_throws([] { (void)ninfer::shares_beside_first(std::vector<double>{0, 1}, 0.1); },
+                 "a zero speed beside own work");
+}
+
 void fill_cases() {
     // Room everywhere: in proportion to speed.
     check(near(ninfer::fill_shares(std::vector<double>{3, 1}, std::vector<double>{9, 9}),
@@ -124,12 +148,40 @@ void fill_cases() {
         "a zero speed");
 }
 
+void delivery_cases() {
+    using V = std::vector<double>;
+    // Rank 0 holds the model: its cache has 10 of the 100 expert bytes, the peer's 20. Equal buses
+    // copy the same 35 each: 45 and 55 bytes of experts.
+    check(near(ninfer::delivery_shares(V{10, 20}, V{1, 1}, 100, V{1, 1}), {0.45, 0.55}),
+          "more room takes more experts");
+    // No cache: the shares follow the buses.
+    check(near(ninfer::delivery_shares(V{0, 0}, V{1, 3}, 40, V{1, 1}), {0.25, 0.75}),
+          "no room follows the bus");
+    // Room and a faster bus: time (100 - 30) / 3 per rank, shares (10 + t) and (20 + 2t) of 100.
+    check(near(ninfer::delivery_shares(V{10, 20}, V{1, 2}, 100, V{1, 1}),
+               {(10 + 70.0 / 3) / 100, (20 + 140.0 / 3) / 100}),
+          "room and bus together");
+    // The caches hold every expert: speed within the room (fill_shares).
+    check(near(ninfer::delivery_shares(V{60, 60}, V{1, 1}, 100, V{1, 3}), {0.4, 0.6}),
+          "everything cached follows speed within the room");
+    check_throws([] { (void)ninfer::delivery_shares(V{1, 1}, V{1, 1}, 0, V{1, 1}); },
+                 "no expert bytes");
+    check_throws([] { (void)ninfer::delivery_shares(V{1, 1}, V{0, 1}, 10, V{1, 1}); },
+                 "a zero bus");
+    check_throws([] { (void)ninfer::delivery_shares(V{-1, 1}, V{1, 1}, 10, V{1, 1}); },
+                 "a negative room");
+    check_throws([] { (void)ninfer::delivery_shares(V{1}, V{1, 1}, 10, V{1, 1}); },
+                 "a room per rank");
+}
+
 } // namespace
 
 int run_tensor_split_test() {
     try {
         split_cases();
+        beside_first_cases();
         fill_cases();
+        delivery_cases();
     } catch (const std::exception& error) {
         std::cerr << "unexpected exception: " << error.what() << '\n';
         return 1;

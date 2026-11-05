@@ -152,6 +152,20 @@ struct MtpWeights {
     // Tensor parallelism without a proposal head: the output head's shares, read through MTP's
     // input for the drafts. Empty otherwise.
     HeadShareWeights output_head_shares;
+    // Tensor parallelism: ranks 1 to N-1's rows of the layer's dense FFN, each on its own device,
+    // with rank 0's in `layer.ffn`. Empty where rank 0 holds the whole FFN: one device, a MoE FFN,
+    // or stored runs that do not cut at the shares' ends.
+    std::vector<DenseWeights> rank_ffn;
+    // Tensor parallelism: the attention of ranks 1 to A-1, the ranks after rank 0 that hold KV
+    // heads, each on its own device, with rank 0's share in `layer.mixer`; and ranks 1 to N-1's
+    // copies of the layer's input and post-attention norms. Empty where rank 0 holds the whole
+    // attention: one device, position-split attention, or stored runs that do not cut at the
+    // shares' heads.
+    std::vector<AttentionWeights> rank_attention;
+    std::vector<WeightId> rank_input_norm, rank_post_attention_norm;
+    // With the attention divided, rank 0's whole K and V rows besides its share: it projects a
+    // prompt chunk's keys and values and sends each rank its heads'. Invalid otherwise.
+    WeightId whole_key, whole_value;
 };
 
 struct NormWeights {

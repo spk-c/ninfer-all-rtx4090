@@ -280,6 +280,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.enable_vision            = options.enable_vision;
     engine_options.grafts                   = options.grafts;
     options.steering.apply(engine_options);
+    options.prompt_routes.apply(engine_options);
     engine_options.vision_residency         = options.vision_residency;
     engine_options.vision_max_merged_tokens = options.vision_max_merged_tokens;
     engine_options.use_cuda_graph           = options.use_cuda_graph;
@@ -318,6 +319,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.tensor_split             = options.tensor_split;
     engine_options.tensor_attention         = options.tensor_attention;
     engine_options.tensor_parallel_transport = options.tensor_parallel_transport;
+    engine_options.tensor_parallel_prompt_partials = options.tensor_parallel_prompt_partials;
     engine_options.invariant_attention      = options.invariant_attention;
     engine_options.expert_residency           = options.expert_residency;
     engine_options.ngram_table                = options.ngram_table;

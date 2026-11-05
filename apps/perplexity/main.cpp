@@ -12,6 +12,7 @@
 #include "product/ngram_table_options.h"
 #include "product/hybrid_expert_options.h"
 #include "product/rope_yarn_options.h"
+#include "product/prompt_route_options.h"
 #include "product/steering_options.h"
 
 #include <nlohmann/json.hpp>
@@ -65,6 +66,8 @@ struct Options {
     ninfer::TensorAttention tensor_attention = ninfer::TensorAttention::Heads;
     ninfer::TensorParallelTransport tensor_parallel_transport =
         ninfer::TensorParallelTransport::Auto;
+    ninfer::TensorParallelPartials tensor_parallel_prompt_partials =
+        ninfer::TensorParallelPartials::Fp32;
     bool invariant_attention                 = false;
     ninfer::ExpertResidency expert_residency = ninfer::ExpertResidency::Device;
     std::optional<std::uint64_t> expert_cache_bytes;
@@ -86,6 +89,8 @@ struct Options {
     ninfer::EmbeddingResidency embedding_residency = ninfer::EmbeddingResidency::Device;
     // LoRA adapters (at their scales) and control vectors the scored model runs with.
     ninfer::product::SteeringFlags steering;
+    // --iq1m-experts (scoring computes every row, so the prefill tail does not apply).
+    ninfer::product::PromptRouteFlags prompt_routes;
     bool mtp_experts_q4                 = false;
     bool gdn_state_fp16                 = false;
     bool rope_yarn                      = false;
@@ -111,13 +116,15 @@ std::string usage_text() {
            "       [--tensor-parallel] [--tensor-split A,B,...]\n"
            "       [--tensor-attention heads|positions] [--invariant-attention]\n"
            "       [--tensor-parallel-transport auto|host|peer-read|peer-write]\n"
+           "       [--tensor-parallel-prompt-partials fp32|bf16]\n"
            "       [--expert-residency device|host|disk] [--expert-cache-mib N|auto]\n"
            "       [--expert-dma-share F] [--expert-cpu-threads N] [--expert-cache-adaptive]\n"
            "       [--expert-misses staged|mapped] [--expert-tail-skip N]\n"
            "       [--expert-prefill-buffers 1|2]\n"
            "       [--ngram-table PATH] [--ngram-residency disk|ram|ram-hot] [--ngram-lock]\n"
            "       [--ngram-io buffered|direct|mmap] [--ngram-io-depth N] [--ngram-ram-mib N]\n"
-           "       [--ngram-hot-profile PATH] [--no-ngram-table]\n"
+           "       [--ngram-hot-profile PATH] [--no-ngram-table] [--ngram-dedupe on|off]\n"
+           "       [--iq1m-experts matrix|vector]\n"
            "       [--kv-resident N|all|auto]   (Qwen3.8-Flash-Next)\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
@@ -260,6 +267,9 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--tensor-parallel-transport") {
             out.tensor_parallel_transport = ninfer::product::parse_tensor_parallel_transport(
                 value("--tensor-parallel-transport"));
+        } else if (option == "--tensor-parallel-prompt-partials") {
+            out.tensor_parallel_prompt_partials = ninfer::product::parse_tensor_parallel_partials(
+                value("--tensor-parallel-prompt-partials"));
         } else if (option == "--invariant-attention") {
             out.invariant_attention = true;
         } else if (option == "--expert-residency") {
@@ -285,6 +295,8 @@ Options parse_options(int argc, char** argv) {
                        option, out.hybrid_experts, [&] { return value(option.data()); })) {
         } else if (ninfer::product::parse_ngram_table_option(
                        option, out.ngram_table, [&] { return value(option.data()); })) {
+        } else if (ninfer::product::parse_prompt_route_option(
+                       option, out.prompt_routes, [&] { return value(option.data()); }, false)) {
         } else if (ninfer::product::parse_kv_resident_option(
                        option, out.kv_resident, [&] { return value(option.data()); })) {
         } else if (option == "--rope-yarn") {
@@ -328,6 +340,8 @@ Options parse_options(int argc, char** argv) {
     ninfer::product::check_tensor_attention(out.tensor_attention, out.tensor_parallel);
     ninfer::product::check_tensor_parallel_transport(out.tensor_parallel_transport,
                                                      out.tensor_parallel);
+    ninfer::product::check_tensor_parallel_partials(out.tensor_parallel_prompt_partials,
+                                                    out.tensor_parallel);
     return out;
 }
 
@@ -434,6 +448,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.tensor_split                  = options.tensor_split;
     engine_options.tensor_attention              = options.tensor_attention;
     engine_options.tensor_parallel_transport     = options.tensor_parallel_transport;
+    engine_options.tensor_parallel_prompt_partials = options.tensor_parallel_prompt_partials;
     engine_options.invariant_attention           = options.invariant_attention;
     engine_options.expert_residency              = options.expert_residency;
     engine_options.expert_cache_bytes            = options.expert_cache_bytes;
@@ -448,6 +463,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.embedding_q6     = options.embedding_q6;
     engine_options.embedding_residency = options.embedding_residency;
     options.steering.apply(engine_options);
+    options.prompt_routes.apply(engine_options);
     engine_options.mtp_experts_q4   = options.mtp_experts_q4;
     engine_options.gdn_state_fp16   = options.gdn_state_fp16;
     engine_options.rope_yarn        = options.rope_yarn;
