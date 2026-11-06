@@ -117,13 +117,30 @@ def parse_config(spec: str, *, is_control: bool) -> Config:
     return Config(label=label, argv_template=argv, is_control=is_control)
 
 
-def preflight(arm_a: Path, arm_b: Path) -> None:
+def preflight(arm_a: Path, arm_b: Path, *, allow_separate_dirs: bool = False) -> None:
     """Refuse the two mistakes that produce a confident wrong answer rather than an error."""
     for path in (arm_a, arm_b):
         if not path.is_file():
             sys.exit(f"missing executable: {path}")
     if arm_a.resolve() == arm_b.resolve():
         sys.exit(f"both arms resolve to the same file ({arm_a.resolve()}); nothing to compare")
+    if arm_a.resolve().parent != arm_b.resolve().parent and allow_separate_dirs:
+        # Two independently built trees each carry their own runtime DLLs. Windows resolves
+        # DLL dependencies next to each EXE, so do not copy an upstream binary into the
+        # fork's apps/ folder: that could silently load incompatible fork runtime DLLs.
+        for path in (arm_a, arm_b):
+            if path.resolve().parent.name.casefold() != 'apps':
+                sys.exit(f'separate-build arm must reside in its own apps directory: {path}')
+            try:
+                probe = subprocess.run([str(path.resolve()), '--version'],
+                                       capture_output=True, text=True, timeout=30,
+                                       errors='replace')
+            except (OSError, subprocess.TimeoutExpired) as error:
+                sys.exit(f'cannot launch {path} with its own runtime libraries: {error}')
+            if probe.returncode != 0:
+                sys.exit(f'{path} --version failed (exit {probe.returncode}); '
+                         'repair that build and its runtime libraries before comparing')
+        return
     if arm_a.resolve().parent != arm_b.resolve().parent:
         # Not fatal on every platform, but on Windows it is the exit-127 trap in the docstring and
         # there is no reason to allow it: copying the second build in beside the first is one line.
@@ -234,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arm-a", type=Path, required=True, help="baseline executable")
     parser.add_argument("--arm-b", type=Path, required=True, help="candidate executable")
+    parser.add_argument("--allow-separate-dirs", action="store_true",
+                        help="compare two independent apps/ build directories; each EXE must pass --version "
+                             "with its own runtime DLLs (never stage a foreign EXE into another build)")
     parser.add_argument("--reps", type=int, default=6,
                         help="repetitions; each one runs both arms of every configuration")
     parser.add_argument("--config", action="append", default=[], metavar="LABEL:COMMAND",
@@ -253,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.reps < 2:
         parser.error("--reps must be at least 2; a single pair has no spread to report")
 
-    preflight(args.arm_a, args.arm_b)
+    preflight(args.arm_a, args.arm_b, allow_separate_dirs=args.allow_separate_dirs)
     metric = re.compile(args.metric_regex)
 
     # parse_config raises ArgumentTypeError, which argparse only renders nicely when it is used as
