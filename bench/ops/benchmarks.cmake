@@ -34,7 +34,12 @@ ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES "${CMAKE_CURRENT_LIS
 ninfer_add_op_bench(ninfer_linear_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bench.cu")
 ninfer_add_op_bench(ninfer_linear_schedule_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_schedule_bench.cu")
+ninfer_add_op_bench(ninfer_tp_share_linear_bench
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/tp_share_linear_bench.cu")
 ninfer_add_op_bench(ninfer_linear_topk_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_topk_bench.cu")
+ninfer_add_op_bench(ninfer_gguf_cpu_rows_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/gguf_cpu_rows_bench.cpp")
+ninfer_add_op_bench(ninfer_gguf_moe_matrix_bench
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/gguf_moe_matrix_bench.cu")
 ninfer_add_op_bench(ninfer_candidate_selector_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/candidate_selector_bench.cu")
 ninfer_add_op_bench(ninfer_gdn_input_proj_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/gdn_input_proj_bench.cu")
 ninfer_add_op_bench(ninfer_gdn_input_proj_conv_snapshot_bench

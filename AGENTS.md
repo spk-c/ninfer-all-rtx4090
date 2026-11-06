@@ -25,6 +25,11 @@ update the affected contracts and implementation together instead of treating th
 as an immutable prohibition. Skills provide task-specific methods, not additional deliverables or
 approval requirements beyond the user's instructions and the actual execution environment.
 
+Every change follows the [engineering rules](CONTRIBUTING.md#engineering-rules): lossless by
+default, every model family, every platform, the best measured default, comparable measurements,
+documentation of the current state, and the test and tooling conventions. When a task cannot meet a
+rule, its report names the rule and the reason.
+
 ## Product and architecture
 
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance, with an
@@ -33,7 +38,9 @@ optional layer pipeline across several GPUs on Linux. It implements
 use the same architecture, binding and execution path. Native MoE routed experts may reside
 on the GPU, in pinned host memory, or in the artifact's files, brought into whole-layer device
 banks beside an optional persistent device cache (`--expert-residency host|disk`). Router and
-shared experts remain resident; all model arithmetic runs on the GPU, including the MTP MoE.
+shared experts remain resident; the GPU runs all model arithmetic, including the MTP MoE, except
+the share of a decode call's host or disk expert misses that CPU threads compute
+(`--expert-dma-share`), bit for bit as the GPU would.
 Qwen3.8-Flash-Next (`Qwen4ExpForCausalLM`,
 `src/models/qwen4_exp`) is a second, explicit family with its own load, executor and Engine core
 (`runtime/engine/qwen4_exp_core`); it shares the Qwen3.5 frontend and Vision tower, runs up to
@@ -44,8 +51,8 @@ routes to them (`--expert-residency disk`). Its n-gram table is stored in the mo
 in a separate table artifact the model names by digest (`--ngram-table`); it stays in that file,
 read a row at a time, unless `--ngram-residency ram` loads it. A model with PLE requires its table
 unless `--no-ngram-table` overrides that; a qualification layer slice without PLE needs no table.
-Native Qwen MoE, Gemma MoE and Flint also support host/disk expert placements, with all expert
-arithmetic on the GPU and whole-layer device banks beside the optional persistent cache.
+Native Qwen MoE, Gemma MoE and Flint also support host/disk expert placements, with whole-layer
+device banks beside the optional persistent cache and the same CPU share of decode misses.
 Gemma 4 26B-A4B (`Gemma4ForCausalLM`, the text component of `Gemma4ForConditionalGeneration`;
 `src/models/gemma4`, `runtime/engine/gemma4_core`) is a third explicit family converted from
 Google's QAT GGUF (or a mixed-format GGUF of the same model) with its ggml blocks kept as stored.
@@ -167,6 +174,9 @@ Keep stable requirements in their existing active reference. Temporary plans are
 active work; remove them when completed or abandoned. Maintain one current authority rather than
 parallel `final`, `v2`, or `new-design` documents.
 
+Documentation rules, including README's What's New, are in
+[CONTRIBUTING.md](CONTRIBUTING.md#documentation-describes-the-current-state).
+
 ## Verification and completion
 
 Select evidence to support the changed behavior and material claims. Tests should protect supported
@@ -247,6 +257,7 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 
 | Decision | Entry point |
 |---|---|
+| Engineering rules for every change: lossless, families, platforms, defaults, measurements, docs, tests | `CONTRIBUTING.md` |
 | Product capabilities and exact commands | `README.md`, executable `--help`; `docs/cli.md`, `docs/serving.md`, `docs/perplexity.md` |
 | Execution, model/runtime ownership, scheduling, transactions, graphs | `docs/maintainer/engine-architecture.md` |
 | Context resources, checkpoints, replicas; physical KV | `docs/maintainer/resource-scheduling-and-context-cache.md`; `docs/maintainer/paged-kv-cache.md` |
@@ -270,10 +281,10 @@ Select model artifacts by explicit path, never glob order, modification time, or
 “latest”. Source checkpoints and large artifacts are prerequisites; download or regenerate them
 only when that work is in scope. Install or upgrade dependencies only when the task needs it.
 
-Compilation needs no GPU. Executing CUDA tests, benchmarks or perplexity runs needs a free GPU; GPU
-work runs on rented hosts through `scripts/pods` ([pods](scripts/pods/README.md)).
+Compilation needs no GPU. Executing CUDA tests, benchmarks or perplexity runs needs a free GPU; the
+[pods harness](scripts/pods/README.md) runs them on rented hosts.
 
 ## Commits
 
-Create commits only when requested. Use Conventional Commit subjects with concise lowercase types
-such as `feat`, `fix`, `perf`, `bench`, `test`, `build`, `refactor`, `docs`, or `chore`.
+Create commits only when requested. Commit subjects follow the
+[tests and tooling rules](CONTRIBUTING.md#tests-and-tooling).

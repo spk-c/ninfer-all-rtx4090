@@ -3,12 +3,14 @@
 #include "core/decode_graph.h"
 #include "core/expert_parallel.h"
 #include "core/growable_region.h"
+#include "core/tensor_parallel.h"
 #include "core/vmm.h"
 #include "core/weight_view.h"
 #include "models/gemma4/cpu_experts.h"
 #include "models/gemma4/kernels.h"
 #include "models/gemma4/vision.h"
 #include "models/gemma4/vision_kernels.h"
+#include "models/divided_head.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/weight_input.h"
@@ -210,6 +212,9 @@ struct Executor::Impl {
     std::vector<ExpertPeer> expert_peers; // by rank; rank 0's is unused
     std::unique_ptr<ExpertParallelExchange> expert_exchange;
     DeviceBuffer expert_pack; // a call's packed input, on rank 0
+    // The head and the assistant's head divided over the ranks for calls of up to
+    // kMaxVectorColumns columns (divide_heads()); null keeps a head whole on rank 0.
+    std::unique_ptr<models::DividedHead> divided_head, divided_draft_head;
     mutable std::mutex expert_stats_mutex;
     ExpertDeliveryStats expert_startup_stats;
     Weight head; // tied token table
@@ -858,6 +863,8 @@ struct Executor::Impl {
             expert_peers[r].workspace.reset();
             cudaStreamDestroy(expert_peers[r].stream);
         }
+        divided_head.reset();
+        divided_draft_head.reset();
     }
     Impl(const Impl&)            = delete;
     Impl& operator=(const Impl&) = delete;
@@ -1055,6 +1062,49 @@ struct Executor::Impl {
             CUDA_CHECK(cudaStreamCreateWithFlags(&expert_peers[r].stream, cudaStreamNonBlocking));
             expert_peers[r].workspace = std::make_unique<WorkspaceArena>(expert_part_bytes(t));
         }
+        divide_heads();
+    }
+
+    // Decode, verification and draft calls of up to kMaxVectorColumns columns project the head
+    // (and the assistant's) divided over the ranks, which otherwise wait for rank 0: each rank a
+    // range of its rows in proportion to its copy bandwidth, where every other rank has room for
+    // its range beside a margin for the CUDA graphs.
+    void divide_heads() {
+        const int columns = gguf::kMaxVectorColumns;
+        const auto speed  = rank_copy_bandwidth(device);
+        const auto free   = rank_free_bytes(device);
+        double speeds = 0;
+        for (const double v : speed) { speeds += v; }
+        // A rank's rows, an FP32 plane and two BF16 copies of them per column, and the input.
+        const auto fits = [&](const Weight& w, std::size_t input) {
+            if (!models::DividedHead::divides(w, device.size())) { return false; }
+            for (std::size_t r = 1; r < device.size(); ++r) {
+                const double rows = double(w.n) * speed[r] / speeds;
+                const double need = rows * double(row_bytes(w) + 8 * columns) + double(input) +
+                                    double(kHeadRoom);
+                if (double(free[r]) < need) { return false; }
+            }
+            return true;
+        };
+        const std::size_t input = gguf::vector_activation_bytes(hidden, columns);
+        if (fits(head, input)) {
+            divided_head = std::make_unique<models::DividedHead>(device, head, row_bytes(head),
+                                                                 speed, input, columns);
+        }
+        if (drafting()) {
+            const std::size_t draft_input = gguf::vector_activation_bytes(draft_hidden, columns);
+            if (fits(draft_head, draft_input)) {
+                divided_draft_head = std::make_unique<models::DividedHead>(
+                    device, draft_head, row_bytes(draft_head), speed, draft_input, columns);
+            }
+        }
+    }
+    static constexpr std::size_t kHeadRoom = std::size_t(512) << 20;
+
+    [[nodiscard]] std::vector<cudaStream_t> rank_streams() const {
+        std::vector<cudaStream_t> out{stream};
+        for (std::size_t r = 1; r < expert_peers.size(); ++r) { out.push_back(expert_peers[r].stream); }
+        return out;
     }
 
     // One rank's part of a MoE call of block `p`: the call's pairs routed to the experts the rank
@@ -1113,12 +1163,14 @@ struct Executor::Impl {
     }
 
     // Expert parallelism's MoE call after rank 0 has routed it: the input goes to every other
-    // rank, each runs its part while rank 0 runs its own, and the parts' sum lands where `combine`
-    // reads it. Up to 8 tokens this is the sum one device stores, bit for bit; a wider call sums in
-    // the same fixed point where one device weighs FP32 rows in ffn_combine.
+    // rank, each runs its part while rank 0 runs its own and the dense MLP (`mlp`), and the parts'
+    // sum lands where `combine` reads it. Up to 8 tokens this is the sum one device stores, bit for
+    // bit; a wider call sums in the same fixed point where one device weighs FP32 rows in
+    // ffn_combine.
+    template <typename Mlp>
     void experts_parallel(const LayerPlan& p, const __nv_bfloat16* x, const void* act,
                           const std::int32_t* ids, const float* weights, int t,
-                          kernels::FfnCombineArgs& combine) {
+                          kernels::FfnCombineArgs& combine, Mlp&& mlp) {
         const std::size_t pairs  = std::size_t(t) * config.top_k_experts;
         const std::size_t part   = std::size_t(t) * hidden * 8;
         const ExpertInput layout = expert_input(t);
@@ -1146,6 +1198,7 @@ struct Executor::Impl {
         auto* fixed = static_cast<unsigned long long*>(workspace->alloc_bytes(part).data);
         expert_part(p, static_cast<const void* const*>(p.tables.p), model.expert_range(0), act, x,
                     ids, weights, t, fixed, *workspace, stream);
+        mlp();
         std::vector<const unsigned long long*> parts;
         for (void* received : expert_exchange->collect(part, slot, stream)) {
             parts.push_back(static_cast<const unsigned long long*>(received));
@@ -1292,25 +1345,30 @@ struct Executor::Impl {
         kernels::attn_residual(residual, stream);
         const int width = int(config.intermediate_size);
         Tensor middle   = workspace->alloc(DType::BF16, {width, t});
-        if (q8) {
-            gguf::vector_swiglu(ops::detail::gguf_type(p.gate_up.qtype), p.gate_up.qdata,
-                                row_bytes(p.gate_up), width, hidden, mlp_q.base, t,
-                                static_cast<__nv_bfloat16*>(middle.data), width, stream,
-                                gguf::GateActivation::GeluTanh);
-        } else {
-            // The integer matrix kernel takes whole 128-row tiles: the [gate; up] parent at once
-            // (2 x 2112 rows), then GeGLU over its FP32 rows.
-            auto* plane = static_cast<float*>(
-                workspace->alloc_bytes(std::size_t(t) * 2 * width * 4).data);
-            ops::detail::GgufProduct product;
-            product.weight   = &p.gate_up;
-            product.f32      = plane;
-            product.f32_rows = 2 * width;
-            ops::detail::gguf_project(mlp_in, {&product, 1}, *workspace, stream);
-            kernels::geglu_rows(plane, t, width, static_cast<__nv_bfloat16*>(middle.data), stream);
-        }
-        Tensor dense = workspace->alloc(DType::BF16, {hidden, t});
-        project(middle, p.down, dense);
+        Tensor dense    = workspace->alloc(DType::BF16, {hidden, t});
+        // The dense MLP reads only the attention residual: a MoE block runs it while other ranks
+        // run their experts or missing experts are copied in (experts()).
+        const auto mlp = [&] {
+            if (q8) {
+                gguf::vector_swiglu(ops::detail::gguf_type(p.gate_up.qtype), p.gate_up.qdata,
+                                    row_bytes(p.gate_up), width, hidden, mlp_q.base, t,
+                                    static_cast<__nv_bfloat16*>(middle.data), width, stream,
+                                    gguf::GateActivation::GeluTanh);
+            } else {
+                // The integer matrix kernel takes whole 128-row tiles: the [gate; up] parent at
+                // once (2 x 2112 rows), then GeGLU over its FP32 rows.
+                auto* plane = static_cast<float*>(
+                    workspace->alloc_bytes(std::size_t(t) * 2 * width * 4).data);
+                ops::detail::GgufProduct product;
+                product.weight   = &p.gate_up;
+                product.f32      = plane;
+                product.f32_rows = 2 * width;
+                ops::detail::gguf_project(mlp_in, {&product, 1}, *workspace, stream);
+                kernels::geglu_rows(plane, t, width, static_cast<__nv_bfloat16*>(middle.data),
+                                    stream);
+            }
+            project(middle, p.down, dense);
+        };
         kernels::FfnCombineArgs combine;
         combine.h         = h;
         combine.hidden    = hidden;
@@ -1325,14 +1383,18 @@ struct Executor::Impl {
         if (p.moe) {
             combine.w_dense = p.mlp_post_norm;
             combine.w_moe   = p.post_norm;
-            experts(p, residual.moe_in, q8 ? &moe_q : nullptr, residual.router_x, t, combine);
+            experts(p, residual.moe_in, q8 ? &moe_q : nullptr, residual.router_x, t, combine, mlp);
+        } else {
+            mlp();
         }
         kernels::ffn_combine(combine, stream);
     }
 
-    // The routed experts of block `p`; their output lands where `combine` reads it.
+    // The routed experts of block `p` (their output lands where `combine` reads it) and `mlp`, the
+    // dense MLP, run while other ranks run their experts or missing experts are copied in.
+    template <typename Mlp>
     void experts(const LayerPlan& p, const __nv_bfloat16* x, const Q8Act* xq, const float* router_x,
-                 int t, kernels::FfnCombineArgs& combine) {
+                 int t, kernels::FfnCombineArgs& combine, Mlp&& mlp) {
         const int e = int(config.num_experts), k = int(config.top_k_experts);
         const int width = int(config.moe_intermediate_size);
         const int pairs = t * k;
@@ -1369,7 +1431,7 @@ struct Executor::Impl {
             }
         }
         if (model.expert_parallel()) {
-            experts_parallel(p, x, act, ids, weights, t, combine);
+            experts_parallel(p, x, act, ids, weights, t, combine, mlp);
             return;
         }
         std::optional<ExpertDelivery::Call> call;
@@ -1380,7 +1442,6 @@ struct Executor::Impl {
             call = delivery->begin(std::size_t(p.delivery_layer), ids, std::uint32_t(pairs), stream,
                                    cpu ? std::span<const ExpertDelivery::Input>(inputs)
                                        : std::span<const ExpertDelivery::Input>());
-            if (t > gguf::kMaxVectorColumns) { delivery->await(stream); }
         }
         const auto* tables = delivery ? delivery->tables(std::size_t(p.delivery_layer))
                                       : static_cast<const void* const*>(p.tables.p);
@@ -1409,9 +1470,9 @@ struct Executor::Impl {
             };
             if (call) {
                 // Both stages add to the same exact fixed-point sum, zeroed once above, each over
-                // its experts of the call's sorted routes. Quantization reads every pair: the
-                // cached stage finds the other pairs cleared, the missing stage the cached pairs'
-                // middles.
+                // its experts of the call's sorted routes; the dense MLP runs between them, while
+                // the missing experts arrive. Quantization reads every pair: the cached stage finds
+                // the other pairs cleared, the missing stage the cached pairs' middles.
                 const auto stage = [&](const std::int32_t* set) {
                     gguf::MoeRouting part = routing;
                     part.active_count     = set;
@@ -1420,15 +1481,21 @@ struct Executor::Impl {
                 };
                 CUDA_CHECK(cudaMemsetAsync(middle, 0, std::size_t(pairs) * width * 2, stream));
                 compute(stage(call->cached_experts));
+                mlp();
                 delivery->await(stream);
                 compute(stage(call->missing_experts));
                 if (call->cpu != nullptr) {
                     kernels::add_fixed(fixed, call->products, call->cpu, std::int64_t(t) * hidden, stream);
                 }
-            } else { compute(routing); }
+            } else {
+                compute(routing);
+                mlp();
+            }
             combine.moe_fixed = fixed;
             return;
         }
+        mlp();
+        if (delivery) { delivery->await(stream); }
         void* rows_act = workspace->alloc_bytes(gguf::moe_matrix_activation_bytes(hidden, pairs)).data;
         gguf::quantize_moe_matrix_activation(p.gate_up_type, x, hidden, routing, pairs, k, rows_act,
                                              stream);
@@ -1473,6 +1540,23 @@ struct Executor::Impl {
     // The head of the last `rows` of t <= kMaxVectorColumns final-normed q8_1 rows into
     // logits_bf16 columns [0, rows).
     void head_logits_q8(const Q8Act& x, int t, int rows) {
+        if (divided_head) {
+            const float cap = config.final_logit_softcapping;
+            divided_head->project(
+                x.base, gguf::vector_activation_bytes(hidden, t), rows,
+                static_cast<__nv_bfloat16*>(logits_bf16.p), rank_streams(),
+                [&](std::size_t, const void* input, const Weight& piece, int, float* plane,
+                    __nv_bfloat16* out, cudaStream_t on) {
+                    gguf::VectorOutput o;
+                    o.f32           = plane;
+                    o.column_stride = piece.n;
+                    gguf::vector_product(ops::detail::gguf_type(piece.qtype), piece.qdata,
+                                         row_bytes(piece), piece.n, piece.k, input, t, o, on);
+                    kernels::softcap(plane + std::int64_t(t - rows) * piece.n,
+                                     std::int64_t(rows) * piece.n, cap, out, on);
+                });
+            return;
+        }
         auto scope  = workspace->scope();
         auto* plane = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * vocab * 4).data);
         gguf::VectorOutput o;
@@ -2165,11 +2249,24 @@ struct Executor::Impl {
                 draft_layer(li, n, h, xq);
             }
             // xq now holds the final-normed rows: the head's argmax is the draft.
-            gguf::VectorOutput head_out;
-            head_out.bf16          = draft_logits;
-            head_out.column_stride = vocab;
-            gguf::vector_product(ops::detail::gguf_type(draft_head.qtype), draft_head.qdata,
-                                 row_bytes(draft_head), vocab, a, xq.base, n, head_out, stream);
+            if (divided_draft_head) {
+                divided_draft_head->project(
+                    xq.base, gguf::vector_activation_bytes(a, n), n, draft_logits, rank_streams(),
+                    [&](std::size_t, const void* input, const Weight& piece, int, float*,
+                        __nv_bfloat16* out, cudaStream_t on) {
+                        gguf::VectorOutput o;
+                        o.bf16          = out;
+                        o.column_stride = piece.n;
+                        gguf::vector_product(ops::detail::gguf_type(piece.qtype), piece.qdata,
+                                             row_bytes(piece), piece.n, a, input, n, o, on);
+                    });
+            } else {
+                gguf::VectorOutput head_out;
+                head_out.bf16          = draft_logits;
+                head_out.column_stride = vocab;
+                gguf::vector_product(ops::detail::gguf_type(draft_head.qtype), draft_head.qdata,
+                                     row_bytes(draft_head), vocab, a, xq.base, n, head_out, stream);
+            }
             auto* drafted = static_cast<std::int32_t*>(d_drafts.p) + std::int64_t(step) * n;
             const Tensor logits(draft_logits, DType::BF16, {vocab, n});
             Tensor tokens(drafted, DType::I32, {n});

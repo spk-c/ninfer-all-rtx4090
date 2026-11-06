@@ -118,10 +118,13 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
            "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
            "                                (default 1024; 4096 for native MoE experts\n"
-           "                                in host memory or files); with an int8 or\n"
-           "                                rk* KV cache a Qwen3.5-core model runs the\n"
-           "                                nearby multiple of 128 that best fills the\n"
-           "                                GPU's attention waves (up to 256 more)\n"
+           "                                in host memory or files; 2048 for\n"
+           "                                DeepSeek-V4.1); with an int8 or rk* KV cache\n"
+           "                                a Qwen3.5-core model runs the nearby multiple\n"
+           "                                of 128 that best fills the GPU's attention\n"
+           "                                waves (up to 256 more)\n" +
+           std::string(ninfer::product::kPrefillTailHelp) +
+           std::string(ninfer::product::kIq1mExpertsHelp) +
            "  --decode-rounds-per-prefill N decode rounds after each prefill chunk while\n"
            "                                others generate (0: chunk / 64; 1 alternates)\n"
            "  --prefill-stall-budget-ms N   cut a prefill step to about N ms while others\n"
@@ -147,6 +150,7 @@ std::string serve_usage_text(const char* argv0) {
            "                                by each card's measured bandwidth and free memory)\n" +
            std::string(product::kTensorAttentionHelp) +
            std::string(product::kTensorParallelTransportHelp) +
+           std::string(product::kTensorParallelPartialsHelp) +
            std::string(product::kInvariantAttentionHelp) +
            "  --expert-residency device|host|disk  MoE experts on GPU (default), in pinned\n"
            "                                host memory, or in artifact files\n"
@@ -369,7 +373,7 @@ std::string serve_usage_text(const char* argv0) {
            "  --use-original-prefix-caching the checkpoint catalog instead of the hybrid\n"
            "                                prefix cache\n"
            "  --device-snapshot-slots N     hybrid: device state snapshot slots (default\n"
-           "                                concurrency + 1; + 2 without a Host tier)\n"
+           "                                concurrency + 2)\n"
            "  --cache-taps-per-request N    hybrid: new prefill snapshots per request\n"
            "                                (default 8; 2 without a Host tier)\n"
            "  --cache-tap-ladder N          hybrid: ladder base in tokens for history\n"
@@ -383,14 +387,17 @@ std::string serve_usage_text(const char* argv0) {
            "\n"
            "SPECULATIVE DECODING\n"
            "  --spec none|mtp|dflash|dflash2|dspark\n"
-           "                                speculative decoding backend (default: mtp with 3\n"
-           "                                drafts for Flash-Next and Gemma 4 host or disk\n"
-           "                                experts whose artifact has the drafter, else none;\n"
-           "                                dspark: DeepSeek-V4.1's DSpark drafter)\n"
-           "  --draft-tokens N              drafts per round, 1..15 (dspark: up to its block\n"
-           "                                of 5, the default)\n"
-           "  --draft-min-p P              Flash-Next MTP confidence floor, 0..1 (default 0;\n"
-           "                                0.5 when the engine chooses MTP)\n"
+           "                                speculative decoding backend (default: dflash2\n"
+           "                                with 4 drafts for Flash-Next host experts whose\n"
+           "                                artifact has that drafter, mtp with 3 for those\n"
+           "                                with only the MTP block and for Gemma 4 host or\n"
+           "                                disk experts whose artifact has the drafter, else\n"
+           "                                none; dspark: DeepSeek-V4.1's DSpark drafter)\n"
+           "  --draft-tokens N              drafts per round, 1..15 (Flash-Next dflash2: 1..7;\n"
+           "                                dspark: up to its block of 5, the default)\n"
+           "  --draft-min-p P               Flash-Next MTP or DFlash2 confidence floor, 0..1\n"
+           "                                (default 0 with --spec, 0.5 when the engine\n"
+           "                                chooses MTP, 0.7 when it chooses DFlash2)\n"
            "  --draft-confidence C          dspark: verify drafts while their confidence is\n"
            "                                at least C, 0..1 (default 0.5; 0 keeps every draft)\n"
            "  --lm-head-draft               draft with the optimized proposal head, which\n"
@@ -1184,6 +1191,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 require_value("--tensor-parallel-transport"));
             continue;
         }
+        if (arg == "--tensor-parallel-prompt-partials") {
+            options.tensor_parallel_prompt_partials = product::parse_tensor_parallel_partials(
+                require_value("--tensor-parallel-prompt-partials"));
+            continue;
+        }
         if (arg == "--invariant-attention") {
             options.invariant_attention = true;
             continue;
@@ -1573,6 +1585,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 options.steering)) {
             continue;
         }
+        if (product::parse_prompt_route_option(arg, options.prompt_routes,
+                                               [&] { return require_value(arg.c_str()); })) {
+            continue;
+        }
         if (arg == "--default-graft") {
             options.default_graft = require_value("--default-graft");
             if (options.default_graft.empty()) {
@@ -1805,6 +1821,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     product::check_tensor_attention(options.tensor_attention, options.tensor_parallel);
     product::check_tensor_parallel_transport(options.tensor_parallel_transport,
                                              options.tensor_parallel);
+    product::check_tensor_parallel_partials(options.tensor_parallel_prompt_partials,
+                                            options.tensor_parallel);
     if (options.request_log_max_mib != 0 && options.request_log_jsonl.empty()) {
         throw std::invalid_argument("--request-log-max-mib requires --request-log-jsonl");
     }

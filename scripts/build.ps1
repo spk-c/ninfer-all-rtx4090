@@ -89,17 +89,25 @@ CMakeLists requires CUDA >= 12.8. Choose an installed version with -CudaVersion
 "@
 }
 
-# vcvars64.bat only exports into its own cmd process, so run it and copy the result back.
+# vcvars64.bat only exports into its own cmd process, so run it and copy the result back. It
+# selects toolset 14.44 (MSVC 19.44), the oldest qualified compiler, also where the installation's
+# default toolset is older: cl 19.38 miscompiles core::wide_add at /O2.
 Write-Host "toolchain: $VcVars"
 Write-Host "toolchain: $Nvcc"
-$VcEnv = cmd /c "`"$VcVars`" >nul 2>&1 && set"
-# Windows may expose both PATH and Path. Importing the latter last discards
-# vcvars' compiler directory in PowerShell's case-insensitive environment.
-$VcPath = $VcEnv | Where-Object {
+$VcVarsOutput = cmd /c "`"$VcVars`" -vcvars_ver=14.44 >nul 2>&1 && set"
+if ($LASTEXITCODE -ne 0) {
+    throw @"
+$VcVars could not select MSVC toolset 14.44 (MSVC 19.44), the oldest qualified compiler.
+Update Visual Studio 2022 to 17.14, or install its 14.44 build tools in the Visual Studio Installer.
+"@
+}
+# Windows can expose both PATH and Path. Keep the vcvars MSVC path and
+# import all other variables without allowing a mixed-case Path to replace it.
+$VcPath = $VcVarsOutput | Where-Object {
     $_ -match '^PATH=' -and $_ -match 'MSVC\\[^;]+\\bin\\HostX64\\x64'
 } | Select-Object -First 1
-if (-not $VcPath) { throw 'vcvars64 did not return PATH' }
-$VcEnv | ForEach-Object {
+if (-not $VcPath) { throw 'vcvars64 did not return the expected MSVC PATH' }
+$VcVarsOutput | ForEach-Object {
     if ($_ -match '^([^=]+)=(.*)$' -and $Matches[1] -ine 'PATH') {
         Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2]
     }

@@ -380,6 +380,7 @@ int main(int argc, char** argv) {
         engine_options.tensor_split             = cli.tensor_split;
         engine_options.tensor_attention         = cli.tensor_attention;
         engine_options.tensor_parallel_transport = cli.tensor_parallel_transport;
+        engine_options.tensor_parallel_prompt_partials = cli.tensor_parallel_prompt_partials;
         engine_options.invariant_attention      = cli.invariant_attention;
         engine_options.expert_residency              = cli.expert_residency;
         engine_options.ngram_table                   = cli.ngram_table;
@@ -402,6 +403,7 @@ int main(int argc, char** argv) {
         engine_options.embedding_q6             = cli.embedding_q6;
         engine_options.embedding_residency      = cli.embedding_residency;
         cli.steering.apply(engine_options);
+        cli.prompt_routes.apply(engine_options);
         engine_options.mtp_experts_q4           = cli.mtp_experts_q4;
         engine_options.gdn_state_fp16           = cli.gdn_state_fp16;
         engine_options.rope_yarn                = cli.rope_yarn;

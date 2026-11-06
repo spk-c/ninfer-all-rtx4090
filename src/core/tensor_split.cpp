@@ -75,6 +75,27 @@ std::vector<std::uint64_t> unit_positions(std::uint64_t total, std::uint64_t uni
     return out;
 }
 
+std::vector<double> shares_beside_first(std::span<const double> speed, double first) {
+    if (speed.empty()) { throw std::invalid_argument("shares need one speed per rank"); }
+    require_positive(speed, "rank speeds");
+    if (!std::isfinite(first) || first < 0.0) {
+        throw std::invalid_argument("rank 0's own work must be finite and not negative");
+    }
+    // Rank r runs out[r] (+ first on rank 0) in out[r] / speed[r]: one level for every rank.
+    const double sum = std::accumulate(speed.begin(), speed.end(), 0.0);
+    std::vector<double> out(speed.size());
+    const double level = (1.0 + first) / sum;
+    out[0]             = level * speed[0] - first;
+    if (out[0] > 0.0 || speed.size() == 1) {
+        for (std::size_t rank = 1; rank < speed.size(); ++rank) { out[rank] = level * speed[rank]; }
+    } else {
+        const double rest = sum - speed[0];
+        for (std::size_t rank = 1; rank < speed.size(); ++rank) { out[rank] = speed[rank] / rest; }
+    }
+    out[0] = std::max(out[0], 1e-6);
+    return out;
+}
+
 std::vector<double> fill_shares(std::span<const double> speed, std::span<const double> capacity,
                                 bool shrinks) {
     const std::size_t ranks = speed.size();
@@ -122,6 +143,37 @@ std::vector<double> fill_shares(std::span<const double> speed, std::span<const d
         }
         if (!capped) { return out; }
     }
+}
+
+std::vector<double> delivery_shares(std::span<const double> room, std::span<const double> bus,
+                                    double bytes, std::span<const double> speed) {
+    const std::size_t ranks = room.size();
+    if (ranks == 0 || bus.size() != ranks || speed.size() != ranks) {
+        throw std::invalid_argument("delivery shares need one room, bus and speed per rank");
+    }
+    if (!std::isfinite(bytes) || bytes <= 0.0) {
+        throw std::invalid_argument("delivery shares need the experts' bytes");
+    }
+    require_positive(bus, "rank bus speeds");
+    for (const double held : room) {
+        if (!std::isfinite(held) || held < 0.0) {
+            throw std::invalid_argument("rank cache rooms must be finite and not negative");
+        }
+    }
+    const double held = std::accumulate(room.begin(), room.end(), 0.0);
+    if (held >= bytes) {
+        std::vector<double> capacity(ranks);
+        for (std::size_t rank = 0; rank < ranks; ++rank) { capacity[rank] = room[rank] / bytes; }
+        return fill_shares(speed, capacity);
+    }
+    // Rank r copies share[r] * bytes - room[r]; equal times over the buses leave each rank its room
+    // plus `time` seconds of its bus, and the shares add up to every expert.
+    const double time = (bytes - held) / std::accumulate(bus.begin(), bus.end(), 0.0);
+    std::vector<double> out(ranks);
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        out[rank] = (room[rank] + time * bus[rank]) / bytes;
+    }
+    return out;
 }
 
 } // namespace ninfer

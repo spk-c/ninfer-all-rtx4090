@@ -151,36 +151,6 @@ __global__ void wait_kernel(Mailbox* box, const std::uint32_t* need) {
     while (Atomic(box->prepared).load(cuda::memory_order_acquire) != sequence) { __nanosleep(128); }
 }
 
-// One thread per token: its pairs whose expert is cached keep their id, with the token's weights
-// renormalized to its whole routed sum; the others become -1 with weight 0.
-__global__ void drop_missing_kernel(const std::int32_t* __restrict__ ids,
-                                    const float* __restrict__ weights, int tokens, int experts,
-                                    const void* const* __restrict__ gate,
-                                    const std::uintptr_t* __restrict__ ranges,
-                                    std::int32_t* __restrict__ kept_ids,
-                                    float* __restrict__ kept_weights) {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= tokens) { return; }
-    bool resident[kTop];
-    float all = 0.0f, kept = 0.0f;
-#pragma unroll
-    for (int j = 0; j < kTop; ++j) {
-        const int e = ids[t * kTop + j];
-        resident[j] = false;
-        if (e >= 0 && e < experts) {
-            resident[j] = in_ranges(reinterpret_cast<std::uintptr_t>(gate[e]), ranges);
-        }
-        all += weights[t * kTop + j];
-        kept += resident[j] ? weights[t * kTop + j] : 0.0f;
-    }
-    const float scale = kept > 0.0f ? all / kept : 0.0f;
-#pragma unroll
-    for (int j = 0; j < kTop; ++j) {
-        kept_ids[t * kTop + j]     = resident[j] ? ids[t * kTop + j] : -1;
-        kept_weights[t * kTop + j] = resident[j] ? weights[t * kTop + j] * scale : 0.0f;
-    }
-}
-
 // A device table entry change of an admission: `expert` now reads `at`.
 struct TablePatch {
     std::int32_t expert = -1;
@@ -284,7 +254,7 @@ struct ExpertMisses::Impl {
         cudaEvent_t copied     = nullptr; // after them (timed for the balance)
         std::uint32_t served   = 0;
         // Balance: this device's copy and CPU times.
-        ExpertSplit split;
+        ExpertSplit split, prompt_split; // narrow calls', and prompt chunks' (verify_tokens)
     };
 
     DeviceContext& device;
@@ -343,9 +313,9 @@ struct ExpertMisses::Impl {
     Impl(DeviceContext& d, std::vector<MissLayer> l, std::vector<std::filesystem::path> paths,
          MissOptions o, ExpertCache* c)
         : device(d), layers(std::move(l)), cache(c), options(o), ranks(d.size()) {
-        if (options.token_capacity == 0 || options.token_capacity > 64 || layers.empty() ||
-            !std::isfinite(options.cpu_share) || options.cpu_share < 0 || options.cpu_share > 1 ||
-            (options.cpu_balance && options.cpu_share != 0) ||
+        if (options.token_capacity == 0 || options.token_capacity > kMaxMissTokens ||
+            layers.empty() || !std::isfinite(options.cpu_share) || options.cpu_share < 0 ||
+            options.cpu_share > 1 || (options.cpu_balance && options.cpu_share != 0) ||
             options.tail_skip_rank >= std::uint32_t(kTop)) {
             throw std::invalid_argument("expert misses: invalid capacity, CPU share or tail skip");
         }
@@ -624,12 +594,12 @@ struct ExpertMisses::Impl {
     }
 
     // The CPU's count of a request's missing experts, the last of `order` (most pairs first).
-    static std::size_t balance(Rank& rank, const MissLayer& layer,
+    static std::size_t balance(ExpertSplit& split, const MissLayer& layer,
                                const std::vector<std::pair<int, std::int32_t>>& order) {
         std::vector<int> pairs;
         pairs.reserve(order.size());
         for (const auto& [uses, expert] : order) { pairs.push_back(uses); }
-        return rank.split.cpu_count(pairs, expert_megabytes(layer));
+        return split.cpu_count(pairs, expert_megabytes(layer));
     }
 
     void serve_request(Rank& rank, std::uint32_t sequence) {
@@ -645,6 +615,7 @@ struct ExpertMisses::Impl {
         auto* tables           = static_cast<const void**>(rank.tables->data());
         auto* missing_ids      = static_cast<std::int32_t*>(rank.missing_ids->data());
         const std::uint32_t pairs = tokens * kTop;
+        ExpertSplit& split        = tokens > options.verify_tokens ? rank.prompt_split : rank.split;
         // Requests of a rank come one at a time: a layer's request is posted only after the stage
         // two of the one before has run on the same stream, so both staging halves are free.
         const std::uint32_t half = sequence & 1U;
@@ -665,7 +636,7 @@ struct ExpertMisses::Impl {
         std::size_t cpu_count = 0;
         if (cpu_capable(layer)) {
             cpu_count = options.cpu_balance
-                            ? balance(rank, layer, order)
+                            ? balance(split, layer, order)
                             : std::min(order.size(), std::size_t(std::lround(
                                                          double(order.size()) * options.cpu_share)));
         }
@@ -826,7 +797,7 @@ struct ExpertMisses::Impl {
             }
             const double microseconds =
                 disk ? compute_cpu(layer, rank, [] {}) : compute_cpu(layer, rank, issue);
-            if (options.cpu_balance) { rank.split.computed(cpu_work_done, microseconds); }
+            if (options.cpu_balance) { split.computed(cpu_work_done, microseconds); }
         } else {
             issue();
             if (rank.product_count) { *static_cast<std::int32_t*>(rank.product_count->data()) = 0; }
@@ -835,7 +806,7 @@ struct ExpertMisses::Impl {
         if (options.cpu_balance && gpu_count > 0 && staged_bytes > 0 && mapped == 0) {
             float milliseconds = 0;
             CUDA_CHECK(cudaEventElapsedTime(&milliseconds, rank.copying, rank.copied));
-            rank.split.copied(double(staged_bytes) / 1e6, 1e3 * double(milliseconds));
+            split.copied(double(staged_bytes) / 1e6, 1e3 * double(milliseconds));
         }
         Atomic(box.prepared).store(sequence, cuda::memory_order_release);
         const double seconds =
@@ -901,18 +872,6 @@ struct ExpertMisses::Impl {
             }
             if (!worked) { spin_hint(); }
         }
-    }
-
-    void drop_missing(std::size_t index, const Tensor& ids, const Tensor& weights,
-                      Tensor& kept_ids, Tensor& kept_weights, cudaStream_t stream) {
-        const MissLayer& layer = layers.at(index);
-        const int tokens       = ids.ne[1];
-        drop_missing_kernel<<<(tokens + 127) / 128, 128, 0, stream>>>(
-            static_cast<const std::int32_t*>(ids.data), static_cast<const float*>(weights.data),
-            tokens, int(layer.experts), layer.gate_table,
-            static_cast<const std::uintptr_t*>(ranges.at(index).p),
-            static_cast<std::int32_t*>(kept_ids.data), static_cast<float*>(kept_weights.data));
-        CUDA_CHECK(cudaGetLastError());
     }
 
     Call begin(std::size_t index, const Tensor& ids, const Tensor& m, std::int32_t tokens,
@@ -999,10 +958,6 @@ ExpertMisses::Call ExpertMisses::begin(std::size_t layer, const Tensor& ids, con
                                        std::int32_t tokens, const ops::GgufMoeWeights& banks,
                                        cudaStream_t stream) {
     return impl_->begin(layer, ids, m, tokens, banks, stream);
-}
-void ExpertMisses::drop_missing(std::size_t layer, const Tensor& ids, const Tensor& weights,
-                                Tensor& kept_ids, Tensor& kept_weights, cudaStream_t stream) {
-    impl_->drop_missing(layer, ids, weights, kept_ids, kept_weights, stream);
 }
 void ExpertMisses::await(std::size_t layer, cudaStream_t stream) { impl_->await(layer, stream); }
 void ExpertMisses::keep_alive() { impl_->keep_alive(); }

@@ -167,10 +167,13 @@ std::string usage_text(const char* argv0) {
            "  --max-context N               context ceiling in tokens (default 2048)\n"
            "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
            "                                (default 1024; 4096 for native MoE experts\n"
-           "                                in host memory or files); with an int8 or\n"
-           "                                rk* KV cache a Qwen3.5-core model runs the\n"
-           "                                nearby multiple of 128 that best fills the\n"
-           "                                GPU's attention waves (up to 256 more)\n"
+           "                                in host memory or files; 2048 for\n"
+           "                                DeepSeek-V4.1); with an int8 or rk* KV cache\n"
+           "                                a Qwen3.5-core model runs the nearby multiple\n"
+           "                                of 128 that best fills the GPU's attention\n"
+           "                                waves (up to 256 more)\n" +
+           std::string(ninfer::product::kPrefillTailHelp) +
+           std::string(ninfer::product::kIq1mExpertsHelp) +
            "  --max-new N                   cap on generated tokens (default 128)\n"
            "  --device N                    CUDA device index (default 0)\n"
            "  --devices A,B,...             one pipeline stage per listed GPU, each owning\n"
@@ -190,6 +193,7 @@ std::string usage_text(const char* argv0) {
            "                                by each card's measured bandwidth and free memory)\n" +
            std::string(ninfer::product::kTensorAttentionHelp) +
            std::string(ninfer::product::kTensorParallelTransportHelp) +
+           std::string(ninfer::product::kTensorParallelPartialsHelp) +
            std::string(ninfer::product::kInvariantAttentionHelp) +
            std::string(ninfer::product::kSteeringHelp) +
            "  --expert-residency device|host|disk  MoE experts on GPU (default), in pinned\n"
@@ -219,14 +223,17 @@ std::string usage_text(const char* argv0) {
            "\n"
            "SPECULATIVE DECODING\n"
            "  --spec none|mtp|dflash|dflash2|dspark\n"
-           "                                speculative decoding backend (default: mtp with 3\n"
-           "                                drafts for Flash-Next and Gemma 4 host or disk\n"
-           "                                experts whose artifact has the drafter, else none;\n"
-           "                                dspark: DeepSeek-V4.1's DSpark drafter)\n"
-           "  --draft-tokens N              drafts per round, 1..15 (dspark: up to its block\n"
-           "                                of 5, the default)\n"
-           "  --draft-min-p P              Flash-Next MTP confidence floor, 0..1 (default 0;\n"
-           "                                0.5 when the engine chooses MTP)\n"
+           "                                speculative decoding backend (default: dflash2\n"
+           "                                with 4 drafts for Flash-Next host experts whose\n"
+           "                                artifact has that drafter, mtp with 3 for those\n"
+           "                                with only the MTP block and for Gemma 4 host or\n"
+           "                                disk experts whose artifact has the drafter, else\n"
+           "                                none; dspark: DeepSeek-V4.1's DSpark drafter)\n"
+           "  --draft-tokens N              drafts per round, 1..15 (Flash-Next dflash2: 1..7;\n"
+           "                                dspark: up to its block of 5, the default)\n"
+           "  --draft-min-p P               Flash-Next MTP or DFlash2 confidence floor, 0..1\n"
+           "                                (default 0 with --spec, 0.5 when the engine\n"
+           "                                chooses MTP, 0.7 when it chooses DFlash2)\n"
            "  --draft-confidence C          dspark: verify drafts while their confidence is\n"
            "                                at least C, 0..1 (default 0.5; 0 keeps every draft)\n"
            "  --lm-head-draft               draft with the optimized proposal head, which\n"
@@ -384,6 +391,10 @@ Options parse_options(int argc, char** argv) {
                 arg, [&]() -> const char* { return value(arg); }, options.steering)) {
             continue;
         }
+        if (ninfer::product::parse_prompt_route_option(arg, options.prompt_routes,
+                                                       [&] { return value(arg); })) {
+            continue;
+        }
         if (arg == "--prompt") {
             options.prompt = value(arg);
         } else if (arg == "--chat-template") {
@@ -422,6 +433,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--tensor-parallel-transport") {
             options.tensor_parallel_transport =
                 ninfer::product::parse_tensor_parallel_transport(value(arg));
+        } else if (arg == "--tensor-parallel-prompt-partials") {
+            options.tensor_parallel_prompt_partials =
+                ninfer::product::parse_tensor_parallel_partials(value(arg));
         } else if (arg == "--invariant-attention") {
             options.invariant_attention = true;
         } else if (arg == "--expert-residency") {
@@ -663,6 +677,8 @@ Options parse_options(int argc, char** argv) {
     ninfer::product::check_tensor_attention(options.tensor_attention, options.tensor_parallel);
     ninfer::product::check_tensor_parallel_transport(options.tensor_parallel_transport,
                                                      options.tensor_parallel);
+    ninfer::product::check_tensor_parallel_partials(options.tensor_parallel_prompt_partials,
+                                                    options.tensor_parallel);
     if (kv_headroom_mib.has_value()) {
         if (options.kv_capacity.mode != KvCapacityMode::Automatic) {
             throw std::invalid_argument("--kv-headroom-mib requires --kv-capacity auto");

@@ -266,8 +266,10 @@ families](#expert-parallelism-of-the-other-moe-families)).
   heads' planes of every layer's KV cache. The ranks holding KV heads are a prefix of the ranks;
   with more ranks than the heads allow, the others hold no attention, unless `--tensor-attention
   positions` divides it by cache pages ([attention by positions](#attention-by-positions)). The
-  embedding, the final norm and MTP stay on rank 0, and so do the whole output and proposal heads;
-  every rank also holds a row range of each head, which decode projects divided (below).
+  embedding, the final norm and MTP's stem stay on rank 0, and so do the whole output and proposal
+  heads; every rank also holds a row range of each head, which decode projects divided, and its
+  share of MTP's attention with its KV and its rows of MTP's dense FFN in place of rank 0's whole
+  ones (below).
   `TensorShare` and `tensor_parallel_share`
   (`models/qwen3_5/config.h`) state a rank's ranges and geometry.
 - **Expert parallelism.** In a MoE model a rank holds a contiguous range of the routed experts in
@@ -279,7 +281,14 @@ families](#expert-parallelism-of-the-other-moe-families)).
   its paths, the shared one on rank 0, as its partial for the FFN exchange. The adaptive prefill
   band (47 to 52 tokens) takes the plain prefill route under a share. The experts divide at any
   expert; the automatic split counts the experts as divided weights, the router as held by every
-  rank and the shared expert as rank 0's. Experts in host memory or on disk
+  rank and the shared expert as rank 0's. Rank 0 runs the shared expert beside its routed ones,
+  so it takes fewer of them (`shares_beside_first`): a token's routed work is
+  `num_experts_per_tok * moe_intermediate_size` rows, the shared expert adds its own rows to rank
+  0's, and the expert ranges make every rank's rows over its weight the same (Qwen3.6-35B-A3B on
+  four even ranks: 40, 72, 72 and 72 of the 256 experts; on four RTX 5060 Ti it decodes at 179.2
+  and 174.8-175.3 tok/s after a 989- and a 6,768-token prompt against 177.7-178.0 and 173.9-174.3
+  with 64 each, prefills 0.2% to 0.8% faster and leaves rank 0 1.67 GiB more free memory, int8 KV,
+  two runs each, 2026-11-04). Experts in host memory or on disk
   (`--expert-residency host|disk`) and NVFP4 expert banks have no share and are refused.
 - **Divided expert columns.** Two ranks of about equal weight (each 40% to 60% of the split)
   divide every expert's 512 intermediate columns in halves instead, routed and shared alike, where
@@ -311,11 +320,13 @@ families](#expert-parallelism-of-the-other-moe-families)).
   no device demand.
 - **The weights.** `--tensor-split A,B,...` gives them, one per device. Without it the engine
   measures each card's device-to-device copy bandwidth (`rank_copy_bandwidth`, 128 MiB; ranks on one
-  card divide its figure) as its speed, works out how much of the divided weights, GDN state and KV
+  card divide its figure; cards of one model, by name, memory, multiprocessors and capability, take
+  the mean of theirs, since a share that followed the noise between them moved from start to start
+  and changed the partial sums the ranks add) as its speed, works out how much of the divided weights, GDN state and KV
   cache for the configured context and concurrency each card can hold beside what every rank holds
-  and, on rank 0, the embedding, the head and, as selected, MTP's layer with its KV, the proposal
-  head, a DFlash drafter and a resident Vision tower, the heads' row ranges counting with the divided
-  weights (`default_tensor_split`, `models/qwen3_5/load.cpp`), and fills the cards in proportion to speed, capping a card at its room
+  and, on rank 0, the embedding, the head and, as selected, MTP's layer, the proposal head, a
+  DFlash drafter and a resident Vision tower, the heads' row ranges and MTP's attention with its KV
+  and dense FFN counting with the divided weights (`default_tensor_split`, `models/qwen3_5/load.cpp`), and fills the cards in proportion to speed, capping a card at its room
   and passing the excess to the others (`fill_shares`). Automatic KV capacity also keeps its
   headroom free on every card, and when the longest context fits nowhere it divides the cards by
   room instead of speed, so the KV it shrinks to is the most that fits. What the Engine reserves
@@ -361,12 +372,35 @@ families](#expert-parallelism-of-the-other-moe-families)).
   (PCIe 4.0 x8, host transport), and a round in 34.4 ms against 39.4 on the four A4000s (capped at
   110 W), with the same text and accepted drafts; prefill is unchanged. The ranges cost every card
   their bytes (0.40 GiB on each of four cards for Qwen3.8-27B with its proposal head).
+- **Divided MTP layer** (`TextContext::mtp_divided_layer`). Every rank holding KV heads holds its
+  share of MTP's attention, cut as a layer's (`bind_attention_shares`), with those heads' planes of
+  the MTP cache; every rank holds its rows of MTP's dense FFN, cut where a layer's FFN is
+  (`bind_dense_shares`). Rank 0 holds neither whole, only the whole K and V rows besides. In decode
+  each MTP forward sends the stem's output and the positions, rope positions, table rows and valid
+  columns over the control and forward links; each rank attends with its heads and projects its
+  query heads' columns of the output into an FP32 partial, and one exchange stores their sum,
+  rounded to BF16 once, in every rank's buffer, which each rank adds to its copy of the residual as
+  one device adds its output projection. Each rank then projects its FFN rows from its own copy and
+  a second exchange sums them for rank 0. A prompt chunk's keys and values come from rank 0, which
+  projects them whole and sends each rank its heads' (1 KiB a token for Qwen3.8-27B on four
+  cards, against 10 KiB of hidden state), and
+  only a final chunk's last column runs the rest of the layer divided. Drafts only propose, so the
+  round's text stays the target's. The exchange slots alternate across passes and these calls
+  (`StageRuntime::TensorParallel::next_exchange`), since the drafts follow the verification in one
+  capture. Position-split attention, or stored runs that do not cut at the shares, keep the
+  attention whole on rank 0 (`TextContext::mtp_ffn` then divides the FFN alone, sending the
+  post-attention hidden state); a MoE FFN stays on rank 0. On four RTX 5060 Ti (Qwen3.8-27B, Q8 MTP
+  layer, int8 KV, three drafts, even split) dividing the FFN took a round from 24.9-25.0 ms to
+  23.6-23.9, and dividing the attention as well from 22.5-22.6 ms (after the scatter-flag
+  exchange) to 22.1-22.2, with the same accepted drafts and text and the same prefill; on two RTX
+  3090 a round takes the same time (21.0-21.7 ms against 21.1-21.8, the same text). Against the
+  whole layer on rank 0, rank 0 holds 0.31 GiB less and each other card 0.11 GiB more.
 - **Transports and forms.** An exchange moves the partials one of three ways: through mapped pinned
   host memory (`host`: the copy engines write each partial there, every rank's kernels read the
   others' copies; works between any cards), by reading the other cards' memory (`peer-read`), or by
   writing into it (`peer-write`: a rank stores what another rank sums into that rank's memory, so
   every kernel reads only its own card). The two peer transports need peer access between every pair
-  of cards. Each moves an exchange in one of three forms. Words, for partials of up to 32 KiB (a
+  of cards. Each moves an exchange in one of four forms. Words, for partials of up to 32 KiB (a
   decode step or a short verification) with every rank on its own card: each rank's reduce kernel
   stores its FP32 values with the exchange's epoch as 8-byte words, into its own mapped host row or
   into its row in every other card's memory, and polls the others' words, with no copy and no
@@ -376,15 +410,25 @@ families](#expert-parallelism-of-the-other-moe-families)).
   of the values, whole 64-value blocks, and the other ranks' finished BF16 ranges then reach its
   replica; every value is still the same rank-order sum, and a rank moves 1/N of each other rank's
   partial and (N-1)/N of a replica instead of N-1 whole partials. Through host memory a publish
-  copies only the ranges the other ranks read, and an owner copies its finished range there; by
-  peer writes the owner stores its finished range straight into the other replicas.
+  copies only the ranges the other ranks read, and an owner copies its finished range there; by peer
+  writes the owner stores its finished range straight into the other replicas. Scatter flags,
+  through host memory with every rank on its own card and for partials of up to 1 MiB: the
+  reduce-scatter's publish copies as above, but one kernel per rank (two blocks) sums its range,
+  stores the finished values into its own mapped host row and reads the others', waiting on flags in
+  host memory that each rank's blocks raise once their copies and stores have reached it, instead of
+  on fences between the cards; a flag carries the exchange's epoch from the words' count. On four
+  RTX 5060 Ti an exchange of a four-column verification (80 KiB) took 43.0 us against 51.2 for the
+  reduce-scatter with fences, and one of 640 KiB 203 us against 220; a decode round of Qwen3.8-27B
+  with three drafts took 22.4-22.6 ms against 23.6-23.8, with the same text.
 - **Choosing a route.** Which route is fastest depends on the partial's size, the number of cards
   and the platform. On a 4x RTX 5060 Ti box with the community peer-access driver host memory beat
   peer reads (#170); on a 4x RTX A4000 box peer reads beat host memory, on four of its cards peer
   writes beat both at every size, and a whole reduce by peer reads took more than six times the
   reduce-scatter's time at 40 MiB (measurements below). At startup the exchange times every route
   the cards allow, in captured graphs on every rank at once, at partial sizes from 4 KiB doubling up
-  to its slot, and frees the buffers of the routes it did not choose. Between two measured sizes a
+  to its slot and at the last size of each route that stops short of the slot (words, scatter flags,
+  a peer-write whole reduce into its inbox rows), and frees the buffers of the routes it did not
+  choose. Between two measured sizes a
   route's time is read off the line through its two times, at sixteenths of the step, since one
   octave apart a crossover could be off by half the size; an exchange takes the fastest route at the
   smallest of all these sizes that holds it. `--tensor-parallel-transport host|peer-read|peer-write`
@@ -397,12 +441,60 @@ families](#expert-parallelism-of-the-other-moe-families)).
   KiB (14.0 us), peer-write whole to 100 KiB (29.1 us), peer-write scatter to 40 MiB (3837.0 us)`).
   `tools/tp_exchange_bench.cu` prints what the exchange measured at startup and every route at every
   size beside the chosen ones.
-- **One exchange per step.** Every step, a long prompt chunk included, exchanges each layer's
-  partials once. Cutting a prompt chunk into pieces whose exchanges overlap the next piece's
-  compute was measured slower and is not done: the dense Qwen3.8-27B GSQ-RCO IQ3_S prefilled a
-  9,705-token prompt at 657 tok/s in four pieces against 807 in one on two Tesla V100s (host
-  transport), and Qwen3.6-35B-A3B, whose pieces each read most expert weights, a 7,000-token one
-  at 5,300 against 6,700 on two RTX 3090s.
+- **Prompt pieces.** A text prompt chunk of at least 768 tokens of a model with dense FFNs
+  exchanges each step in two to four pieces of whole 64-column blocks, each at least 384 columns
+  wide (`run_tensor_parallel`; Pieces in `core/tensor_parallel.h`). Every rank computes a piece on
+  its own stream and hands it to a side stream of its own, which publishes, reduces and completes
+  that piece's exchange while the rank's stream computes the next piece; the rank's next step on a
+  piece waits for that piece's exchange. A piece attends over the keys up to its own last position
+  and carries the Gated DeltaNet state to the next piece, so it computes what a prompt chunk of its
+  width computes: in pieces of 384, 384 and 221 columns a 989-token prompt gave the greedy text of
+  `--prefill-chunk 384` without pieces, character for character. Verification, DFlash taps,
+  position-split attention, sequence batches, batched prompt segments, image and video prompts
+  and steering exchange each step whole, and so do MoE models, whose pieces would each
+  read most expert weights (Qwen3.6-35B-A3B prefilled a 7,000-token prompt at 5,300 tok/s in four
+  pieces against 6,700 in one on two RTX 3090s). Narrower pieces lose more to their projections'
+  narrower GEMMs than the overlap gains: in pieces of 256 columns the four A4000s below prefilled a
+  6,768-token prompt at 1,402 tok/s against 1,478 whole, and two Tesla V100s prefilled the dense
+  Qwen3.8-27B GSQ-RCO IQ3_S at 657 tok/s in four pieces of its chunk against 807 whole (host
+  transport). With pieces of at least 384 columns Qwen3.8-27B (int8 KV, even split, one request)
+  prefills a 6,773-token prompt at 1,506 tok/s against 1,194 and a 994-token one at 1,361 against
+  1,087 on four RTX 5060 Ti (host transport), and at 1,615 against 1,492 and 1,510 against 1,330 on
+  four RTX A4000s (peer-write, capped at 110 W). A pieces build's text can differ from an unpieced
+  one's as one prompt-chunk width's differs from another's.
+- **Rounded prompt partials** (`--tensor-parallel-prompt-partials bf16|int8`; Rounded partials
+  in `core/tensor_parallel.h`). Where transfers bound prefill, a prompt chunk's exchanges can move
+  each rank's partial rounded: to BF16, half the bytes, or to 8-bit blocks of 32 values with an
+  FP32 scale, 9/32 of them. A publish rounds the partial into a device copy and moves the copy as
+  its transport moves partials (host slots, peer-write inbox rows, or the copy the other ranks read
+  by peer), and a reduce adds the rounded partials in FP32 in rank order, so the replicas stay
+  identical. Whole reduces and reduce-scatters round on every transport, for Qwen3.5-core models
+  and Qwen3.8-Flash-Next; decode, verification, the MTP layer, words and scatter flags keep FP32.
+  Rounded partials move fewer bytes, so the startup measurement also times the whole and scatter
+  routes with partials rounded as asked, and a rounded exchange takes its route from those times
+  (the startup log lists them after `bf16 partials:` or `int8 partials:`). The rounding adds one
+  rounding of each share's output to every projection a prompt runs, so prompt outputs and
+  perplexity differ slightly from FP32 partials'. On four RTX 5060 Ti on PCIe 3.0 x8 (host
+  transport, int8 KV, plain decode, two runs each) Qwen3.8-27B prefilled a 989-token prompt at
+  1,431-1,434 tok/s with FP32 partials, 1,685-1,687 with BF16 and 1,483-1,485 with 8-bit, and a
+  6,768-token one at 1,587-1,597, 1,936-1,957 and 1,664-1,666; Qwen3.8-Flash-Next Q2_0 at
+  1,659-1,664, 1,829-1,865 and 1,875-1,899, and 1,635-1,644, 1,803-1,843 and 1,862-1,880, with
+  the same decode speed. With MTP and an even split BF16 partials prefilled a 6,773-token prompt
+  at 1,472 tok/s against 1,167-1,169 and a 994-token one at 1,370-1,372 against 1,106-1,109, with
+  the same accepted drafts and greedy texts. Perplexity over the 40 KB slice (Qwen3.8-27B, 2,048-token
+  disjoint windows, two RTX 3090s, host transport) is 7.0952 with FP32 partials, 7.0943 with BF16
+  and 7.0981 with 8-bit, scored at 1,107, 1,223 and 1,321 tok/s; over its first 16 KB on the four
+  5060 Ti 5.0702, 5.0686 and 5.0684, at 1,060, 1,206 and 1,100 tok/s; Qwen3.8-Flash-Next over the
+  slice (int8 KV, 4,096-token windows) on the two 3090s 6.4854, 6.4937 and 6.4638, at 1,001-1,005,
+  1,150 and 1,246 tok/s. A prompt piece's rounded partials take their rounded bytes in a
+  peer-write inbox row, so the later pieces of a chunk fit where their FP32 values would not and
+  reduce on the route the measurement chose (on two RTX A4000s 8-bit partials of a piece's size
+  reduce whole by peer writes). Where the peers write each other's memory the transfers
+  do not bound prefill and rounding does not pay: on two RTX A4000s (peer-write, 140 W, plain
+  decode, two runs each) Qwen3.8-27B prefilled a 1,006-token prompt at 1,014-1,021 tok/s with FP32
+  partials, 1,009-1,010 with BF16 and 1,005-1,006 with 8-bit, and a 6,786-token one at
+  1,076-1,081, 1,068-1,069 and 1,066; a 706-token prompt, one chunk without pieces, at 870-897,
+  896-899 and 900-904.
 - **Numerics.** Against one device the order of the FP32 additions of a projection's output
   differs: the shares' partial sums are added, then rounded once, where one device rounds the full
   sum. On `120a` NVFP4 and FP8 shares quantize their activations for W4A4 and W8A8 routes (under
@@ -419,7 +511,9 @@ families](#expert-parallelism-of-the-other-moe-families)).
   drafters (DFlash, DFlash2: rank 0's replica after each layer is the residual one device taps),
   grafted prefixes (each rank appends its KV heads) and Vision (on rank 0). A share's projections have no tuned shapes, so they take Linear's
   runtime-shape routes (the shape tables' kernel templates with the rows and K read from the
-  operands; on `120a` NVFP4 shares that allow A4 run W4A4 from 9 tokens and FP8 shares that allow A8
+  operands; up to 8 tokens, Q4 and Q5 shares whose K is whole 256- or 512-column slabs run the
+  small-T MMA of the full shapes, `bench/ops/tp_share_linear_bench.cu` comparing it with the other
+  templates at a share's shape; on `120a` NVFP4 shares that allow A4 run W4A4 from 9 tokens and FP8 shares that allow A8
   run W8A8 from 17 tokens, A16 below, on the tile whose CTAs fill the fewest weighted waves of the
   card's multiprocessors): the GDN input projection as parts,
   one Linear per piece into the q/k/v and z planes; gate and up as two FP32 products that SwiGLU
@@ -636,32 +730,96 @@ every layer over it (`Executor::run_tensor_segment`, `models/qwen4_exp/executor.
   with its twelve query heads (query, gate, key and value rows, the output projection's input
   columns, that head's KV pages); the indexer, with its projection, pooled keys and tail, is whole
   on each of those ranks, and they select the same blocks. The routed experts divide as whole
-  experts, a contiguous range per rank of the GGUF banks on the devices. Every rank holds the token
-  embedding, the hyper-connection mixers, the router, the shared expert's score and the PLE; the
-  shared expert, the final mixer, the head, the MTP block and Vision stay on rank 0. A share ends
-  on whole stored blocks (`Bindings::row_ends`, `Bindings::column_ends`) and whole tiles of its
+  experts, a contiguous range per rank of the GGUF banks on the devices. The shared expert divides
+  by its 640-wide middle: each rank holds a run of it, those rows of its gate and up and those
+  values of every down row, in whole 128-row tiles of the expert matrix kernel where every rank
+  gets one. Its runs even out each rank's expert rows per token (`shared_runs`): a rank's routed
+  experts give it 10 x 640 rows per token in proportion to their count, and the shared expert's
+  640 fill up from the rank with the fewest, so a rank 0 whose room caps its experts (241 of 512
+  on two RTX 3090s with MTP) takes four of the five tiles. The runs follow the expert ranges, not
+  the split's weights: each rank rounds the dot of its run on its own, so the sum depends on the
+  runs, and weights measured at startup move between starts (two ranks at an even split hold two
+  and a half of the five tiles, which then rounded to three or two from one start to the next and
+  changed greedy texts); a run moves only when the experts move by about five. The startup log
+  lists every rank's runs and head rows. Every rank holds the token embedding, the hyper-connection mixers, the final mixer, the
+  router, the shared expert's score and the PLE, and a contiguous range of the head's rows; the
+  whole head, the MTP block and Vision stay on rank 0 too. A share ends on whole stored blocks (`Bindings::row_ends`, `Bindings::column_ends`) and whole tiles of its
   Linear route; without `--tensor-split` the shares follow each card's copy bandwidth within its
-  free memory, counting the routed experts as the divided weights.
+  free memory, counting the routed experts as the divided weights. Cards of one model take one
+  bandwidth, so the expert ranges and with them the sums stay the same from start to start: with a
+  bandwidth of each card's own, one of 512 experts moved between two of four RTX 5060 Ti from one
+  start to the next, which changed the greedy texts and perplexity over 16 KB of the 40 KB slice
+  from 6.3754 to 6.3251.
 - **A layer.** Every rank reads the stack (the attention mixer), runs its mixer share into an FP32
   partial of the output projection and exchanges it (`TensorParallelExchange`,
   `TensorParallelSum::StoreBf16`): every rank stores the rank-order sum rounded to BF16, as one
   device's projection stores its output. A rank without a share of a sparse-attention layer
   publishes nothing in that exchange. Every rank then writes and reads the stack (the MoE mixer),
-  routes the call itself from the same input, runs the pairs routed to its experts (rank 0 the
-  shared expert too) into a 2^-32 fixed-point part (`moe_experts_gguf_part`), stores the part as an
-  FP32 partial and exchanges again (`StoreFp32`), so every rank adds the same FP32 MoE output to its
-  stack. That is two exchanges per layer, 96 per pass, on the routes the exchange measured at startup
-  as Qwen3.5-core's are (`--tensor-parallel-transport` applies), except that the expert exchange of
+  routes the call itself from the same input, runs the pairs routed to its experts and its run of
+  the shared expert into a 2^-32 fixed-point part (`moe_experts_gguf_part`; a run narrower than the
+  whole expert takes the vector products at decode widths), stores the part as an FP32 partial and
+  exchanges again (`StoreFp32`), so every rank adds the same FP32 MoE output to its stack. That is
+  two exchanges per layer, 96 per pass, on the routes the exchange measured at startup as
+  Qwen3.5-core's are (`--tensor-parallel-transport` applies), except that the expert exchange of
   two ranks never scatters: its FP32 ranges would cross the bus with as many bytes as the whole
-  partials, so it reduces whole on the fastest whole route. Each rank embeds the tokens from its replica of the table; a media prompt's merged
-  embeddings are copied to every rank once the tower has run.
+  partials, so it reduces whole on the fastest whole route. Each rank embeds the tokens from its
+  replica of the table; a media prompt's merged embeddings are copied to every rank once the tower
+  has run.
+- **The head** (`run_divided_head`). After the last layer every rank reads its own stack through
+  its replica of the final mixer and projects its rows of the head; each rank after the first sends
+  its rows' logits to rank 0 over a stage link (pinned host slots), at most 16 MiB of the widest
+  share's columns at a time, and rank 0 places every rank's rows into the logits. Each row is the
+  same projection one device runs, of the same stack. A prompt pass with logits of more columns
+  than one gather holds (a scoring call's, up to 512 positions) projects them with the whole head
+  on rank 0, which holds it too (`run_whole_head`), in groups of as many columns as rank 0's
+  workspace holds for its other work, halving from the most a pass scores: gathering the other
+  ranks' rows of so many positions through host memory cost more than their share of the
+  projection saved. Perplexity over the 40 KB slice on two RTX 3090s scored at 946-950 tok/s with
+  the divided head, 985 with the whole head a gather's columns at a time, 1,001-1,005 in groups of
+  the workspace and 1,014 with master's head on rank 0 alone, whose workspace held all of a
+  pass's columns. An MTP
+  draft projects the head the same way
+  (`run_divided_mtp_head`): rank 0 sends its read of the block's stack to every other rank over a
+  stage link, and the ranks project their rows of it.
+- **Prompt pieces** (`Executor::run_tensor_pieces`). Without `--prefill-chunk` a prompt runs in
+  chunks of 2,048 tokens when every device keeps room for them (the free memory after an executor
+  of chunks of 1,024 covers that executor's workspace again and a margin of 384 MiB; on two RTX
+  3090s the wider chunk takes 0.4 GiB more on each), else of 1,024. A text prompt chunk wider than
+  1,024 tokens runs in pieces of 1,024 from its first column, the last one the rest (at most four,
+  the pieces of `TensorParallelExchange`). Each exchange crosses one piece at a time on the ranks'
+  side streams while their compute streams run the next piece, and a rank's next step on a piece
+  first takes that piece's exchange back. A piece runs as a chunk of its own columns does: its
+  mixers carry the Gated DeltaNet, convolution and indexer states and the PLE history on to the
+  next piece, its sparse attention reads the keys up to its own last position, and its experts
+  route and run its own tokens. A chunk therefore gives what chunks of 1,024 give, and the default
+  chunk of 2,048 the tokens of the former default of 1,024. The mixer's exchange stores into a plane
+  of its own, which the experts' exchange of the piece before cannot overwrite. A media prompt, a
+  verification, a branch pass and a chunk exchanged in BF16 or 8-bit prompt partials
+  (`--tensor-parallel-prompt-partials`) run whole: those partials cross the bus fast enough that
+  with BF16 the pieces prefilled 1.6-2.0% slower than whole chunks of 2,048. Measured
+  (2026-11-04, two RTX 3090s without peer access, GSQ-RCO Q2_0, BF16 KV, two runs each): a
+  9,741-token prompt prefilled at 2,618-2,633 tok/s against 2,232-2,254 with whole chunks of 1,024
+  and a 31,869-token prompt at 2,564-2,582 against 2,188-2,213 (+17%), with the same tokens,
+  including a 256-token answer; decode runs no pieces and stayed within its spread between starts.
+  Pieces of 512 in chunks of 1,024 or 2,048 prefilled 1.3-2.1% slower than whole chunks: their
+  narrower projections and expert calls lost more than the overlap gained. With the other
+  eight KV formats (one run of the 9,741-token prompt each) prefill rose 13-17%, with the same
+  tokens.
 - **Graphs and branches.** A segment forks the other ranks' streams from rank 0's and joins them
   back, so the decode and verification graphs capture every rank's work; each segment makes an
-  even number of exchanges and starts in slot 0. A snapshot, a sequence image and a branch pass
+  even number of exchanges and starts in slot 0. A replay is launched on rank 0's stream and
+  follows that stream's work alone, while each rank uploads its inputs of the pass (token ids,
+  positions, PLE rows) on its own stream, so rank 0's stream first waits for every other rank's
+  uploads (`fence_uploads`); without the wait a replay could read the previous step's inputs. With
+  the wait, shared-expert runs that do not follow measured weights and one bandwidth per card
+  model, four RTX 5060 Ti gave one greedy text of two prompts in three starts and one perplexity in
+  five, and two RTX 3090s the same log probabilities of a prompt's first 16 tokens in five starts,
+  three of them eager; with the runs by expert work, two starts of each box gave one text. A snapshot, a sequence image and a branch pass
   keep every rank's state of each layer, layer by layer and rank by rank.
 - **Numerics.** The replicas run the same kernels on the same values, so on cards of one model they
-  stay equal. The divided output projections and the FP32 sum of the expert parts round
-  differently than one device, so logits are close to one device's, not identical.
+  stay equal. The divided output projections, each rank's dot over its run of the shared expert's
+  down rows and the FP32 sum of the expert parts round differently than one device, so logits are
+  close to one device's, not identical.
 - **Refused.** Host or disk experts and native expert banks (`--expert-residency device` with GGUF
   banks only), `--kv-resident` and `--stage-layers`.
 - **Measured** (2026-10-27; GSQ-RCO Q2_0 with `--no-ngram-table`, the workload of [the
@@ -677,6 +835,23 @@ every layer over it (`Executor::run_tensor_segment`, `models/qwen4_exp/executor.
   +1.3% to +1.5% against stages. Perplexity over the 40 KB slice is 6.8209 against stages' 6.8188
   on the 3090s and 6.8141 against 6.7975 (+0.24%) on the V100s. On the 3090s stages and expert
   parallelism give the same greedy text; the divided layers part from it early, at close ties.
+  Every rank's run of the shared expert and rows of the head, against both on rank 0 (2026-11-04,
+  int8 KV, a 989-token and a 6,768-token prompt, two runs each): four RTX 5060 Ti (host
+  transport) decode at 107.4-107.5 and 104.9-105.1 tok/s against 98.7-98.9 and 96.7-97.0, and
+  with MTP at 160.9-166.8 and 121.2-125.7 against 141.6-147.9 and 107.6-112.2; rank 0 holds
+  667 MiB of workspace against 984. Two RTX 3090s decode at 117.5-117.6 and 113.4-113.7 against
+  117.3-117.4 and 113.1-113.2, and with MTP at 188.7-188.8 against 176.5-176.6 on the short
+  prompt but 140.3-140.6 against 142.5-142.8 on the long one (233 accepted drafts against 237).
+  Prefill changes by -1.6% (the 3090s with MTP) to +1.3% (the 5060 Ti).
+  Shared-expert runs by expert work against even runs (2026-11-04, same workload, two runs each):
+  with MTP rank 0's room caps its experts (241 of 512 on the 3090s, 112 on the 5060 Ti) and it
+  takes four or two of the five tiles. A draft round takes 17.83-17.88 and 18.34-18.36 ms against
+  17.98 and 18.44-18.48 on the 3090s, 22.17-22.21 and 22.62-22.68 against 22.31-22.42 and
+  22.69-22.79 on the 5060 Ti (-0.3% to -0.8%). Tokens per second follow the drafts the changed
+  sums accept: 185.2-185.7 and 144.3-144.4 against 192.4 and 137.6-137.9 on the 3090s (116 and
+  145 rounds against 111 and 151), 151.6-152.0 and 117.6-117.9 against 153.0-153.7 and
+  115.4-115.9 on the 5060 Ti. Without MTP the experts divide evenly, the runs stay even and
+  decode is unchanged; prefill moves by -0.3% to +0.3%.
 
 ### Expert parallelism of the other MoE families
 
@@ -691,8 +866,11 @@ router, the shared expert, the head, the drafters and Vision, as one device does
   with the ids and weights to every other rank over a stage link. Each rank keeps the pairs routed to
   its own experts (`moe_keep_experts`; ids of other ranks' experts become -1, which
   `moe_sort_routes` leaves out), runs them on its own stream and workspace, and sends back their
-  weighted sum as a 2^-32 fixed-point part (I64 [T][H]). Rank 0 runs its own part meanwhile, adds the
-  parts as integers and hands the sum to the block's combine. The exchange is a pair of StageLinks
+  weighted sum as a 2^-32 fixed-point part (I64 [T][H]). Rank 0 runs its own part meanwhile, then
+  the block's work that reads only the block's input (Gemma 4's dense MLP, Flint's and DeepSeek's
+  shared expert), adds the parts as integers and hands the sum to the block's combine: the
+  exchange's round trip to the other ranks and their experts take place behind that work. The
+  exchange is a pair of StageLinks
   per peer (peer copies or mapped pinned host memory), legal eagerly and inside the decode graphs,
   whose capture the peers' streams join.
 - **Numerics.** Each pair's contribution is computed and rounded exactly as on one device and integer
@@ -707,9 +885,19 @@ router, the shared expert, the head, the drafters and Vision, as one device does
   pinned host memory or the artifact's files, gives every rank an `ExpertDelivery` of its own over
   its experts (tables of those alone, local ids from `moe_local_experts`): its own layer banks and
   device cache, filled over its own bus. Without `--tensor-split` the device families size the
-  shares by each card's copy bandwidth within its free memory (`models::default_expert_split`),
-  DeepSeek equally. Refused: Gemma 4's and Flint's host or disk experts, DeepSeek's device experts and its CPU share
-  (`--expert-dma-share`, `--expert-cpu-threads`); DeepSeek's prompt spans are off.
+  shares by each card's copy bandwidth within its free memory (`models::default_expert_split`).
+  DeepSeek sizes them once the deliveries are about to start, so that every rank's misses take the
+  same time over its bus (`delivery_shares`): rank r's cache holds `room_r` bytes of its share
+  (its free memory beside the CUDA Graph reserve and the delivery's tables; rank 0's beside the
+  model, its caches and workspace) and its bus copies the rest at `bus_r` (a pinned host copy
+  measured at startup, `rank_host_copy_bandwidth`), so with `B` bytes of experts in all each rank
+  takes `(room_r + t * bus_r) / B` with `t = (B - sum room) / sum bus`. Rank 0, which also holds
+  the model, takes fewer experts; when the caches together hold every expert the shares follow the
+  cards' copy bandwidth within that room. DeepSeek runs a prompt in spans as on one device
+  ([prompt spans](../deepseek-v41.md#prompt-spans)): the span's buffers stay on rank 0, every MoE
+  call keeps a chunk's width, and each rank's delivery fills a block's bank once for all of the
+  span's chunks. Refused: Gemma 4's and Flint's host or disk experts, DeepSeek's device experts
+  and its CPU share (`--expert-dma-share`, `--expert-cpu-threads`).
 
 Measured on 2x RTX 3090 (Vast, PCIe 4.0 x16, no peer access, so the mapped host transport;
 2026-10-26; `scripts/pods/serve_ab.py`, greedy, four short prompts of 256 tokens and a prompt of
@@ -742,6 +930,14 @@ pair the exchange costs more decode time than the divided experts save:
   6,940 tokens (BF16 caches) is 16.359 against 16.407 (-0.29%), the same for `--tensor-split 3,1`. The long answer matched one
   card's; the short ones part after 2 to 88 characters, from prompts the pair prefilled with the
   fixed-point weighting. Host and disk experts on the pair gave the same five answers.
+- **Rank 0's dense MLP behind the exchange** (Gemma 4, 2x RTX 3090, 2026-11-04, int8 KV, a
+  1,032- and a 6,906-token prompt, two runs each, against the MLP before the routing): decode
+  180.6-180.9 and 175.1 tok/s against 166.0-166.5 and 161.7-161.9 (+8.2% to +9.0%), prefill
+  3,041-3,048 and 3,463-3,464 against 2,920-2,927 and 3,329-3,331 (+4%), with `--spec mtp
+  --draft-tokens 2` 293.2 and 246.8 against 277.8 and 235.0, with the same texts and accepted
+  drafts. Fewer experts on rank 0, which also runs the attention and the dense MLP, did not pay:
+  with 35% to 45% of them Gemma 4 decoded 0.1% to 1.1% slower than with half and Flint 0.3% to
+  1.6% slower, so the shares stay those of the cards' bandwidth and room.
 
 What the transport costs was measured before this was built:
 

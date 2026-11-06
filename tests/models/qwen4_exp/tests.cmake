@@ -32,7 +32,7 @@ set_tests_properties(ninfer_qwen4_exp_generate_real PROPERTIES SKIP_RETURN_CODE 
 
 ninfer_add_test(ninfer_qwen4_exp_engine_real
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_real.cpp"
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine ${NINFER_CUDART_TARGET})
 set_tests_properties(ninfer_qwen4_exp_engine_real PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_qwen4_exp_long_context_real
@@ -48,6 +48,11 @@ set_tests_properties(ninfer_qwen4_exp_expert_cache_test PROPERTIES SKIP_RETURN_C
 ninfer_add_test(ninfer_expert_profile_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_profile.cpp"
   LIBRARIES ninfer_model_runtime)
+
+ninfer_add_test(ninfer_divided_head_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_divided_head.cu"
+  LIBRARIES ninfer_model_runtime)
+set_tests_properties(ninfer_divided_head_test PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_qwen4_exp_ngram_draft_prefetch_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_ngram_draft_prefetch.cpp"
