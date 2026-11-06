@@ -45,6 +45,11 @@ constexpr std::uint64_t kTail = 256;
 constexpr std::uint64_t kAlign = 256;
 constexpr int kRanges          = int(std::tuple_size_v<ExpertCache::Ranges>);
 
+constexpr std::int64_t kKeepAliveNs = std::chrono::nanoseconds(kMissKeepAlive).count();
+// How often a sleeping service looks for a request: a replayed layer posts one from the device,
+// and no host call wakes the service for it.
+constexpr std::chrono::milliseconds kAsleepPoll{10};
+
 std::uint64_t aligned(std::uint64_t value) { return (value + kAlign - 1) / kAlign * kAlign; }
 
 using Atomic = cuda::atomic_ref<std::uint32_t, cuda::thread_scope_system>;
@@ -303,7 +308,7 @@ struct ExpertMisses::Impl {
     mutable std::mutex stats_mutex;
     MissStats counters;
     std::atomic<std::int64_t> deadline{0};
-    std::atomic<bool> sleeping{false}, stopping{false};
+    std::atomic<bool> stopping{false};
     std::mutex wake_mutex;
     std::condition_variable wake;
     std::mutex failure_mutex;
@@ -828,19 +833,29 @@ struct ExpertMisses::Impl {
             .count();
     }
 
+    [[nodiscard]] bool any_requested() const {
+        for (const auto& rank : ranks) {
+            if (!rank.used) { continue; }
+            const std::uint32_t sequence =
+                Atomic(rank.box->requested).load(cuda::memory_order_acquire);
+            if (sequence != rank.served) { return true; }
+        }
+        return false;
+    }
+
     void serve() {
         bool awake = false;
         while (!stopping.load(std::memory_order_acquire)) {
-            if (now_ns() > deadline.load(std::memory_order_acquire)) {
+            if (!any_requested() && now_ns() > deadline.load(std::memory_order_acquire)) {
                 if (awake && pool) { pool->spin(false); }
                 awake = false;
+                // Asleep, the service still looks at the doorbells every kAsleepPoll: the device
+                // may reach a replayed layer long after its pass's keep_alive().
                 std::unique_lock lock(wake_mutex);
-                sleeping.store(true, std::memory_order_release);
-                wake.wait(lock, [this] {
+                wake.wait_for(lock, kAsleepPoll, [this] {
                     return now_ns() <= deadline.load(std::memory_order_acquire) ||
-                           stopping.load(std::memory_order_acquire);
+                           any_requested() || stopping.load(std::memory_order_acquire);
                 });
-                sleeping.store(false, std::memory_order_release);
                 continue;
             }
             if (!awake && pool) { pool->spin(true); }
@@ -867,7 +882,7 @@ struct ExpertMisses::Impl {
                 worked      = true;
                 // Activity keeps the service awake: a pass is mid-flight.
                 deadline.store(std::max(deadline.load(std::memory_order_relaxed),
-                                        now_ns() + 500'000'000),
+                                        now_ns() + kKeepAliveNs),
                                std::memory_order_release);
             }
             if (!worked) { spin_hint(); }
@@ -920,7 +935,11 @@ struct ExpertMisses::Impl {
             // Eager: wait on the host, so a lazily loaded kernel never waits behind a GPU spin.
             CUDA_CHECK(cudaStreamSynchronize(stream));
             const std::uint32_t sequence = *static_cast<volatile std::uint32_t*>(rank.need->data());
-            if (sequence != 0) {
+            if (sequence != 0 &&
+                Atomic(rank.box->prepared).load(cuda::memory_order_acquire) != sequence) {
+                // The device may have reached this call only now, after a prompt span's attention
+                // and wide calls: the service may have slept since begin()'s keep-alive.
+                keep_alive();
                 while (Atomic(rank.box->prepared).load(cuda::memory_order_acquire) != sequence) {
                     std::this_thread::yield();
                     std::lock_guard lock(failure_mutex);
@@ -940,11 +959,11 @@ struct ExpertMisses::Impl {
 
     void keep_alive() {
         raise_failure();
-        deadline.store(now_ns() + 500'000'000, std::memory_order_release);
-        if (sleeping.load(std::memory_order_acquire)) {
-            std::lock_guard lock(wake_mutex);
-            wake.notify_all();
-        }
+        deadline.store(now_ns() + kKeepAliveNs, std::memory_order_release);
+        // Under the mutex, so that a service between its last look at the deadline and its wait
+        // still gets the notification.
+        std::lock_guard lock(wake_mutex);
+        wake.notify_all();
     }
 };
 
