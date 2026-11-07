@@ -563,7 +563,7 @@ int main(int argc, char** argv) {
                 if (!verification_dump) { throw std::runtime_error("cannot open verification output"); }
             }
         }
-        const std::int32_t widths[] = {1, 2, 3, 4, 5, 6, 8, 9, 17, 40, 70, 130};
+        const std::int32_t widths[] = {1, 2, 3, 4, 5, 6, 8, 9, 17, 40, 70, 130, 257};
         for (const auto& c : cases()) {
             if (verification_only && c.qtype != (iq4_verification ? QType::GGUF_IQ4_XS
                                                                  : QType::GGUF_IQ3_S)) { continue; }
@@ -620,6 +620,18 @@ int main(int argc, char** argv) {
                     std::cout << (boundary == 0 ? "OK   " : "FAIL ")
                               << "gguf iq3_s N=" << n << " K=5120 T=6\n";
                     failures += boundary;
+                }
+            }
+        }
+        for (const std::string_view schedule : {"", "async"}) {
+            ops::DeviceRouteForce force("gguf_matrix/q4_k", std::string(schedule));
+            for (const auto& c : cases()) {
+                if (c.qtype != QType::GGUF_Q4_K) { continue; }
+                for (const std::int32_t k : {2560, 5120}) {
+                    const int f = run_type(c, seed++, k, widths);
+                    std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
+                              << " matrix " << (schedule.empty() ? "compiled" : schedule) << '\n';
+                    failures += f;
                 }
             }
         }
