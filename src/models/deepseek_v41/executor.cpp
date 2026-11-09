@@ -1,6 +1,7 @@
 #include "models/deepseek_v41/executor.h"
 
 #include "core/decode_graph.h"
+#include "core/device_wait.h"
 #include "core/expert_parallel.h"
 #include "core/growable_region.h"
 #include "core/tensor_parallel.h"
@@ -1335,14 +1336,14 @@ struct Executor::Impl {
     // After the span: its buffers back to the expert cache, once the span's work is done.
     void give_back(DeviceBuffer& borrowed) {
         if (!borrowed.p) { return; }
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         borrowed = DeviceBuffer();
         delivery->grow_cache();
     }
 
     void release(std::uint32_t sequence) {
         if (!growing || sequence_areas.empty() || sequence_areas.front()->backed[sequence] == 0) { return; }
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         for (KvArea* area : sequence_areas) { trim(*area, sequence, 0); }
         count_backed();
         delivery->grow_cache();
@@ -1350,11 +1351,11 @@ struct Executor::Impl {
 
     ~Impl() {
         settle_ahead(); // the reader's threads write no more into the pinned sets
-        if (delivery || growing) { cudaStreamSynchronize(stream); }
+        if (delivery || growing) { ninfer::wait_for_stream(stream); }
         for (std::size_t r = 1; r < expert_peers.size(); ++r) {
             if (expert_peers[r].stream == nullptr) { continue; }
             RankBinding bind(device, r);
-            cudaStreamSynchronize(expert_peers[r].stream);
+            ninfer::wait_for_stream(expert_peers[r].stream);
             expert_peers[r].delivery.reset();
             expert_peers[r].workspace.reset();
             cudaStreamDestroy(expert_peers[r].stream);
@@ -1463,6 +1464,15 @@ struct Executor::Impl {
         const std::size_t engram_bytes = sum({t * columns * 2, t * 4, t * (s + 1) * h * 4});
         const std::size_t decode_width = std::size_t(decode_rows()) * std::size_t(capacity_rows) * 4;
         const std::size_t scores = std::max(kScoreBudget, decode_width);
+        // The candidate source's block maxima (index_block): for each row of scores, which holds
+        // the `width` positions the row sees, a row of ceil(width / block) floats, so at most the
+        // scores' bytes over the block and 4 bytes a row (a chunk's or a decode pass's) for the
+        // last block.
+        const std::size_t maxima =
+            candidate_block > 0
+                ? scores / std::size_t(candidate_block) +
+                      4 * std::max(t, std::size_t(decode_rows()))
+                : 0;
         const std::size_t partial =
             kernels::sparse_attention_workspace_floats(decode_rows(), heads, decode_splits) * 4;
         const std::size_t attention = sum({
@@ -1476,7 +1486,7 @@ struct Executor::Impl {
             t * kLatent * 4, t * kLatent * 4, t * kLatent * 4, t * kIndexDim * 4,
             // indexer
             t * std::size_t(index_heads) * kIndexDim * 4, t * std::size_t(index_heads) * kIndexDim * 2,
-            t * std::size_t(index_heads) * 4, scores, scores / 8 + 4096,
+            t * std::size_t(index_heads) * 4, scores, maxima,
             // a chunk's listed candidate blocks, four rows a group
             (t + 3) * listed * 4, t * 4, partial});
         const std::size_t ffn =
@@ -1636,7 +1646,7 @@ struct Executor::Impl {
                       static_cast<__nv_bfloat16*>(d_image_rows.p), *workspace, stream);
         CUDA_CHECK(cudaMemcpyAsync(rows.data(), d_image_rows.p, rows.size() * 2,
                                    cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
     }
 
     // Tokens, positions, and when given sequences, to the device.
@@ -2092,8 +2102,12 @@ struct Executor::Impl {
             sub = std::max(4, sub / 4 * 4);
         }
         auto* scores = alloc<float>(std::size_t(std::min(sub, t)) * columns);
+        // The candidate source's block maxima: a row for each row of scores, as many as the blocks
+        // of the positions this pass sees (not the whole context's mask).
+        const int maxima_stride =
+            p.candidate_source ? (width + candidate_block - 1) / candidate_block : 0;
         float* maxima = p.candidate_source
-                            ? alloc<float>(std::size_t(std::min(sub, t)) * candidate_words * kCandidateBits)
+                            ? alloc<float>(std::size_t(std::min(sub, t)) * maxima_stride)
                             : nullptr;
         // A chunk's groups list their blocks here, a decode pass's rows at its candidate source.
         const int list_groups = (std::min(sub, t) + group - 1) / group;
@@ -2142,7 +2156,8 @@ struct Executor::Impl {
             if (p.candidate_source) {
                 std::uint32_t* mask = candidates + std::int64_t(r0) * candidate_words;
                 kernels::select_candidates(scores, width, n, pos + r0, p.ratio, candidate_block,
-                                           candidate_keep, mask, candidate_words, maxima, stream);
+                                           candidate_keep, mask, candidate_words, maxima,
+                                           maxima_stride, stream);
                 // A decode or verification pass lists its rows' blocks once, for every later
                 // index source.
                 if (!s.chunk && s.candidate_list != nullptr && capacity > 0) {
@@ -3286,14 +3301,14 @@ struct Executor::Impl {
                 sequences.push_back(b - 1);
                 tokens.push_back(2);
                 decode(sequences, tokens);
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                CUDA_CHECK(ninfer::wait_for_stream(stream));
                 for (const std::uint32_t s : sequences) { reset_state(s); }
             }
             for (const auto& [n, w] : rounds) {
                 const std::vector<std::uint32_t> owners(sequences.begin(), sequences.begin() + n);
                 verify(owners, std::vector<std::int32_t>(std::size_t(n) * w, 2));
                 commit(owners, std::vector<std::uint32_t>(n, 1));
-                CUDA_CHECK(cudaStreamSynchronize(stream));
+                CUDA_CHECK(ninfer::wait_for_stream(stream));
                 for (const std::uint32_t s : owners) { reset_state(s); }
             }
             if (drafter) {

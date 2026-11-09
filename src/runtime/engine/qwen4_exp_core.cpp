@@ -3,6 +3,7 @@
 #include "artifact/formats.h"
 #include "artifact/reader.h"
 #include "core/arena.h"
+#include "core/device_wait.h"
 #include "core/host_pages.h"
 #include "core/file_read_error.h"
 #include "core/startup.h"
@@ -52,7 +53,7 @@
 namespace ninfer::runtime {
 namespace {
 
-// Prompt chunks in one prefill step while other requests decode (see prompt_step_tokens).
+// Prompt chunks in one prefill step while other requests decode (see prompt_step).
 constexpr std::uint32_t kPeerSpanChunks = 2;
 
 using Clock = std::chrono::steady_clock;
@@ -87,6 +88,36 @@ bool request_error(const std::exception_ptr& error) {
         return true;
     } catch (...) {}
     return false;
+}
+
+// A prompt's media unit (an image, or a video's frames between two timestamps): its tokens
+// [begin, begin + count) and a key of what they encode, the item's digest, modality, grid and
+// timestamps and the unit's index. Media tokens are placeholders, so a prefix is the same only
+// with the same units; the context cache stores them beside the tokens (16 bytes each on disk).
+struct MediaMark {
+    std::uint32_t begin = 0, count = 0;
+    std::uint64_t key   = 0;
+
+    friend bool operator==(const MediaMark&, const MediaMark&) = default;
+};
+static_assert(sizeof(MediaMark) == 16);
+
+std::uint64_t unit_key(const models::qwen3_5::VisionItem& item, std::size_t unit) {
+    std::uint64_t key = 1469598103934665603ULL; // FNV-1a
+    const auto mix    = [&](std::uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            key ^= (value >> (8 * i)) & 0xFFU;
+            key *= 1099511628211ULL;
+        }
+    };
+    for (const std::uint8_t byte : item.content_digest) { mix(byte); }
+    mix(static_cast<std::uint64_t>(item.modality));
+    mix(std::uint64_t(item.grid.temporal));
+    mix(std::uint64_t(item.grid.height));
+    mix(std::uint64_t(item.grid.width));
+    for (const double stamp : item.timestamps) { mix(std::bit_cast<std::uint64_t>(stamp)); }
+    mix(unit);
+    return key;
 }
 
 } // namespace
@@ -514,7 +545,9 @@ struct Qwen4ExpCore::Request {
     // differently), else the prompt's end; and whether the prompt may be reused at all.
     std::uint32_t anchor_at = 0;
     bool reusable           = true;
-    bool media              = false; // images or video: encoded at the prompt's first chunk
+    // Its images and video units, by position: those past the prefix it resumes from are encoded
+    // at its first prompt step.
+    std::vector<MediaMark> media;
     // CacheRetentionHint::Disposable: no request continues where this one ends (a decision read),
     // so the store keeps no image of its end.
     bool disposable = false;
@@ -528,8 +561,9 @@ struct Qwen4ExpCore::Request {
     TokenId branch_token = 0;
     runtime::RawTokenLogprob branch_record;
     // Prefixes other prompts are expected to share (a declared cache boundary, the end of the
-    // leading system messages or tool declarations), ascending and below anchor_at: a prompt step
-    // ends at each, and the state there goes to the store for them.
+    // leading system messages or tool declarations), ascending and below anchor_at: with the context
+    // cache on, the state at each goes to the store for them, where a prompt step ends or, with
+    // layer-major spans, as a step passes (prompt_step).
     std::vector<std::uint32_t> shared_at;
 
     // The worker's progress with an admitted request.
@@ -563,11 +597,13 @@ struct Qwen4ExpCore::Request {
 struct Qwen4ExpCore::Impl {
     // One executor sequence, the request it serves and what the context cache keeps of it: the
     // tokens its live state holds, and a snapshot of its state at the end of the last prompt it
-    // prefilled, which a later prompt that starts with that one resumes from.
+    // prefilled, which a later prompt that starts with that one resumes from; each with the media
+    // units among those tokens.
     struct Slot {
         std::shared_ptr<Request> request;
         std::vector<TokenId> fed;
         std::vector<TokenId> anchor;
+        std::vector<MediaMark> media, anchor_media;
         models::qwen4_exp::SequenceSnapshot snapshot;
         std::uint64_t last_used = 0;
         bool disposable         = false; // its last request's
@@ -652,6 +688,7 @@ struct Qwen4ExpCore::Impl {
     // serves more of it.
     struct Stored {
         std::vector<TokenId> tokens;
+        std::vector<MediaMark> media;
         models::qwen4_exp::SequenceImage header;
         PrefixReusePath path = PrefixReusePath::PrivateEndpoint;
         std::vector<std::byte*> pages; // slices of host_chunks; empty while only on disk
@@ -667,11 +704,19 @@ struct Qwen4ExpCore::Impl {
     // slow where the experts and the page cache fill the host's memory (1.1 s for the image of a
     // 32K-token prompt on an RTX 4090 host, while the next prompt waited; pageable memory faulted
     // in as slowly, and huge pages took minutes), so later images reuse the pages of those the
-    // store let go. host_used counts the pages images hold, within host_budget.
+    // store let go. host_used counts the pages images hold, within host_budget. Startup pins
+    // host_reserve of free pages; while the worker has nothing to run, it pins them back up to
+    // host_reserve a chunk at a time (pin_ahead), so the next request seldom pins its own.
     static constexpr std::size_t kHostPageBytes = std::size_t(8) << 20;
     std::vector<std::unique_ptr<HostPages>> host_chunks;
     std::vector<std::byte*> free_pages;
-    std::uint64_t host_budget = 0, host_used = 0;
+    std::uint64_t host_budget = 0, host_used = 0, host_reserve = 0;
+    // A chunk pinned while idle: a request that arrives meanwhile waits for it to finish. Pinning
+    // starts once the worker has been idle for the grace period, so a client that sends its next
+    // request at once does not wait. A failed pin ends idle pinning; take_pages still pins.
+    static constexpr std::size_t kPinAheadPages = 8;
+    static constexpr auto kPinAheadGrace        = std::chrono::milliseconds(50);
+    bool pin_ahead_failed                       = false;
     std::filesystem::path disk_dir;
     std::uint64_t disk_budget = 0, disk_used = 0;
     bool disk_restore = false;
@@ -731,7 +776,8 @@ struct Qwen4ExpCore::Impl {
         host_logprobs =
             std::make_unique<PinnedHostBuffer>(top * (sizeof(std::int32_t) + sizeof(float)));
         const std::int32_t enabled = 1;
-        CUDA_CHECK(cudaMemcpy(logprob_flag.p, &enabled, sizeof(enabled), cudaMemcpyHostToDevice));
+        CUDA_CHECK(ninfer::copy_and_wait(logprob_flag.p, &enabled, sizeof(enabled),
+                                         cudaMemcpyHostToDevice));
         std::size_t workspace = std::max<std::size_t>(
             {ops::sampling_workspace_capacity_bytes(static_cast<std::int32_t>(domain), 1,
                                                     static_cast<std::int32_t>(rows)),
@@ -773,12 +819,12 @@ struct Qwen4ExpCore::Impl {
             // its sequence ended, what a new request stores first), within a quarter of the
             // budget, pinned now rather than while the request that displaces them waits. Without
             // the memory, the store pins its pages as it needs them.
-            const std::uint64_t reserve = std::min<std::uint64_t>(
+            host_reserve = std::min<std::uint64_t>(
                 host_budget / 4 / kHostPageBytes * kHostPageBytes,
                 2 * page_rounded(i.executor->image_bytes(max_context)));
             try {
-                pin_pages(static_cast<std::size_t>(reserve / kHostPageBytes));
-            } catch (const std::exception&) {}
+                pin_pages(static_cast<std::size_t>(host_reserve / kHostPageBytes));
+            } catch (const std::exception&) { pin_ahead_failed = true; }
             if (!cache.disk_kv_path.empty()) {
                 disk_dir     = cache.disk_kv_path / profile_name(options);
                 disk_budget  = cache.disk_kv_capacity_bytes != 0 ? cache.disk_kv_capacity_bytes
@@ -789,6 +835,7 @@ struct Qwen4ExpCore::Impl {
             }
         }
         worker = std::thread([this] {
+            const DeviceWaitWatch watched(device, "Qwen3.8-Flash-Next worker");
             device.bind_to_current_thread();
             loop();
         });
@@ -911,8 +958,7 @@ struct Qwen4ExpCore::Impl {
             try {
                 instance.executor->abort(s);
             } catch (const FileReadError&) { instance.executor->abort(s); }
-            slot.fed.clear();
-            slot.anchor.clear();
+            forget(slot);
             complete(std::exchange(slot.request, {}), unavailable);
             ++failed_requests;
         }
@@ -947,7 +993,13 @@ struct Qwen4ExpCore::Impl {
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex);
-                queue_cv.wait(lock, [&] { return stopping || !pending.empty() || any_active(); });
+                const auto ready = [&] { return stopping || !pending.empty() || any_active(); };
+                if (!ready() && pins_ahead() && !queue_cv.wait_for(lock, kPinAheadGrace, ready)) {
+                    lock.unlock();
+                    pin_ahead();
+                    continue;
+                }
+                queue_cv.wait(lock, ready);
                 if (stopping) {
                     auto waiting = std::move(pending);
                     pending.clear();
@@ -972,8 +1024,7 @@ struct Qwen4ExpCore::Impl {
                 // A partially advanced layer stack is discarded; it must never enter the prefix cache.
                 try {
                     auto request = slots.front().request;
-                    slots.front().fed.clear();
-                    slots.front().anchor.clear();
+                    forget(slots.front());
                     instance.executor->abort(0);
                     // MTP can finish the response before its catch-up observes cancellation.
                     // The sequence still needs cleanup, but no second terminal.
@@ -1033,6 +1084,14 @@ struct Qwen4ExpCore::Impl {
         stats.experts               = experts;
     }
 
+    // The slot's sequence holds nothing the context cache can resume from.
+    static void forget(Slot& slot) {
+        slot.fed.clear();
+        slot.anchor.clear();
+        slot.media.clear();
+        slot.anchor_media.clear();
+    }
+
     // A request failed on its own: it completes with the error, and its sequence keeps nothing
     // for the context cache, since the sequence may have stopped anywhere.
     void fail(const std::shared_ptr<Request>& request, std::exception_ptr error) {
@@ -1040,28 +1099,36 @@ struct Qwen4ExpCore::Impl {
         Slot& slot = slots.at(request->slot);
         if (slot.request == request) {
             slot.request = nullptr;
-            slot.fed.clear();
-            slot.anchor.clear();
+            forget(slot);
         }
         complete(request, std::move(error));
     }
 
     // Tokens of `held` a prompt can start from: all of them when they are a strict prefix of the
     // prompt (its last token is always fed, since the first sample needs its logits), or the
-    // whole prompt for a branched read (`whole`), whose branches bring their own; else none.
+    // whole prompt for a branched read (`whole`), whose branches bring their own, and the media
+    // units among them (`held_media`) are the prompt's there; else none.
     static std::uint32_t prefix_reuse(const std::vector<TokenId>& held,
-                                      const std::vector<TokenId>& prompt, bool whole = false) {
-        if (held.empty() || prompt.empty() || held.size() > prompt.size() - (whole ? 0 : 1)) {
+                                      const std::vector<MediaMark>& held_media,
+                                      const Request& prompt, bool whole = false) {
+        const auto& tokens = prompt.prompt_tokens;
+        if (held.empty() || tokens.empty() || held.size() > tokens.size() - (whole ? 0 : 1) ||
+            !std::equal(held.begin(), held.end(), tokens.begin())) {
             return 0;
         }
-        return std::equal(held.begin(), held.end(), prompt.begin())
-                   ? static_cast<std::uint32_t>(held.size())
-                   : 0;
+        std::size_t units = 0;
+        while (units < prompt.media.size() && prompt.media[units].begin < held.size()) { ++units; }
+        if (units != held_media.size() ||
+            !std::equal(held_media.begin(), held_media.end(), prompt.media.begin())) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(held.size());
     }
 
-    [[nodiscard]] std::uint32_t reuse(const Slot& slot, const std::vector<TokenId>& prompt) const {
+    [[nodiscard]] std::uint32_t reuse(const Slot& slot, const Request& prompt) const {
         if (!reuse_prefixes) { return 0; }
-        return std::max(prefix_reuse(slot.fed, prompt), prefix_reuse(slot.anchor, prompt));
+        return std::max(prefix_reuse(slot.fed, slot.media, prompt),
+                        prefix_reuse(slot.anchor, slot.anchor_media, prompt));
     }
 
     // ---- The context cache's store ------------------------------------------------------------
@@ -1094,17 +1161,24 @@ struct Qwen4ExpCore::Impl {
         std::uint32_t context_tokens = 0;
         std::uint32_t prompt_tokens  = 0;
         std::uint32_t path           = 0;
-        std::uint32_t reserved       = 0;
+        std::uint32_t media_units    = 0; // the marks after the prompt tokens
         std::uint64_t bytes          = 0;
     };
 
-    static std::string file_name(const std::vector<TokenId>& tokens) {
-        std::uint64_t hash = 1469598103934665603ULL; // FNV-1a over the token ids
-        for (const TokenId token : tokens) {
-            for (int i = 0; i < 4; ++i) {
-                hash ^= (std::uint32_t(token) >> (8 * i)) & 0xffU;
+    static std::string file_name(const std::vector<TokenId>& tokens,
+                                 const std::vector<MediaMark>& media) {
+        std::uint64_t hash = 1469598103934665603ULL; // FNV-1a over the token ids and media units
+        const auto mix     = [&](std::uint64_t value, int bytes) {
+            for (int i = 0; i < bytes; ++i) {
+                hash ^= (value >> (8 * i)) & 0xffU;
                 hash *= 1099511628211ULL;
             }
+        };
+        for (const TokenId token : tokens) { mix(std::uint32_t(token), 4); }
+        for (const MediaMark& mark : media) {
+            mix(mark.begin, 4);
+            mix(mark.count, 4);
+            mix(mark.key, 8);
         }
         char name[40];
         std::snprintf(name, sizeof(name), "%016llx-%u.img", static_cast<unsigned long long>(hash),
@@ -1129,10 +1203,13 @@ struct Qwen4ExpCore::Impl {
             image.header.drafter_follows = header.drafter_follows != 0;
             image.header.context.previous.resize(header.context_tokens);
             image.tokens.resize(header.prompt_tokens);
+            image.media.resize(header.media_units);
             if (!file.read(reinterpret_cast<char*>(image.header.context.previous.data()),
                            std::streamsize(header.context_tokens) * 4) ||
                 !file.read(reinterpret_cast<char*>(image.tokens.data()),
-                           std::streamsize(header.prompt_tokens) * 4)) {
+                           std::streamsize(header.prompt_tokens) * 4) ||
+                !file.read(reinterpret_cast<char*>(image.media.data()),
+                           std::streamsize(header.media_units) * sizeof(MediaMark))) {
                 continue;
             }
             image.path      = static_cast<PrefixReusePath>(header.path);
@@ -1147,12 +1224,13 @@ struct Qwen4ExpCore::Impl {
     // The stored prefix that serves the most of `prompt`: its index and length. A drafting
     // request takes only a state its MTP block followed.
     [[nodiscard]] std::pair<std::size_t, std::uint32_t>
-    find_stored(const std::vector<TokenId>& prompt, bool drafting, bool whole = false) const {
+    find_stored(const Request& prompt, bool drafting, bool whole) const {
         std::pair<std::size_t, std::uint32_t> best{0, 0};
         for (std::size_t i = 0; i < stored.size(); ++i) {
             if (stored[i].pages.empty() && !disk_restore) { continue; }
             if (drafting && !stored[i].header.drafter_follows) { continue; }
-            const std::uint32_t length = prefix_reuse(stored[i].tokens, prompt, whole);
+            const std::uint32_t length =
+                prefix_reuse(stored[i].tokens, stored[i].media, prompt, whole);
             if (length > best.second) { best = {i, length}; }
         }
         return best;
@@ -1168,9 +1246,9 @@ struct Qwen4ExpCore::Impl {
     // recently used files; entries left with neither copy are dropped by the caller.
     void write_file(Stored& image) {
         if (disk_dir.empty() || !image.file.empty() || image.pages.empty()) { return; }
-        const std::uint64_t size =
-            sizeof(FileHeader) + 4 * (image.header.context.previous.size() + image.tokens.size()) +
-            image.bytes;
+        const std::uint64_t size = sizeof(FileHeader) +
+                                   4 * (image.header.context.previous.size() + image.tokens.size()) +
+                                   sizeof(MediaMark) * image.media.size() + image.bytes;
         if (size > disk_budget) { return; }
         while (disk_used + size > disk_budget) {
             Stored* oldest = nullptr;
@@ -1193,8 +1271,9 @@ struct Qwen4ExpCore::Impl {
         header.context_tokens = static_cast<std::uint32_t>(image.header.context.previous.size());
         header.prompt_tokens  = static_cast<std::uint32_t>(image.tokens.size());
         header.path           = static_cast<std::uint32_t>(image.path);
+        header.media_units    = static_cast<std::uint32_t>(image.media.size());
         header.bytes          = image.bytes;
-        const auto path       = disk_dir / file_name(image.tokens);
+        const auto path       = disk_dir / file_name(image.tokens, image.media);
         const auto temporary  = std::filesystem::path(path).concat(".tmp");
         {
             std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
@@ -1203,6 +1282,8 @@ struct Qwen4ExpCore::Impl {
                        std::streamsize(header.context_tokens) * 4);
             file.write(reinterpret_cast<const char*>(image.tokens.data()),
                        std::streamsize(header.prompt_tokens) * 4);
+            file.write(reinterpret_cast<const char*>(image.media.data()),
+                       std::streamsize(header.media_units) * sizeof(MediaMark));
             for (std::uint64_t at = 0; at < image.bytes; at += kHostPageBytes) {
                 file.write(reinterpret_cast<const char*>(image.pages[at / kHostPageBytes]),
                            std::streamsize(std::min<std::uint64_t>(kHostPageBytes,
@@ -1233,6 +1314,20 @@ struct Qwen4ExpCore::Impl {
         auto* base = static_cast<std::byte*>(chunk->data());
         for (std::size_t i = count; i-- > 0;) { free_pages.push_back(base + i * kHostPageBytes); }
         host_chunks.push_back(std::move(chunk));
+    }
+
+    // Whether the idle worker pins another chunk: the free pages hold less than host_reserve and
+    // one more chunk stays within the budget.
+    [[nodiscard]] bool pins_ahead() const noexcept {
+        const std::uint64_t free_bytes = std::uint64_t(free_pages.size()) * kHostPageBytes;
+        return !pin_ahead_failed && free_bytes < host_reserve &&
+               host_used + free_bytes + kPinAheadPages * kHostPageBytes <= host_budget;
+    }
+
+    void pin_ahead() {
+        try {
+            pin_pages(kPinAheadPages);
+        } catch (const std::exception&) { pin_ahead_failed = true; }
     }
 
     // Pages for an image of `bytes`, pinning more when the free ones fall short; the caller has
@@ -1283,19 +1378,21 @@ struct Qwen4ExpCore::Impl {
     }
 
     [[nodiscard]] std::optional<std::size_t>
-    stored_index(const std::vector<TokenId>& tokens) const {
+    stored_index(const std::vector<TokenId>& tokens, const std::vector<MediaMark>& media) const {
         for (std::size_t i = 0; i < stored.size(); ++i) {
-            if (stored[i].tokens == tokens) { return i; }
+            if (stored[i].tokens == tokens && stored[i].media == media) { return i; }
         }
         return std::nullopt;
     }
 
-    // Keeps the state of sequence `s` up to `tokens` (its live state, or the snapshot `at`) in
-    // the store, unless the store already holds that prefix or it is too short to be worth it.
+    // Keeps the state of sequence `s` up to `tokens`, with the media units `media` among them
+    // (its live state, or the snapshot `at`), in the store, unless the store already holds that
+    // prefix or it is too short to be worth it.
     void store_image(std::uint32_t s, const std::vector<TokenId>& tokens,
+                     const std::vector<MediaMark>& media,
                      const models::qwen4_exp::SequenceSnapshot* at, PrefixReusePath path) {
         if (tokens.size() < kMinStoredTokens || host_budget == 0) { return; }
-        if (const auto known = stored_index(tokens)) {
+        if (const auto known = stored_index(tokens, media)) {
             stored[*known].last_used = ++use_clock;
             return;
         }
@@ -1306,6 +1403,7 @@ struct Qwen4ExpCore::Impl {
         if (!make_host_room(page_rounded(bytes))) { return; }
         Stored image;
         image.tokens = tokens;
+        image.media  = media;
         image.path   = path;
         image.bytes  = bytes;
         image.pages  = take_pages(bytes);
@@ -1331,21 +1429,23 @@ struct Qwen4ExpCore::Impl {
         const bool anchored = !slot.anchor.empty() && slot.anchor.size() <= slot.fed.size() &&
                               std::equal(slot.anchor.begin(), slot.anchor.end(), slot.fed.begin());
         if (anchored) {
-            store_image(s, slot.anchor, &slot.snapshot, PrefixReusePath::PrivateTurnClosure);
+            store_image(s, slot.anchor, slot.anchor_media, &slot.snapshot,
+                        PrefixReusePath::PrivateTurnClosure);
         }
         if (slot.fed != slot.anchor && !slot.disposable) {
-            store_image(s, slot.fed, nullptr, PrefixReusePath::PrivateEndpoint);
+            store_image(s, slot.fed, slot.media, nullptr, PrefixReusePath::PrivateEndpoint);
         }
     }
 
-    // Loads the stored image of `tokens` into sequence `s`, reading it from the disk tier when it
-    // is only there; false when the store no longer holds it.
-    bool restore_stored(std::uint32_t s, const std::vector<TokenId>& tokens) {
-        auto index = stored_index(tokens);
+    // Loads the stored image of `tokens` and `media` into sequence `s`, reading it from the disk
+    // tier when it is only there; false when the store no longer holds it.
+    bool restore_stored(std::uint32_t s, const std::vector<TokenId>& tokens,
+                        const std::vector<MediaMark>& media) {
+        auto index = stored_index(tokens, media);
         if (!index) { return false; }
         if (stored[*index].pages.empty()) {
             if (!make_host_room(page_rounded(stored[*index].bytes)) ||
-                !(index = stored_index(tokens))) {
+                !(index = stored_index(tokens, media))) {
                 return false;
             }
             Stored& image = stored[*index];
@@ -1353,7 +1453,8 @@ struct Qwen4ExpCore::Impl {
             if (image.pages.empty()) { return false; }
             std::ifstream in(image.file, std::ios::binary);
             in.seekg(std::streamoff(sizeof(FileHeader) +
-                                    4 * (image.header.context.previous.size() + tokens.size())));
+                                    4 * (image.header.context.previous.size() + tokens.size()) +
+                                    sizeof(MediaMark) * media.size()));
             for (std::uint64_t at = 0; in && at < image.bytes; at += kHostPageBytes) {
                 in.read(reinterpret_cast<char*>(image.pages[at / kHostPageBytes]),
                         std::streamsize(std::min<std::uint64_t>(kHostPageBytes, image.bytes - at)));
@@ -1391,7 +1492,7 @@ struct Qwen4ExpCore::Impl {
                         best = s;
                         continue;
                     }
-                    const auto& prompt   = pending.front()->prompt_tokens;
+                    const Request& prompt = *pending.front();
                     const auto candidate = reuse(slots[s], prompt), current = reuse(slots[*best], prompt);
                     if (candidate > current ||
                         (candidate == current && slots[s].last_used < slots[*best].last_used)) {
@@ -1449,20 +1550,22 @@ struct Qwen4ExpCore::Impl {
             // prompt passes skip the block (stop_drafting).
             const bool drafting          = drafts_for(r);
             const bool whole             = r.branches != nullptr;
-            const std::uint32_t live     = drafting && !executor.can_draft(s)
-                                               ? 0
-                                               : prefix_reuse(slot.fed, r.prompt_tokens, whole);
-            const std::uint32_t anchored = drafting && !slot.snapshot.drafter_follows
-                                               ? 0
-                                               : prefix_reuse(slot.anchor, r.prompt_tokens, whole);
-            const auto [image, from_store] = find_stored(r.prompt_tokens, drafting, whole);
+            const std::uint32_t live =
+                drafting && !executor.can_draft(s) ? 0 : prefix_reuse(slot.fed, slot.media, r, whole);
+            const std::uint32_t anchored =
+                drafting && !slot.snapshot.drafter_follows
+                    ? 0
+                    : prefix_reuse(slot.anchor, slot.anchor_media, r, whole);
+            const auto [image, from_store] = find_stored(r, drafting, whole);
             if (from_store > std::max(live, anchored)) {
-                const std::vector<TokenId> tokens = stored[image].tokens;
-                const PrefixReusePath path        = stored[image].path;
+                const std::vector<TokenId> tokens   = stored[image].tokens;
+                const std::vector<MediaMark> media = stored[image].media;
+                const PrefixReusePath path          = stored[image].path;
                 retire(s);
-                if (restore_stored(s, tokens)) {
-                    slot.fed = tokens;
-                    slot.anchor.clear();
+                if (restore_stored(s, tokens, media)) {
+                    forget(slot);
+                    slot.fed     = tokens;
+                    slot.media   = media;
                     reused       = from_store;
                     r.reuse_path = path;
                 }
@@ -1470,6 +1573,7 @@ struct Qwen4ExpCore::Impl {
                 retire(s);
                 executor.restore(s, slot.snapshot);
                 slot.fed     = slot.anchor;
+                slot.media   = slot.anchor_media;
                 reused       = anchored;
                 r.reuse_path = PrefixReusePath::PrivateTurnClosure;
             } else if (live > 0) {
@@ -1480,9 +1584,8 @@ struct Qwen4ExpCore::Impl {
         if (reused == 0) {
             if (reuse_prefixes) { retire(s); }
             executor.reset(s);
-            slot.fed.clear();
             // The snapshot's prefix is about to be overwritten.
-            slot.anchor.clear();
+            forget(slot);
         }
         slot.request    = request;
         slot.last_used  = ++use_clock;
@@ -1524,7 +1627,7 @@ struct Qwen4ExpCore::Impl {
     // the experts off the GPU. Ties go to the earlier request.
     static bool prefills_before(const Request& a, const Request& b) {
         const auto media_begun = [](const Request& r) {
-            return r.media && r.prefilled > r.reused;
+            return !r.media.empty() && r.prefilled > r.reused;
         };
         if (media_begun(a) != media_begun(b)) { return media_begun(a); }
         const bool a_starved = a.prefill_skips >= kPrefillMaxSkip;
@@ -1570,7 +1673,8 @@ struct Qwen4ExpCore::Impl {
         // the streams the tokens plain rounds would and holds a prompt back no longer.
         if (prefilling &&
             (!decoding ||
-             decode_run >= double(decode_rounds_before(prompt_step_tokens(*prefilling))))) {
+             decode_run >=
+                 double(decode_rounds_before(prompt_step(*prefilling, true).tokens)))) {
             decode_run = 0;
             for (const Slot& slot : slots) {
                 if (slot.request && !slot.request->decoding && slot.request != prefilling &&
@@ -1579,7 +1683,7 @@ struct Qwen4ExpCore::Impl {
                 }
             }
             prefilling->prefill_skips = 0;
-            const std::uint32_t lead_tokens = prompt_step_tokens(*prefilling);
+            const std::uint32_t lead_tokens = prompt_step(*prefilling, true).tokens;
             std::uint32_t tokens            = 0;
             try {
                 if (executor.packs_prompts() && plain_prompt(*prefilling)) {
@@ -1607,23 +1711,39 @@ struct Qwen4ExpCore::Impl {
             1, (std::uint64_t(decode_rounds_per_prefill) * tokens + chunk - 1) / chunk));
     }
 
-    // The prompt tokens the request's next prefill step computes: a span where the executor has
-    // them, else a chunk. A span is one step, which with the experts off the GPU lasts seconds,
-    // and the requests that are decoding wait for all of it: while any decodes, a step is two
-    // chunks at most.
-    [[nodiscard]] std::uint32_t prompt_step_tokens(const Request& r) const {
+    // A prompt step: the tokens it computes, and the shared frontier inside it whose state it
+    // keeps in the slot's snapshot as it passes (Executor::forward's cut; 0: none).
+    struct PromptStep {
+        std::uint32_t tokens = 0;
+        std::uint32_t cut    = 0;
+    };
+
+    // The request's next prefill step: a span where the executor has them, else a chunk. A span
+    // is one step, which with the experts off the GPU lasts seconds, and the requests that are
+    // decoding wait for all of it: while any decodes, a step is two chunks at most. With `cuts`
+    // a span may pass a shared frontier (a step that runs alone).
+    [[nodiscard]] PromptStep prompt_step(const Request& r, bool cuts) const {
         const auto& executor             = *instance.executor;
         const auto prompt_n              = static_cast<std::uint32_t>(r.prompt_tokens.size());
         if (r.branches && r.prefilled == prompt_n) {
             const std::size_t left =
                 (*r.branches)[r.branch_results.size()].tokens.size() - r.branch_fed;
-            return static_cast<std::uint32_t>(std::min<std::size_t>(left, executor.prompt_step()));
+            return {static_cast<std::uint32_t>(
+                std::min<std::size_t>(left, executor.prompt_step()))};
         }
-        std::uint32_t until = r.prefilled < r.anchor_at ? r.anchor_at : prompt_n;
-        for (const std::uint32_t frontier : r.shared_at) {
-            if (frontier > r.prefilled) {
-                until = std::min(until, frontier);
-                break;
+        // A step ends where the context cache keeps the state: with host or disk experts every
+        // step's wide pass copies the experts, so a prompt the cache does not keep runs whole.
+        // `after` is where the cache keeps the state next past the first frontier ahead.
+        std::uint32_t until = prompt_n, frontier = 0, after = prompt_n;
+        if (reuse_prefixes && r.reusable) {
+            if (r.prefilled < r.anchor_at) { until = r.anchor_at; }
+            after = until;
+            for (std::size_t i = 0; i < r.shared_at.size(); ++i) {
+                if (r.shared_at[i] > r.prefilled) {
+                    frontier = r.shared_at[i];
+                    if (i + 1 < r.shared_at.size()) { after = std::min(after, r.shared_at[i + 1]); }
+                    break;
+                }
             }
         }
         const std::uint32_t chunk_tokens = executor.options().prefill_chunk;
@@ -1633,7 +1753,25 @@ struct Qwen4ExpCore::Impl {
                 return other.request && other.request.get() != &r && other.request->decoding;
             });
         if (peers_decoding) { step = std::min(step, kPeerSpanChunks * chunk_tokens); }
-        return std::min(step, until > r.prefilled ? until - r.prefilled : 0U);
+        if (frontier != 0 && frontier < until) {
+            // A span goes on past the frontier with the chunks the steps from there would run
+            // (to `after`, or whole chunks), so that the experts cross the bus once for both
+            // sides, and keeps the state at the frontier as it passes. Only where each side
+            // starts with a chunk wider than the narrow ones: a step of narrow chunks copies only
+            // the experts it misses, so passing the frontier saves no copy there, and a span
+            // that passed one into a narrow chunk measured slower than the two steps.
+            const std::uint32_t narrow = executor.narrow_prompt_tokens();
+            if (cuts && narrow != 0 && !r.branches && frontier - r.prefilled < step &&
+                frontier - r.prefilled > narrow) {
+                const std::uint32_t room = r.prefilled + step - frontier;
+                const std::uint32_t end  = after - frontier <= room
+                                               ? after
+                                               : frontier + room / chunk_tokens * chunk_tokens;
+                if (end - frontier > narrow) { return {end - r.prefilled, frontier}; }
+            }
+            until = frontier;
+        }
+        return {std::min(step, until > r.prefilled ? until - r.prefilled : 0U)};
     }
 
     // Publishes a committed preview with the logprob records it released, which a streaming
@@ -1775,7 +1913,7 @@ struct Qwen4ExpCore::Impl {
         }
         CUDA_CHECK(cudaMemcpyAsync(tokens, sample_out.p, n * sizeof(std::int32_t),
                                    cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         instance.executor->raise_service_failure();
         for (std::size_t b = 0; b < n; ++b) {
             const std::int32_t token = tokens[b];
@@ -1855,13 +1993,7 @@ struct Qwen4ExpCore::Impl {
             result.timings.generation_wall_seconds = seconds(r.first_token, r.last_token);
         }
         result.timings.total_seconds = r.prepare_seconds + seconds(r.submitted, now);
-        Slot& slot                   = slots.at(r.slot);
-        slot.request                 = nullptr;
-        if (r.media) {
-            // Its state depends on media its tokens do not identify.
-            slot.fed.clear();
-            slot.anchor.clear();
-        }
+        slots.at(r.slot).request = nullptr;
         complete(request, std::move(result));
     }
 
@@ -1875,9 +2007,9 @@ struct Qwen4ExpCore::Impl {
     // nothing to resume may find a prefix another request stored while it waited (the shared state
     // of reads that arrived together) and starts there; a branched read past its prompt runs its
     // branch step, and one whose last prompt step opens its branches runs both; a media prompt
-    // runs its tower. The prompt tokens of the step, or nothing when the step has run or ended
-    // the request.
-    std::optional<std::uint32_t> begin_prefill(const std::shared_ptr<Request>& request) {
+    // runs its tower. The step (prompt_step with `cuts`), or nothing when the step has run or
+    // ended the request.
+    std::optional<PromptStep> begin_prefill(const std::shared_ptr<Request>& request, bool cuts) {
         Request& r          = *request;
         Slot& slot          = slots[r.slot];
         auto& executor      = *instance.executor;
@@ -1887,14 +2019,15 @@ struct Qwen4ExpCore::Impl {
             return std::nullopt;
         }
         if (reuse_prefixes && r.reusable && r.prefilled == 0) {
-            const auto [image, from_store] =
-                find_stored(r.prompt_tokens, drafts_for(r), r.branches != nullptr);
+            const auto [image, from_store] = find_stored(r, drafts_for(r), r.branches != nullptr);
             if (from_store > 0) {
-                const std::vector<TokenId> tokens = stored[image].tokens;
-                const PrefixReusePath path        = stored[image].path;
-                if (restore_stored(r.slot, tokens)) {
-                    slot.fed = tokens;
-                    slot.anchor.clear();
+                const std::vector<TokenId> tokens   = stored[image].tokens;
+                const std::vector<MediaMark> media = stored[image].media;
+                const PrefixReusePath path          = stored[image].path;
+                if (restore_stored(r.slot, tokens, media)) {
+                    forget(slot);
+                    slot.fed     = tokens;
+                    slot.media   = media;
                     r.reuse_path = path;
                     r.reused = r.prefilled = from_store;
                     skip_drafter(r);
@@ -1907,9 +2040,10 @@ struct Qwen4ExpCore::Impl {
             branch_step(request);
             return std::nullopt;
         }
-        if (r.media && r.prefilled == 0) {
-            // The tower's embeddings stay until another prompt's media replace them; prompts
-            // prefill one at a time, so this one is done first.
+        if (!r.media.empty() && r.prefilled == r.reused) {
+            // The tower encodes the media past the prefix the prompt resumes from. Its embeddings
+            // stay until another prompt's media replace them; prompts with media prefill one at a
+            // time, so this one is done first.
             const auto& data = models::qwen3_5::PreparedPromptAccess::view(r.prompt);
             const auto& vision = *instance.model->vision_config();
             const auto control = models::qwen3_5::build_vision_control(
@@ -1920,39 +2054,60 @@ struct Qwen4ExpCore::Impl {
                                  .control = &control.items[i]});
             }
             const auto vision_start = Clock::now();
-            executor.set_media(r.slot, items, data.positions, data.rope_delta);
-            r.vision_seconds = seconds(vision_start, Clock::now());
+            if (executor.set_media(r.slot, items, data.positions, data.rope_delta) > 0) {
+                r.vision_seconds = seconds(vision_start, Clock::now());
+            }
         }
-        const std::uint32_t n = prompt_step_tokens(r);
-        if (opens_branches(r, n)) {
-            prompt_branch_pass(request, n);
+        const PromptStep step = prompt_step(r, cuts);
+        if (opens_branches(r, step.tokens)) {
+            prompt_branch_pass(request, step.tokens);
             return std::nullopt;
         }
-        return n;
+        return step;
     }
 
     // Books a prompt step of `n` tokens that ran for the request, its last token's logits column
-    // `column` of logits(rows): the context cache's images at its frontiers, its progress, and at
-    // the prompt's end its first token.
+    // `column` of logits(rows): the context cache's images at its frontiers (at `cut`, a frontier
+    // it passed, from the slot's snapshot), its progress, and at the prompt's end its first token.
     void end_prefill(const std::shared_ptr<Request>& request, std::uint32_t n,
-                     std::uint32_t column, std::uint32_t rows) {
+                     std::uint32_t column, std::uint32_t rows, std::uint32_t cut = 0) {
         Request& r          = *request;
         Slot& slot          = slots[r.slot];
         auto& executor      = *instance.executor;
         const auto prompt_n = static_cast<std::uint32_t>(r.prompt_tokens.size());
         const auto chunk    = std::span<const TokenId>(r.prompt_tokens).subspan(r.prefilled, n);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
+        for (const MediaMark& mark : r.media) {
+            if (mark.begin >= r.prefilled && mark.begin < r.prefilled + n) {
+                slot.media.push_back(mark);
+            }
+        }
         r.prefilled += n;
+        if (cut != 0) {
+            const std::vector<TokenId> prefix(slot.fed.begin(), slot.fed.begin() + cut);
+            std::vector<MediaMark> media;
+            bool whole = true; // no media unit straddles the frontier
+            for (const MediaMark& mark : slot.media) {
+                if (mark.begin >= cut) { continue; }
+                whole = whole && mark.begin + mark.count <= cut;
+                media.push_back(mark);
+            }
+            if (whole) {
+                store_image(r.slot, prefix, media, &slot.snapshot,
+                            PrefixReusePath::SharedStablePrefix);
+            }
+        }
         if (reuse_prefixes && r.reusable &&
             std::binary_search(r.shared_at.begin(), r.shared_at.end(), r.prefilled)) {
-            store_image(r.slot, slot.fed, nullptr, PrefixReusePath::SharedStablePrefix);
+            store_image(r.slot, slot.fed, slot.media, nullptr, PrefixReusePath::SharedStablePrefix);
         }
         if (reuse_prefixes && r.reusable && r.prefilled == r.anchor_at) {
             executor.snapshot(r.slot, slot.snapshot);
-            slot.anchor = slot.fed;
+            slot.anchor       = slot.fed;
+            slot.anchor_media = slot.media;
         }
         if (r.observation.prompt_progress) {
-            CUDA_CHECK(cudaStreamSynchronize(executor.head_stream()));
+            CUDA_CHECK(ninfer::wait_for_stream(executor.head_stream()));
             observe_prompt(r);
         }
         if (r.prefilled < prompt_n) { return; }
@@ -1963,25 +2118,36 @@ struct Qwen4ExpCore::Impl {
     // Feeds the next chunk of a prompt, which ends at the anchor when one lies ahead, where the
     // sequence's state is kept for the context cache; at the prompt's end samples the first token.
     void prefill_step(const std::shared_ptr<Request>& request) {
-        const std::optional<std::uint32_t> n = begin_prefill(request);
-        if (n) { feed_prompt(request, *n); }
+        const std::optional<PromptStep> step = begin_prefill(request, true);
+        if (step) { feed_prompt(request, *step); }
     }
 
-    // Runs the request's prompt step of `n` tokens alone.
-    void feed_prompt(const std::shared_ptr<Request>& request, std::uint32_t n) {
+    // Runs the request's prompt step alone.
+    void feed_prompt(const std::shared_ptr<Request>& request, PromptStep step) {
         Request& r          = *request;
+        Slot& slot          = slots[r.slot];
         auto& executor      = *instance.executor;
         const auto prompt_n = static_cast<std::uint32_t>(r.prompt_tokens.size());
         const auto prompt   = std::span<const TokenId>(r.prompt_tokens);
+        const std::uint32_t n = step.tokens;
         // The next step's table rows are read while this one runs.
         const auto next = prompt.subspan(
             r.prefilled + n, std::min(executor.prompt_step(), prompt_n - r.prefilled - n));
-        executor.forward(r.slot, prompt.subspan(r.prefilled, n), 1, next);
-        end_prefill(request, n, 0, 1);
+        models::qwen4_exp::PromptCut cut;
+        if (step.cut != 0) {
+            // The slot's snapshot takes the state at the frontier: the anchor it held goes.
+            slot.anchor.clear();
+            slot.anchor_media.clear();
+            cut = {.tokens = step.cut - r.prefilled, .state = &slot.snapshot};
+        }
+        executor.forward(r.slot, prompt.subspan(r.prefilled, n), 1, next, cut);
+        end_prefill(request, n, 0, 1, step.cut);
     }
 
     // A prompt without branches or media, whose steps may share a span with other prompts'.
-    [[nodiscard]] static bool plain_prompt(const Request& r) { return !r.branches && !r.media; }
+    [[nodiscard]] static bool plain_prompt(const Request& r) {
+        return !r.branches && r.media.empty();
+    }
 
     // A prompt step of `lead` (a plain prompt) that also takes the steps of other plain prompts,
     // in prefills_before order, as long as they fit one span (two chunks while others decode):
@@ -1991,8 +2157,14 @@ struct Qwen4ExpCore::Impl {
     // prefix a packed prompt is about to store waits for it. Returns the tokens computed.
     std::uint32_t packed_prefill_step(const std::shared_ptr<Request>& lead) {
         auto& executor = *instance.executor;
-        const std::optional<std::uint32_t> lead_n = begin_prefill(lead);
-        if (!lead_n) { return 0; }
+        const std::optional<PromptStep> lead_step = begin_prefill(lead, true);
+        if (!lead_step) { return 0; }
+        // A step that passes a frontier runs alone, its state there kept in the slot's snapshot.
+        if (lead_step->cut != 0) {
+            feed_prompt(lead, *lead_step);
+            return lead_step->tokens;
+        }
+        const std::uint32_t lead_n = lead_step->tokens;
         const std::uint32_t chunk = executor.options().prefill_chunk;
         const bool decoding       = std::any_of(slots.begin(), slots.end(), [](const Slot& slot) {
             return slot.request && slot.request->decoding;
@@ -2004,8 +2176,8 @@ struct Qwen4ExpCore::Impl {
             std::shared_ptr<Request> request;
             std::uint32_t tokens = 0;
         };
-        std::vector<Packed> packed{{lead, *lead_n}};
-        std::uint32_t total = *lead_n;
+        std::vector<Packed> packed{{lead, lead_n}};
+        std::uint32_t total = lead_n;
         std::vector<std::shared_ptr<Request>> candidates;
         for (const Slot& slot : slots) {
             if (slot.request && slot.request != lead && !slot.request->decoding &&
@@ -2031,7 +2203,7 @@ struct Qwen4ExpCore::Impl {
             if (packed.size() >= executor.max_logit_rows() || budget - total < chunk) { break; }
             std::optional<std::uint32_t> n;
             try {
-                n = begin_prefill(request);
+                if (const auto step = begin_prefill(request, false)) { n = step->tokens; }
             } catch (...) {
                 fail(request, std::current_exception());
                 continue;
@@ -2043,7 +2215,7 @@ struct Qwen4ExpCore::Impl {
             total += *n;
         }
         if (packed.size() == 1) {
-            feed_prompt(lead, *lead_n);
+            feed_prompt(lead, *lead_step);
             return total;
         }
         std::vector<models::qwen4_exp::PromptPiece> pieces;
@@ -2095,7 +2267,8 @@ struct Qwen4ExpCore::Impl {
             if (slot.fed == r.prompt_tokens) {
                 if (slot.anchor != slot.fed) {
                     executor.snapshot(r.slot, slot.snapshot);
-                    slot.anchor = slot.fed;
+                    slot.anchor       = slot.fed;
+                    slot.anchor_media = slot.media;
                 }
             } else {
                 if (slot.anchor != r.prompt_tokens) {
@@ -2103,7 +2276,8 @@ struct Qwen4ExpCore::Impl {
                 }
                 if (!shared) {
                     executor.restore(r.slot, slot.snapshot);
-                    slot.fed = slot.anchor;
+                    slot.fed   = slot.anchor;
+                    slot.media = slot.anchor_media;
                 }
             }
         }
@@ -2111,7 +2285,7 @@ struct Qwen4ExpCore::Impl {
             branch_pass(request);
             return;
         }
-        const std::uint32_t n = prompt_step_tokens(r);
+        const std::uint32_t n = prompt_step(r, false).tokens;
         const auto chunk      = std::span<const TokenId>(branch.tokens).subspan(r.branch_fed, n);
         executor.forward(r.slot, chunk, 1);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
@@ -2155,7 +2329,7 @@ struct Qwen4ExpCore::Impl {
     [[nodiscard]] bool opens_branches(const Request& r, std::uint32_t n) const {
         const auto& executor = *instance.executor;
         const auto prompt_n  = static_cast<std::uint32_t>(r.prompt_tokens.size());
-        return r.branches && !r.media && executor.runs_branches() && n > 0 &&
+        return r.branches && r.media.empty() && executor.runs_branches() && n > 0 &&
                r.prefilled + n == prompt_n &&
                n + (*r.branches)[0].tokens.size() <= executor.options().prefill_chunk;
     }
@@ -2193,10 +2367,13 @@ struct Qwen4ExpCore::Impl {
         executor.forward_prompt_branches(r.slot, n, slot.snapshot, tokens, lengths);
         r.prefilled = prompt_n;
         slot.fed.assign(r.prompt_tokens.begin(), r.prompt_tokens.end());
-        slot.anchor = slot.fed;
+        slot.media        = r.media;
+        slot.anchor       = slot.fed;
+        slot.anchor_media = slot.media;
         if (reuse_prefixes && r.reusable &&
             std::binary_search(r.shared_at.begin(), r.shared_at.end(), prompt_n)) {
-            store_image(r.slot, slot.anchor, &slot.snapshot, PrefixReusePath::SharedStablePrefix);
+            store_image(r.slot, slot.anchor, slot.anchor_media, &slot.snapshot,
+                        PrefixReusePath::SharedStablePrefix);
         }
         // The pass waited for its copies, so the prompt is in.
         if (r.observation.prompt_progress) { observe_prompt(r); }
@@ -2219,6 +2396,7 @@ struct Qwen4ExpCore::Impl {
         const std::vector<TokenId>& last = (*r.branches)[first + lengths.size() - 1].tokens;
         slot.fed.assign(r.prompt_tokens.begin(), r.prompt_tokens.end());
         slot.fed.insert(slot.fed.end(), last.begin(), last.end());
+        slot.media = r.media;
         read_branches(request, lengths);
     }
 
@@ -2268,7 +2446,7 @@ struct Qwen4ExpCore::Impl {
         Request& r          = *request;
         auto& executor      = *instance.executor;
         const auto prompt_n = static_cast<std::uint32_t>(r.prompt_tokens.size());
-        CUDA_CHECK(cudaStreamSynchronize(executor.head_stream()));
+        CUDA_CHECK(ninfer::wait_for_stream(executor.head_stream()));
         r.prefill_end = Clock::now();
         {
             std::lock_guard lock(stats_mutex);
@@ -2855,7 +3033,7 @@ struct Qwen4ExpCore::Impl {
             cudaMemcpyAsync(host + b * w, spec_counts.p, b * 4, cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaMemcpyAsync(host + b * w + b, spec_accepted.p, b * 4, cudaMemcpyDeviceToHost,
                                    stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         instance.executor->raise_service_failure();
 
         // The output policy takes its part of each licensed run; the executor then keeps the tokens
@@ -2977,8 +3155,7 @@ struct Qwen4ExpCore::Impl {
         // Logits for position p predict token p + 1; the executor keeps at most 512 logit rows.
         const std::uint32_t chunk = std::min<std::uint32_t>(executor.options().prefill_chunk, 512);
         executor.reset(0);
-        slots[0].fed.clear();
-        slots[0].anchor.clear();
+        forget(slots[0]);
         std::vector<float> out;
         out.reserve(n - first_target);
         RankBinding bind(device, executor.head_rank());
@@ -3007,7 +3184,7 @@ struct Qwen4ExpCore::Impl {
             std::vector<float> host(rows);
             CUDA_CHECK(cudaMemcpyAsync(host.data(), score_out.p, rows * 4, cudaMemcpyDeviceToHost,
                                        stream));
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(ninfer::wait_for_stream(stream));
             out.insert(out.end(), host.begin(), host.end());
         }
         executor.save_expert_profile();
@@ -3167,12 +3344,20 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
             throw std::invalid_argument("a branched read needs a text prompt");
         }
         const auto prompt_n  = static_cast<std::uint32_t>(request->prompt_tokens.size());
-        request->media       = data.has_media();
-        if (request->media && !impl_->instance.executor->vision()) {
+        if (data.has_media() && !impl_->instance.executor->vision()) {
             throw std::invalid_argument("media need an Engine started with Vision");
         }
-        // A prompt's media are not part of its tokens, so a media prompt is never reused.
-        request->reusable = identity.reusable && !request->media;
+        for (const auto& item : data.vision_items) {
+            for (std::size_t unit = 0; unit < item.token_spans.size(); ++unit) {
+                const auto& span = item.token_spans[unit];
+                request->media.push_back(MediaMark{.begin = std::uint32_t(span.begin),
+                                                   .count = std::uint32_t(span.count),
+                                                   .key   = unit_key(item, unit)});
+            }
+        }
+        std::sort(request->media.begin(), request->media.end(),
+                  [](const MediaMark& a, const MediaMark& b) { return a.begin < b.begin; });
+        request->reusable = identity.reusable;
         request->anchor_at   = prompt_n;
         if (identity.rewrite_checkpoint &&
             identity.rewrite_checkpoint->kind ==
@@ -3304,6 +3489,7 @@ std::vector<float> Qwen4ExpCore::score(models::qwen3_5::PreparedPrompt prompt,
         }
     } release{*impl_};
 
+    const DeviceWaitWatch watched(impl_->device, "Qwen3.8-Flash-Next scoring caller");
     impl_->device.bind_to_current_thread();
     return impl_->score(tokens, first_target);
 }

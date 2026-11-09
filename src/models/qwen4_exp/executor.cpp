@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "core/cyclic_kv_cache.h"
 #include "core/decode_graph.h"
+#include "core/device_wait.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_worker_pool.h"
 #include "core/layout.h"
@@ -561,7 +562,7 @@ struct SequenceState {
     // The MTP block (an executor with MTP drafts), on the head rank: its layer's state and the
     // target's stack at the sequence's last position (which the next cell pairs with the next
     // token). Whether the drafter (the MTP block, or the DFlash2 drafter's context ring) follows
-    // the sequence's tokens, which a media prompt or a branch breaks.
+    // the sequence's tokens, which a branch or a prompt that ends in media breaks.
     LayerState mtp;
     DeviceBuffer mtp_pending, mtp_scratch_tail;
     bool drafter_follows = true;
@@ -698,6 +699,13 @@ struct RankState {
     std::uint32_t kv_staged_end = 0;
 };
 
+// Where a span keeps a sequence's state (Executor::forward's cut): before chunk `chunk`, the first
+// of its sequence past the cut, into `state`; no cut without a state.
+struct SpanCut {
+    std::size_t chunk       = 0;
+    SequenceSnapshot* state = nullptr;
+};
+
 } // namespace
 
 struct Executor::Impl {
@@ -797,9 +805,11 @@ struct Executor::Impl {
     // tokens, leaves its state in, a layer's as soon as that part has run it; branch_origin points
     // to it, and the branches start from it.
     SequenceSnapshot* branch_capture = nullptr;
-    // The MTP chain on the head rank: token ids and positions of a pass's cells (a draft step's at
-    // step * sequences), staged from the host.
-    DeviceBuffer mtp_ids, mtp_positions, ngram_prefetch_tokens;
+    // The MTP chain on the head rank: token ids, positions (sequence indices) and 1-D RoPE
+    // positions of a pass's cells (a draft step's at step * sequences), and for a catch-up over a
+    // media prompt's images or video their three-axis RoPE positions ([3, cells]) and the cells
+    // that take a Vision embedding, staged from the host.
+    DeviceBuffer mtp_ids, mtp_positions, mtp_rope, mtp_axes, mtp_scatter, ngram_prefetch_tokens;
     DeviceBuffer mtp_logprobs;
     std::unique_ptr<PinnedHostBuffer> mtp_staging;
     cudaEvent_t mtp_staged       = nullptr;
@@ -1374,14 +1384,16 @@ struct Executor::Impl {
         dflash2_operands = std::move(p);
     }
 
-    // The feature columns a pass captures: a verification of every sequence, and each sequence's
+    // The feature columns a pass captures: a verification of every sequence, each sequence's
     // last window positions of the widest prompt call (a chunk, or a span packing every sequence's
-    // prompt), whose context the ring takes.
+    // prompt), whose context the ring takes, and a span's two windows of one sequence, before its
+    // cut and at its end (Executor::forward).
     [[nodiscard]] std::uint32_t planned_feature_columns() const {
         const std::uint32_t window = *model.dflash2_config()->sliding_window;
-        const std::uint32_t prompt = std::max(options.prefill_chunk, planned_span_tokens());
-        return std::max(verify_width * options.sequences,
-                        std::min(prompt, window * options.sequences));
+        const std::uint32_t span   = planned_span_tokens();
+        const std::uint32_t prompt = std::max(options.prefill_chunk, span);
+        return std::max({verify_width * options.sequences,
+                         std::min(prompt, window * options.sequences), std::min(span, 2 * window)});
     }
 
     // A layer's operands on its rank; `experts` its routed experts (the MTP block may keep more
@@ -1812,26 +1824,29 @@ struct Executor::Impl {
         return vision_parameters_for(model, w);
     }
 
-    void set_media(std::uint32_t s, std::span<const MediaItem> items,
-                   std::vector<std::int32_t> rope_positions, std::int32_t rope_delta) {
+    std::size_t set_media(std::uint32_t s, std::span<const MediaItem> items,
+                          std::vector<std::int32_t> rope_positions, std::int32_t rope_delta) {
         if (!vision_context) {
             throw std::invalid_argument("the model was loaded without its Vision tower");
         }
         SequenceState& sequence = sequences.at(s);
-        if (sequence.position != 0) {
-            throw std::invalid_argument("qwen4_exp: media start a prompt at position zero");
-        }
         if (rope_positions.empty() || rope_positions.size() % 3) {
             throw std::invalid_argument("qwen4_exp: RoPE positions must cover three axes");
         }
         const std::size_t tokens = rope_positions.size() / 3;
+        if (sequence.position >= tokens) {
+            throw std::invalid_argument("qwen4_exp: media start before the prompt's last token");
+        }
         std::vector<std::int32_t> columns(tokens, -1);
         RankBinding bind(device, 0);
         const DeviceSpan backing{vision_backing.p, vision_backing.bytes};
         const std::size_t h = config.hidden_size;
-        std::size_t column  = 0;
+        std::size_t column  = 0, encoded = 0;
         for (const MediaItem& item : items) {
             const auto& control = *item.control;
+            // An item wholly inside the prefix the sequence holds is in its state already.
+            const auto& scatter = control.scatter_indices;
+            if (scatter.empty() || std::uint32_t(scatter.back()) < sequence.position) { continue; }
             if (column + control.merged_count > options.vision_max_merged_tokens) {
                 throw std::invalid_argument("the prompt's media exceed the Vision merged-token "
                                             "limit (--vision-max-merged)");
@@ -1852,22 +1867,24 @@ struct Executor::Impl {
                 columns[std::size_t(at)] = static_cast<std::int32_t>(column + j);
             }
             column += control.merged_count;
+            ++encoded;
         }
+        // A draft's first cell rotates at the last prompt token's position on one axis, which a
+        // media token does not have: a prompt that ends in media does not draft with MTP.
+        if (mtp && columns.back() >= 0) { sequence.drafter_follows = false; }
         sequence.media_columns = std::move(columns);
         sequence.media_rope    = std::move(rope_positions);
         sequence.rope_delta    = rope_delta;
-        // The MTP block drafts from text cells only; the sequence stops drafting until a reset.
-        // The DFlash2 ring takes the media positions' features as any others.
-        if (mtp) { sequence.drafter_follows = false; }
-        CUDA_CHECK(cudaStreamSynchronize(ranks[0].stream));
+        CUDA_CHECK(ninfer::wait_for_stream(ranks[0].stream));
         // Under tensor parallelism every rank embeds the prompt itself, from its own copy.
         for (std::size_t r = 1; r <= rank_vision_embeddings.size(); ++r) {
             RankBinding peer(device, r);
             CUDA_CHECK(cudaMemcpyPeerAsync(rank_vision_embeddings[r - 1].p, device.rank(r).device,
                                            vision_embeddings.p, device.rank(0).device,
                                            column * h * 2, ranks[r].stream));
-            CUDA_CHECK(cudaStreamSynchronize(ranks[r].stream));
+            CUDA_CHECK(ninfer::wait_for_stream(ranks[r].stream));
         }
+        return encoded;
     }
 
     // The planes of the sparse-attention layers' KV storage, in LayerState::kv's order (K, V,
@@ -2136,7 +2153,10 @@ struct Executor::Impl {
                 options.prefill_chunk, std::uint64_t(verify_width) * options.sequences);
             mtp_ids       = DeviceBuffer(cells * 4);
             mtp_positions = DeviceBuffer(cells * 4);
-            mtp_staging   = std::make_unique<PinnedHostBuffer>(cells * 8);
+            mtp_rope      = DeviceBuffer(cells * 4);
+            mtp_axes      = DeviceBuffer(cells * 3 * 4);
+            mtp_scatter   = DeviceBuffer(cells * 4);
+            mtp_staging   = std::make_unique<PinnedHostBuffer>(cells * 7 * 4);
             if (options.draft_min_p > 0) {
                 mtp_logprobs =
                     DeviceBuffer(std::uint64_t(options.draft_tokens) * options.sequences * 4);
@@ -2154,7 +2174,9 @@ struct Executor::Impl {
         for (SequenceState& sequence : sequences) {
             if (mtp) { sequence.mtp_scratch_tail = DeviceBuffer(sequence.mtp.tail.bytes); }
         }
-        memory.ranks[head].workspace_bytes += mtp_ids.bytes + mtp_positions.bytes + mtp_logprobs.bytes + ngram_prefetch_tokens.bytes +
+        memory.ranks[head].workspace_bytes += mtp_ids.bytes + mtp_positions.bytes + mtp_rope.bytes +
+                                              mtp_axes.bytes + mtp_scatter.bytes +
+                                              mtp_logprobs.bytes + ngram_prefetch_tokens.bytes +
                                               sequences.size() * sequences.front().mtp.tail.bytes;
     }
 
@@ -2500,7 +2522,7 @@ struct Executor::Impl {
             pool.buffers.resize(wanted == 2 && 2 * bytes <= free_bytes / 2 ? 2 : 1);
             for (auto& buffer : pool.buffers) {
                 buffer.storage = DeviceBuffer(bytes);
-                CUDA_CHECK(cudaMemset(buffer.storage.p, 0, buffer.storage.bytes));
+                CUDA_CHECK(ninfer::fill_and_wait(buffer.storage.p, 0, buffer.storage.bytes));
                 buffer.tables = DeviceBuffer(3 * experts * sizeof(void*));
                 memory.ranks[r].workspace_bytes += buffer.storage.bytes + buffer.tables.bytes;
             }
@@ -2628,12 +2650,12 @@ struct Executor::Impl {
         auto& target          = state.buffers[b];
         RankBinding bind(device, plan.rank);
         const cudaStream_t t  = device.rank(plan.rank).transfer_stream;
-        CUDA_CHECK(cudaEventSynchronize(target.free));
+        CUDA_CHECK(ninfer::wait_for_event(target.free));
         const MoePlan& m          = plan.moe;
         const std::size_t experts = m.gate.pointers.size();
         const auto source         = std::size_t(state.next);
         state.next ^= 1;
-        CUDA_CHECK(cudaEventSynchronize(state.copied[source]));
+        CUDA_CHECK(ninfer::wait_for_event(state.copied[source]));
         auto* entries = static_cast<const void**>(state.entries[source]->data());
         stage_pool(pool, pool.buffers[b], index, [](std::size_t) { return true; }, entries, t);
         CUDA_CHECK(cudaMemcpyAsync(pool.buffers[b].tables.p, entries, 3 * experts * sizeof(void*),
@@ -2671,7 +2693,7 @@ struct Executor::Impl {
         if (pending_routes == 0 && mtp_routes == 0) { return; }
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
-            CUDA_CHECK(cudaEventSynchronize(rank.routes));
+            CUDA_CHECK(ninfer::wait_for_event(rank.routes));
         }
         const std::uint64_t pairs =
             std::uint64_t(config.num_experts_per_tok) * options.prefill_chunk;
@@ -2823,6 +2845,15 @@ struct Executor::Impl {
         table->prefetch(rows);
     }
 
+    // The RoPE position of the sequence's position `at` on `axis`: within a media prompt the
+    // prompt's own, past it the index plus the prompt's offset.
+    [[nodiscard]] static std::int32_t rope_at(const SequenceState& sequence, std::size_t at,
+                                              std::size_t axis) {
+        const std::size_t prompt = sequence.media_rope.size() / 3;
+        return at < prompt ? sequence.media_rope[axis * prompt + at]
+                           : static_cast<std::int32_t>(at) + sequence.rope_delta;
+    }
+
     // Stages a pass's inputs. With `read_rows` it also starts reading the tokens' n-gram rows into
     // the rows' staging (stage_rows uploads them); without, the rows' ids stay in row_ids.
     void stage_inputs(std::span<const Part> parts, std::span<const std::int32_t> tokens,
@@ -2880,8 +2911,7 @@ struct Executor::Impl {
                 const std::size_t at = sequence.position + std::size_t(i);
                 for (std::size_t axis = 0; axis < 3; ++axis) {
                     mrope_positions[axis * std::size_t(t) + std::size_t(i)] =
-                        at < prompt ? sequence.media_rope[axis * prompt + at]
-                                    : static_cast<std::int32_t>(at) + sequence.rope_delta;
+                        rope_at(sequence, at, axis);
                 }
                 const std::int32_t column = at < prompt ? sequence.media_columns[at] : -1;
                 if (column < 0) { continue; }
@@ -2905,7 +2935,7 @@ struct Executor::Impl {
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
             // The staging buffer is rewritten only once the previous upload has left it.
-            CUDA_CHECK(cudaEventSynchronize(rank.staged));
+            CUDA_CHECK(ninfer::wait_for_event(rank.staged));
             auto* base = static_cast<std::byte*>(rank.staging->data());
             const auto upload = [&](void* target, std::size_t at,
                                     const std::vector<std::int32_t>& values) {
@@ -2982,7 +3012,7 @@ struct Executor::Impl {
     void measure_stall(StallEvents& events, bool block) {
         if (!events.pending) { return; }
         if (block) {
-            CUDA_CHECK(cudaEventSynchronize(events.ready));
+            CUDA_CHECK(ninfer::wait_for_event(events.ready));
         } else {
             const cudaError_t status = cudaEventQuery(events.ready);
             if (status == cudaErrorNotReady) { return; }
@@ -3629,7 +3659,7 @@ struct Executor::Impl {
                                index * std::size_t(top) * options.prefill_chunk;
         CUDA_CHECK(
             cudaMemcpyAsync(routes, ids.data, std::size_t(top) * t * 4, cudaMemcpyDeviceToHost, s));
-        CUDA_CHECK(cudaStreamSynchronize(s));
+        CUDA_CHECK(ninfer::wait_for_stream(s));
         const MoePlan& m          = plan.moe;
         const std::size_t experts = m.gate.pointers.size();
         // The copies below overwrite the first buffer, so no buffer holds a prefetched layer.
@@ -3735,7 +3765,7 @@ struct Executor::Impl {
                          index * std::size_t(top) * options.prefill_chunk;
             CUDA_CHECK(cudaMemcpyAsync(host, ids.data, std::size_t(top) * t * 4,
                                        cudaMemcpyDeviceToHost, s));
-            CUDA_CHECK(cudaStreamSynchronize(s));
+            CUDA_CHECK(ninfer::wait_for_stream(s));
             stream->prepare(index, std::span<const std::int32_t>(host, std::size_t(top) * t),
                             span_last);
         }
@@ -4587,7 +4617,7 @@ struct Executor::Impl {
     void synchronize_ranks() {
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
-            CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+            CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         }
     }
 
@@ -4727,9 +4757,11 @@ struct Executor::Impl {
         if (!pooled) { throw std::logic_error("qwen4_exp: a span group ran outside the pool"); }
     }
 
-    // A prompt span of one sequence's chunks (prompt_step() tokens at most), layer by layer.
+    // A prompt span of one sequence's chunks (prompt_step() tokens at most), layer by layer; with
+    // a cut, its chunks restart there and cut.state takes the state there (Executor::forward).
     void forward_span(std::uint32_t s, std::span<const std::int32_t> tokens,
-                      std::uint32_t logit_rows, std::span<const std::int32_t> next) {
+                      std::uint32_t logit_rows, std::span<const std::int32_t> next,
+                      PromptCut cut) {
         const std::size_t c = options.prefill_chunk;
         if (span_tokens == 0 || tokens.size() > span_tokens) {
             throw std::invalid_argument("qwen4_exp forward: tokens exceed the prompt span");
@@ -4739,17 +4771,28 @@ struct Executor::Impl {
             throw std::invalid_argument("qwen4_exp forward: the sequence exceeds max_context");
         }
         std::vector<SpanChunk> chunks;
-        for (std::size_t at = 0; at < tokens.size(); at += c) {
-            const auto t = static_cast<std::int32_t>(std::min(c, tokens.size() - at));
-            chunks.push_back({.sequence = &sequence,
-                              .at       = at,
-                              .count    = t,
-                              .first    = sequence.position + std::uint32_t(at),
-                              .tokens   = tokens.subspan(at, std::size_t(t))});
-            check_tokens(chunks.back().tokens, at + c >= tokens.size() ? logit_rows : 1);
+        const auto chunk_up = [&](std::size_t begin, std::size_t end) {
+            for (std::size_t at = begin; at < end; at += c) {
+                const auto t = static_cast<std::int32_t>(std::min(c, end - at));
+                chunks.push_back({.sequence = &sequence,
+                                  .at       = at,
+                                  .count    = t,
+                                  .first    = sequence.position + std::uint32_t(at),
+                                  .tokens   = tokens.subspan(at, std::size_t(t))});
+                check_tokens(chunks.back().tokens,
+                             at + std::size_t(t) == tokens.size() ? logit_rows : 1);
+            }
+        };
+        SpanCut span_cut;
+        if (cut.state != nullptr) {
+            chunk_up(0, cut.tokens);
+            span_cut = {.chunk = chunks.size(), .state = cut.state};
+            chunk_up(cut.tokens, tokens.size());
+        } else {
+            chunk_up(0, tokens.size());
         }
         const std::size_t last = chunks.size() - 1;
-        run_span(chunks, std::span(&last, 1), logit_rows, &sequence, next);
+        run_span(chunks, std::span(&last, 1), logit_rows, &sequence, next, span_cut);
     }
 
     // Several sequences' prompt tokens in one span (Executor::forward_pieces).
@@ -4802,11 +4845,19 @@ struct Executor::Impl {
     // wide call's pool copy of the layer's uncached experts serves every chunk. The arithmetic of
     // each chunk is that of forward() over its sequence. The logits are the last `logit_rows` rows
     // of each chunk `lasts` names, the chunk's columns in order, chunk after chunk (several chunks
-    // take one row each); `hinted` then hints the rows of `next`.
+    // take one row each); `hinted` then hints the rows of `next`. A `cut` keeps its sequence's
+    // state between two of its chunks as each layer, the ring and the MTP block pass there.
     void run_span(std::span<const SpanChunk> chunks, std::span<const std::size_t> lasts,
                   std::uint32_t logit_rows, const SequenceState* hinted,
-                  std::span<const std::int32_t> next) {
+                  std::span<const std::int32_t> next, SpanCut cut = {}) {
         const std::size_t n = chunks.back().at + std::size_t(chunks.back().count);
+        if (cut.state != nullptr) {
+            if (cut.chunk == 0 || cut.chunk >= chunks.size() ||
+                chunks[cut.chunk - 1].sequence != chunks[cut.chunk].sequence) {
+                throw std::logic_error("qwen4_exp: a span's cut lies outside its sequence");
+            }
+            size_snapshot(*chunks[cut.chunk].sequence, *cut.state);
+        }
         RankBinding bind(device, 0);
         RankState& rank      = ranks[0];
         const cudaStream_t st = rank.stream;
@@ -4837,6 +4888,9 @@ struct Executor::Impl {
             const Part part{.sequence = chunk.sequence, .column = 0, .count = t};
             chunk.sequence->position = chunk.first;
             stage_inputs(std::span(&part, 1), chunk.tokens, false);
+            if (cut.state != nullptr && k + 1 == cut.chunk) {
+                cut.state->context = chunk.sequence->context;
+            }
             if (reads_rows) {
                 std::copy(row_ids.begin(), row_ids.end(),
                           span_row_ids.begin() + std::ptrdiff_t(at * heads));
@@ -4887,31 +4941,28 @@ struct Executor::Impl {
         }
         const SpanChunk& recorded = chunks[calls.back().last - 1];
         // DFlash2: each following sequence's last window positions of the span, chunk by chunk;
-        // their features take consecutive columns, sequence after sequence.
+        // their features take consecutive columns, sequence after sequence. A cut's sequence
+        // first takes its last window positions before the cut, which the ring holds there.
         std::vector<Capture> span_capture(chunks.size());
         std::vector<ContextRun> span_runs;
+        std::size_t cut_runs = 0; // the runs that end at the cut
         if (dflash2) {
             const auto window = static_cast<std::int32_t>(*model.dflash2_config()->sliding_window);
             std::int32_t column = 0;
-            std::vector<SequenceState*> seen;
-            for (const SpanChunk& chunk : chunks) {
-                SequenceState* sequence = chunk.sequence;
-                if (!sequence->drafter_follows ||
-                    std::find(seen.begin(), seen.end(), sequence) != seen.end()) {
-                    continue;
-                }
-                seen.push_back(sequence);
+            // The last window positions of the sequence's chunks among chunks[begin, end).
+            const auto keep_last = [&](SequenceState* sequence, std::size_t begin,
+                                       std::size_t end) {
                 std::int32_t total = 0;
-                std::uint32_t end  = 0;
-                for (const SpanChunk& other : chunks) {
-                    if (other.sequence != sequence) { continue; }
-                    total += other.count;
-                    end = other.first + std::uint32_t(other.count);
+                std::uint32_t last = 0;
+                for (std::size_t k = begin; k < end; ++k) {
+                    if (chunks[k].sequence != sequence) { continue; }
+                    total += chunks[k].count;
+                    last = chunks[k].first + std::uint32_t(chunks[k].count);
                 }
                 const std::int32_t keep = std::min(total, window);
                 std::int32_t skip       = total - keep;
-                span_runs.push_back({sequence, column, keep, end - std::uint32_t(keep)});
-                for (std::size_t k = 0; k < chunks.size(); ++k) {
+                span_runs.push_back({sequence, column, keep, last - std::uint32_t(keep)});
+                for (std::size_t k = begin; k < end; ++k) {
                     if (chunks[k].sequence != sequence) { continue; }
                     const std::int32_t skipped = std::min(skip, chunks[k].count);
                     skip -= skipped;
@@ -4920,6 +4971,26 @@ struct Executor::Impl {
                     span_capture[k] = {.first = skipped, .count = count, .column = column};
                     column += count;
                 }
+            };
+            std::vector<SequenceState*> seen;
+            if (cut.state != nullptr && chunks[cut.chunk].sequence->drafter_follows) {
+                SequenceState* sequence = chunks[cut.chunk].sequence;
+                seen.push_back(sequence);
+                keep_last(sequence, 0, cut.chunk);
+                cut_runs = span_runs.size();
+                keep_last(sequence, cut.chunk, chunks.size());
+            }
+            for (const SpanChunk& chunk : chunks) {
+                SequenceState* sequence = chunk.sequence;
+                if (!sequence->drafter_follows ||
+                    std::find(seen.begin(), seen.end(), sequence) != seen.end()) {
+                    continue;
+                }
+                seen.push_back(sequence);
+                keep_last(sequence, 0, chunks.size());
+            }
+            if (std::uint32_t(column) > feature_columns) {
+                throw std::logic_error("qwen4_exp: a span's DFlash2 features exceed their columns");
             }
         }
         void* const own_mixed   = rank.mixed;
@@ -4992,6 +5063,10 @@ struct Executor::Impl {
                             plan.mlp_hc.weights(), config.rms_norm_eps, *rank.workspace, mixed,
                             &inject, st);
                     }
+                    // The layer's state at the cut, before the next chunk moves it on.
+                    if (cut.state != nullptr && k + 1 == cut.chunk) {
+                        keep_layer(state, cut.state->layers.at(state_slot(i, 0)), st);
+                    }
                 }
                 for (std::size_t c = 0; c < calls.size(); ++c) {
                     const auto [k, last] = calls[c];
@@ -5061,17 +5136,31 @@ struct Executor::Impl {
                 chunk.sequence->position = chunk.first + std::uint32_t(chunk.count);
             }
             record_routes(std::uint32_t(recorded.count));
-            if (!span_runs.empty()) { dflash2_context(span_runs, nullptr, 0); }
+            // A cut's ring lane is kept once its run before the cut is in.
+            const std::span<const ContextRun> runs(span_runs);
+            dflash2_context(runs.first(cut_runs), nullptr, 0);
+            if (dflash2 && cut.state != nullptr) {
+                copy_ring(*chunks[cut.chunk].sequence, *cut.state, true);
+            }
+            dflash2_context(runs.subspan(cut_runs), nullptr, 0);
             // The MTP block catches up chunk by chunk over each chunk's own final stacks; the
             // next pass's MTP cells of each sequence start from its last chunk's stack, which it
-            // copied.
+            // copied. A cut keeps the block's state after the chunk before it.
             if (mtp) {
                 for (std::size_t k = 0; k < chunks.size(); ++k) {
                     rank.stack = chunk_stack(k);
                     const Committed committed{chunks[k].sequence, 0, chunks[k].count,
                                               chunks[k].first, chunks[k].tokens};
                     mtp_catch_up(std::span(&committed, 1));
+                    if (cut.state != nullptr && k + 1 == cut.chunk) {
+                        copy_mtp(*chunks[k].sequence, *cut.state, true);
+                    }
                 }
+            }
+            if (cut.state != nullptr) {
+                const SequenceState& sequence = *chunks[cut.chunk].sequence;
+                cut.state->position           = chunks[cut.chunk].first;
+                cut.state->drafter_follows    = (mtp || dflash2) && sequence.drafter_follows;
             }
         } catch (...) {
             rank.stack  = own_stack;
@@ -5090,12 +5179,17 @@ struct Executor::Impl {
     }
 
     void forward(std::uint32_t s, std::span<const std::int32_t> tokens, std::uint32_t logit_rows,
-                 std::span<const std::int32_t> next) {
+                 std::span<const std::int32_t> next, PromptCut cut = {}) {
         if (next.size() > prompt_step()) {
             throw std::invalid_argument("qwen4_exp forward: more next tokens than a prompt step");
         }
-        if (tokens.size() > options.prefill_chunk) {
-            forward_span(s, tokens, logit_rows, next);
+        if (cut.state != nullptr &&
+            (span_tokens == 0 || cut.tokens == 0 || cut.tokens >= tokens.size())) {
+            throw std::invalid_argument(
+                "qwen4_exp forward: a cut needs prompt spans and tokens on both of its sides");
+        }
+        if (tokens.size() > options.prefill_chunk || cut.state != nullptr) {
+            forward_span(s, tokens, logit_rows, next, cut);
             return;
         }
         check_tokens(tokens, logit_rows);
@@ -5371,7 +5465,7 @@ struct Executor::Impl {
             std::vector<std::uint64_t> out(ranks.size());
             for (std::size_t r = 0; r < ranks.size(); ++r) {
                 RankBinding bind(device, r);
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(ninfer::wait_for_device());
                 std::size_t free = 0, total = 0;
                 CUDA_CHECK(cudaMemGetInfo(&free, &total));
                 out[r] = free;
@@ -5414,7 +5508,7 @@ struct Executor::Impl {
         for (const std::uint32_t s : batch) { reset(s); }
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
-            CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+            CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         }
         warming = false;
     }
@@ -5424,7 +5518,7 @@ struct Executor::Impl {
         std::vector<std::uint64_t> bytes(device.size(), 0);
         for (std::size_t r = 0; r < device.size(); ++r) {
             RankBinding bind(device, r);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(ninfer::wait_for_device());
             std::size_t free_bytes = 0, total = 0;
             CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total));
             bytes[r] = free_bytes > keep ? free_bytes - keep : 0;
@@ -5496,7 +5590,7 @@ struct Executor::Impl {
     // The next pinned staging half, once the upload that last read it is done.
     std::int32_t* dflash2_stage() {
         const std::size_t half = std::exchange(dflash2_next, dflash2_next ^ 1U);
-        CUDA_CHECK(cudaEventSynchronize(dflash2_staged[half]));
+        CUDA_CHECK(ninfer::wait_for_event(dflash2_staged[half]));
         dflash2_next_half = half;
         return static_cast<std::int32_t*>(dflash2_staging[half]->data());
     }
@@ -5648,7 +5742,7 @@ struct Executor::Impl {
                                    cudaMemcpyDeviceToHost, rank.stream));
         // The expert cache takes the last verification's routes while the device drafts.
         settle_routes();
-        CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+        CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         const std::size_t stride = options.draft_tokens;
         for (std::size_t j = 0; j < b; ++j) {
             std::uint32_t length = static_cast<std::uint32_t>(k);
@@ -5678,21 +5772,28 @@ struct Executor::Impl {
         }
     }
 
-    // Uploads an MTP pass's token ids and cell positions to the head rank's chain buffers, at the
-    // given offsets.
-    void stage_mtp(std::span<const std::int32_t> ids, std::size_t ids_at,
-                   std::span<const std::int32_t> positions, std::size_t positions_at) {
+    // Uploads an MTP pass's cells to the head rank's chain buffers: their token ids, positions
+    // and 1-D RoPE positions, and for a catch-up over media their three-axis RoPE positions and
+    // the cells that take a Vision embedding (empty otherwise).
+    void stage_mtp(std::span<const std::int32_t> ids, std::span<const std::int32_t> positions,
+                   std::span<const std::int32_t> rope, std::span<const std::int32_t> axes = {},
+                   std::span<const std::int32_t> scatter = {}) {
         RankState& rank = ranks[model.head_rank()];
-        CUDA_CHECK(cudaEventSynchronize(mtp_staged));
+        CUDA_CHECK(ninfer::wait_for_event(mtp_staged));
         auto* host                 = static_cast<std::int32_t*>(mtp_staging->data());
         const std::size_t capacity = mtp_ids.bytes / 4;
-        std::memcpy(host, ids.data(), ids.size() * 4);
-        std::memcpy(host + capacity, positions.data(), positions.size() * 4);
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(mtp_ids.p) + ids_at, host,
-                                   ids.size() * 4, cudaMemcpyHostToDevice, rank.stream));
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(mtp_positions.p) + positions_at,
-                                   host + capacity, positions.size() * 4, cudaMemcpyHostToDevice,
-                                   rank.stream));
+        const auto upload = [&](const DeviceBuffer& target, std::size_t at,
+                                std::span<const std::int32_t> values) {
+            if (values.empty()) { return; }
+            std::memcpy(host + at, values.data(), values.size() * 4);
+            CUDA_CHECK(cudaMemcpyAsync(target.p, host + at, values.size() * 4,
+                                       cudaMemcpyHostToDevice, rank.stream));
+        };
+        upload(mtp_ids, 0, ids);
+        upload(mtp_positions, capacity, positions);
+        upload(mtp_rope, 2 * capacity, rope);
+        upload(mtp_axes, 3 * capacity, axes);
+        upload(mtp_scatter, 6 * capacity, scatter);
         CUDA_CHECK(cudaEventRecord(mtp_staged, rank.stream));
     }
 
@@ -5707,16 +5808,29 @@ struct Executor::Impl {
     }
 
     // The token embeddings of `n` cells into `out` (BF16 [hidden, n] on the head rank) from their
-    // ids at `ids` (device I32 [n], head rank). The table lives on rank 0, so a split model looks
-    // the rows up there and copies them over.
-    void embed_cells(const std::int32_t* ids, std::int32_t n, void* out) {
+    // ids at `ids` (device I32 [n], head rank); a catch-up's `media` runs take the prompt's Vision
+    // embeddings into the cells mtp_scatter names. The table and the embeddings live on rank 0, so
+    // a split model looks the rows up there and copies them over.
+    void embed_cells(const std::int32_t* ids, std::int32_t n, void* out,
+                     std::span<const MediaRun> media) {
         const std::size_t head = model.head_rank();
         const auto h           = static_cast<std::int32_t>(config.hidden_size);
         RankState& last        = ranks[head];
+        const auto take_media  = [&](void* rows, std::int32_t* cells, cudaStream_t stream) {
+            Tensor to(rows, DType::BF16, {h, n});
+            for (const MediaRun& run : media) {
+                const Tensor source(static_cast<std::byte*>(vision_embeddings.p) +
+                                        std::size_t(run.source) * std::size_t(h) * 2,
+                                    DType::BF16, {h, run.count});
+                ops::scatter(source, Tensor(cells + run.offset, DType::I32, {run.count}), to,
+                             stream);
+            }
+        };
         if (head == 0) {
             Tensor rows(out, DType::BF16, {h, n});
             ops::embedding(Tensor(const_cast<std::int32_t*>(ids), DType::I32, {n}), embedding_table,
                            rows, last.stream);
+            take_media(out, static_cast<std::int32_t*>(mtp_scatter.p), last.stream);
             return;
         }
         RankState& first = ranks[0];
@@ -5727,8 +5841,15 @@ struct Executor::Impl {
             CUDA_CHECK(cudaMemcpyPeerAsync(first.ids, device.rank(0).device, ids,
                                            device.rank(head).device, std::size_t(n) * 4,
                                            first.stream));
+            if (!media.empty()) {
+                const auto cells = std::size_t(media.back().offset + media.back().count);
+                CUDA_CHECK(cudaMemcpyPeerAsync(first.scatter, device.rank(0).device,
+                                               mtp_scatter.p, device.rank(head).device, cells * 4,
+                                               first.stream));
+            }
             Tensor rows(first.mixed, DType::BF16, {h, n});
             ops::embedding(Tensor(first.ids, DType::I32, {n}), embedding_table, rows, first.stream);
+            take_media(first.mixed, first.scatter, first.stream);
             CUDA_CHECK(cudaEventRecord(first.done, first.stream));
         }
         CUDA_CHECK(cudaStreamWaitEvent(last.stream, first.done, 0));
@@ -5752,15 +5873,19 @@ struct Executor::Impl {
     // drafting) keeps only what the cells leave in the sequences' state, the layer's KV, pooled
     // keys and indexer tail, which its attention input determines; no draft reads the stack it
     // would leave, so it runs the router, whose routes the expert cache counts, but no expert.
+    // A catch-up over a media prompt's images or video takes their Vision embeddings (`media`)
+    // and rotates its cells at the three-axis positions in mtp_axes (`axes`); the cells' 1-D RoPE
+    // positions are at `rope`.
     void mtp_pass(std::span<const MtpPart> parts, std::int32_t n, const std::int32_t* ids,
-                  const std::int32_t* positions, bool drafting) {
+                  const std::int32_t* positions, const std::int32_t* rope, bool drafting,
+                  std::span<const MediaRun> media = {}, bool axes = false) {
         RankState& rank      = ranks[model.head_rank()];
         const cudaStream_t s = rank.stream;
         WorkspaceArena& ws   = *rank.workspace;
         const auto h         = static_cast<std::int32_t>(config.hidden_size);
         const auto hc        = static_cast<std::int32_t>(config.hc_count);
         const float eps      = config.rms_norm_eps;
-        embed_cells(ids, n, rank.mixed);
+        embed_cells(ids, n, rank.mixed, media);
         Tensor embedded(rank.mixed, DType::BF16, {h, n});
         Tensor embedded_norm(rank.d, DType::BF16, {h, n});
         ops::rmsnorm(embedded, mtp->embedding_norm, eps, true, embedded_norm, s);
@@ -5781,25 +5906,35 @@ struct Executor::Impl {
             auto scope = ws.scope();
             ops::hyper_connection_read(stack, plan.attn_hc.weights(), eps, ws, mixed, &inject, s);
         }
-        // MTP cells rotate on the one text axis.
-        const bool media = std::exchange(mrope, false);
-        std::vector<Part> cells;
-        for (const MtpPart& part : parts) {
-            cells.push_back({.sequence = part.sequence, .column = part.column, .count = part.count});
+        // The target pass's rotation state, which the cells' replaces until their attention ends.
+        const bool target_axes          = std::exchange(mrope, axes);
+        std::int32_t* const target_rope = rank.mrope;
+        if (axes) { rank.mrope = static_cast<std::int32_t*>(mtp_axes.p); }
+        try {
+            std::vector<Part> cells;
+            for (const MtpPart& part : parts) {
+                cells.push_back(
+                    {.sequence = part.sequence, .column = part.column, .count = part.count});
+            }
+            qsa_project(*plan.qsa, rank, cells, n, nullptr, rope);
+            for (std::size_t k = 0; k < parts.size(); ++k) {
+                const MtpPart& part     = parts[k];
+                SequenceState& sequence = *part.sequence;
+                qsa_part(*plan.qsa, sequence.mtp, rank, cells[k], n,
+                         {.positions = positions + part.column,
+                          .rope      = rope + part.column,
+                          .index     = nullptr,
+                          .tail      = drafting ? sequence.mtp_scratch_tail.p : sequence.mtp.tail.p,
+                          .first     = part.first});
+            }
+            qsa_output(*plan.qsa, rank, cells, n, nullptr);
+        } catch (...) {
+            mrope      = target_axes;
+            rank.mrope = target_rope;
+            throw;
         }
-        qsa_project(*plan.qsa, rank, cells, n, nullptr, positions);
-        for (std::size_t k = 0; k < parts.size(); ++k) {
-            const MtpPart& part     = parts[k];
-            SequenceState& sequence = *part.sequence;
-            qsa_part(*plan.qsa, sequence.mtp, rank, cells[k], n,
-                     {.positions = positions + part.column,
-                      .rope      = positions + part.column,
-                      .index     = nullptr,
-                      .tail      = drafting ? sequence.mtp_scratch_tail.p : sequence.mtp.tail.p,
-                      .first     = part.first});
-        }
-        qsa_output(*plan.qsa, rank, cells, n, nullptr);
-        mrope = media;
+        mrope      = target_axes;
+        rank.mrope = target_rope;
         {
             auto scope = ws.scope();
             ops::hyper_connection_write_read(stack, Tensor(rank.y, DType::BF16, {h, n}), inject,
@@ -5954,7 +6089,12 @@ struct Executor::Impl {
         RankState& rank  = ranks[model.head_rank()];
         const auto width = std::size_t(config.hc_count) * config.hidden_size;
         std::vector<MtpPart> parts;
-        std::vector<std::int32_t> ids, positions;
+        std::vector<std::int32_t> ids, positions, rope, scatter;
+        // A cell rotates at its position's RoPE position as the target does, on three axes in a
+        // pass that holds media positions; the cell before a media token takes that token's
+        // Vision embedding.
+        std::vector<MediaRun> media;
+        bool axes      = false;
         std::int32_t n = 0;
         for (const Committed& c : committed) {
             SequenceState& sequence = *c.sequence;
@@ -5972,7 +6112,23 @@ struct Executor::Impl {
             parts.push_back({&sequence, n, cells, first});
             ids.insert(ids.end(), c.tokens.begin() + (kept ? 0 : 1), c.tokens.end());
             for (std::int32_t q = 0; q < cells; ++q) {
-                positions.push_back(static_cast<std::int32_t>(first) + q);
+                const std::size_t at = first + std::size_t(q);
+                positions.push_back(static_cast<std::int32_t>(at));
+                rope.push_back(rope_at(sequence, at, 0));
+                axes = axes || rope_at(sequence, at, 1) != rope.back() ||
+                       rope_at(sequence, at, 2) != rope.back();
+                const std::int32_t column = at + 1 < sequence.media_columns.size()
+                                                ? sequence.media_columns[at + 1]
+                                                : -1;
+                if (column < 0) { continue; }
+                if (!media.empty() && media.back().source + media.back().count == column) {
+                    ++media.back().count;
+                } else {
+                    media.push_back({.source = column,
+                                     .count  = 1,
+                                     .offset = static_cast<std::int32_t>(scatter.size())});
+                }
+                scatter.push_back(n + q);
             }
             n += cells;
         }
@@ -5984,9 +6140,22 @@ struct Executor::Impl {
                                        width * 4, cudaMemcpyDeviceToDevice, rank.stream));
         }
         if (n == 0) { return; }
-        stage_mtp(ids, 0, positions, 0);
+        std::vector<std::int32_t> three;
+        if (axes) {
+            three.resize(3 * std::size_t(n));
+            for (const MtpPart& part : parts) {
+                for (std::int32_t q = 0; q < part.count; ++q) {
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        three[axis * std::size_t(n) + std::size_t(part.column + q)] =
+                            rope_at(*part.sequence, part.first + std::size_t(q), axis);
+                    }
+                }
+            }
+        }
+        stage_mtp(ids, positions, rope, three, scatter);
         mtp_pass(parts, n, static_cast<const std::int32_t*>(mtp_ids.p),
-                 static_cast<const std::int32_t*>(mtp_positions.p), false);
+                 static_cast<const std::int32_t*>(mtp_positions.p),
+                 static_cast<const std::int32_t*>(mtp_rope.p), false, media, axes);
     }
 
     std::uint32_t draft(std::span<const std::uint32_t> batch, std::span<const std::int32_t> anchors,
@@ -6025,18 +6194,20 @@ struct Executor::Impl {
         RankBinding bind(device, model.head_rank());
         RankState& rank = ranks[model.head_rank()];
         // Step i's cell of a sequence sits at its position - 1 + i and pairs the stack before it
-        // (the kept one at step 0) with the step's token (the anchor at step 0).
-        std::vector<std::int32_t> positions(k * b);
+        // (the kept one at step 0) with the step's token (the anchor at step 0); it rotates at
+        // that position's RoPE position, on one axis past a media prompt's last media token.
+        std::vector<std::int32_t> positions(k * b), rope(k * b);
         std::vector<MtpPart> parts;
         for (std::size_t j = 0; j < b; ++j) {
             const std::uint32_t first = drafting[j]->position - 1;
             for (std::size_t i = 0; i < k; ++i) {
                 positions[i * b + j] = static_cast<std::int32_t>(first + i);
+                rope[i * b + j]      = rope_at(*drafting[j], first + i, 0);
             }
             parts.push_back({drafting[j], std::int32_t(j), 1, first});
         }
         if (hybrid) { hybrid->begin(cancelled, !warming); }
-        stage_mtp(anchors, 0, positions, 0);
+        stage_mtp(anchors, positions, rope);
         if (draft_prefetch) {
             std::vector<NgramContext> contexts;
             for (const auto* sequence : drafting) { contexts.push_back(sequence->context); }
@@ -6044,6 +6215,7 @@ struct Executor::Impl {
         }
         auto* ids        = static_cast<std::int32_t*>(mtp_ids.p);
         const auto* at   = static_cast<const std::int32_t*>(mtp_positions.p);
+        const auto* turn = static_cast<const std::int32_t*>(mtp_rope.p);
         const auto n     = static_cast<std::int32_t>(b);
         const auto second = [&](std::size_t i) {
             return draft_prefetch ? static_cast<std::int32_t*>(ngram_prefetch_tokens.p) + i * b
@@ -6063,7 +6235,7 @@ struct Executor::Impl {
             } else {
                 stage_hidden(rank.stack, n, 0);
             }
-            mtp_pass(parts, n, ids + i * b, at + i * b, true);
+            mtp_pass(parts, n, ids + i * b, at + i * b, turn + i * b, true);
             mtp_head(n, ids + (i + 1) * b, second(i), confidence ? confidence + i * b : nullptr);
         };
         const auto prefetch = [&](std::size_t i) {
@@ -6132,7 +6304,7 @@ struct Executor::Impl {
                 // The expert cache takes the last verification's routes while the first step
                 // runs; the MTP block's table uploads it queues precede the next step.
                 if (i == 0) { settle_routes(); }
-                CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+                CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
                 bool more = false;
                 for (std::size_t j = 0; j < b; ++j) {
                     if (!std::isfinite(logprobs[i * b + j])) {
@@ -6152,7 +6324,7 @@ struct Executor::Impl {
             if (draft_prefetch) { draft_prefetch->join(rank.stream); }
         }
         CUDA_CHECK(cudaMemcpyAsync(host, ids + b, ran * b * 4, cudaMemcpyDeviceToHost, rank.stream));
-        CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+        CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         if (hybrid) { hybrid->finish(); }
         if (draft_prefetch) { draft_prefetch->check(); }
         for (std::size_t j = 0; j < b; ++j) {
@@ -6256,7 +6428,7 @@ struct Executor::Impl {
             RankBinding bind(device, model.head_rank());
             // Captured events encode graph dependencies; wait on the joined stream before
             // reading host callback state. Host synchronization of a captured event is invalid.
-            CUDA_CHECK(cudaStreamSynchronize(ranks[model.head_rank()].stream));
+            CUDA_CHECK(ninfer::wait_for_stream(ranks[model.head_rank()].stream));
             draft_prefetch->check();
         }
         const auto di = static_cast<std::int32_t>(config.indexer_head_dim);
@@ -6409,7 +6581,8 @@ struct Executor::Impl {
         sequence.drafter_follows =
             ((mtp && !from.mtp.empty()) || (dflash2 && from.ring.bytes != 0)) &&
             from.drafter_follows;
-        // Snapshots hold text prompts only: a media prompt is not reused.
+        // A media prompt that resumes from the state sets its media again (set_media), which
+        // skips the items the state already holds.
         sequence.media_columns.clear();
         sequence.media_rope.clear();
         sequence.rope_delta = 0;
@@ -6532,7 +6705,7 @@ struct Executor::Impl {
         }
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
-            CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+            CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         }
     }
 
@@ -6568,6 +6741,55 @@ struct Executor::Impl {
         sequence.rope_delta = 0;
     }
 
+    // A layer's recurrent state into a snapshot's layer, on `stream`.
+    static void keep_layer(const LayerState& state, SequenceSnapshot::Layer& kept,
+                           cudaStream_t stream) {
+        const auto regions = recurrent_regions(state);
+        for (std::size_t k = 0; k < regions.size(); ++k) {
+            if (regions[k].first == nullptr || kept.buffers[k].bytes == 0) { continue; }
+            CUDA_CHECK(cudaMemcpyAsync(kept.buffers[k].p, regions[k].first, kept.buffers[k].bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    // The MTP block's tail and kept stack between a sequence and a snapshot, on the head rank's
+    // stream.
+    void copy_mtp(SequenceState& sequence, SequenceSnapshot& snapshot, bool save) {
+        if (!mtp || snapshot.mtp.size() != 2) { return; }
+        RankBinding bind(device, model.head_rank());
+        const cudaStream_t stream = ranks[model.head_rank()].stream;
+        const std::array<std::pair<void*, DeviceBuffer*>, 2> pairs{
+            {{sequence.mtp.tail.p, &snapshot.mtp[0]}, {sequence.mtp_pending.p, &snapshot.mtp[1]}}};
+        for (const auto& [live, kept] : pairs) {
+            if (live == nullptr || kept->bytes == 0) { continue; }
+            CUDA_CHECK(cudaMemcpyAsync(save ? kept->p : live, save ? live : kept->p, kept->bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    // The sequence's DFlash2 ring lane, whose slots the positions past the snapshot overwrite,
+    // between the sequence and a snapshot, on the head rank's stream.
+    void copy_ring(SequenceState& sequence, SequenceSnapshot& snapshot, bool save) {
+        if (!dflash2 || snapshot.ring.bytes == 0) { return; }
+        RankBinding bind(device, model.head_rank());
+        const cudaStream_t stream = ranks[model.head_rank()].stream;
+        const auto lane = ring->slot_view(static_cast<std::int32_t>(sequence.slot));
+        auto* kept      = static_cast<std::byte*>(snapshot.ring.p);
+        for (std::uint32_t l = 0; l < lane.layers; ++l) {
+            const std::array<std::pair<std::byte*, std::size_t>, 2> planes{{
+                {static_cast<std::byte*>(lane.k_layer0.data) + l * lane.k_layer_pitch_bytes,
+                 lane.k_layer_bytes},
+                {static_cast<std::byte*>(lane.v_layer0.data) + l * lane.v_layer_pitch_bytes,
+                 lane.v_layer_bytes},
+            }};
+            for (const auto& [live, bytes] : planes) {
+                CUDA_CHECK(cudaMemcpyAsync(save ? kept : live, save ? live : kept, bytes,
+                                           cudaMemcpyDeviceToDevice, stream));
+                kept += bytes;
+            }
+        }
+    }
+
     // Copies the recurrent state between a sequence and a snapshot on the layers' streams, and
     // waits for the copies: the paged KV and the indexer's pooled keys stay where they are, since
     // a sequence only writes positions at or past its own. The MTP block's tail and kept stack
@@ -6589,35 +6811,11 @@ struct Executor::Impl {
                 ++kept;
             });
         }
-        if (mtp && snapshot.mtp.size() == 2) {
-            RankBinding bind(device, model.head_rank());
-            const cudaStream_t stream = ranks[model.head_rank()].stream;
-            copy(sequence.mtp.tail.p, snapshot.mtp[0], stream);
-            copy(sequence.mtp_pending.p, snapshot.mtp[1], stream);
-        }
-        if (dflash2 && snapshot.ring.bytes != 0) {
-            // The ring lane, whose slots the positions past the snapshot overwrite.
-            RankBinding bind(device, model.head_rank());
-            const cudaStream_t stream = ranks[model.head_rank()].stream;
-            const auto lane = ring->slot_view(static_cast<std::int32_t>(sequence.slot));
-            auto* kept      = static_cast<std::byte*>(snapshot.ring.p);
-            for (std::uint32_t l = 0; l < lane.layers; ++l) {
-                const std::array<std::pair<std::byte*, std::size_t>, 2> planes{{
-                    {static_cast<std::byte*>(lane.k_layer0.data) + l * lane.k_layer_pitch_bytes,
-                     lane.k_layer_bytes},
-                    {static_cast<std::byte*>(lane.v_layer0.data) + l * lane.v_layer_pitch_bytes,
-                     lane.v_layer_bytes},
-                }};
-                for (const auto& [live, bytes] : planes) {
-                    CUDA_CHECK(cudaMemcpyAsync(save ? kept : live, save ? live : kept, bytes,
-                                               cudaMemcpyDeviceToDevice, stream));
-                    kept += bytes;
-                }
-            }
-        }
+        copy_mtp(sequence, snapshot, save);
+        copy_ring(sequence, snapshot, save);
         for (auto& rank : ranks) {
             RankBinding bind(device, rank.rank);
-            CUDA_CHECK(cudaStreamSynchronize(rank.stream));
+            CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
         }
     }
 };
@@ -6654,11 +6852,17 @@ std::uint32_t Executor::position(std::uint32_t sequence) const {
 }
 
 void Executor::forward(std::uint32_t sequence, std::span<const std::int32_t> tokens,
-                       std::uint32_t logit_rows, std::span<const std::int32_t> next) {
-    impl_->forward(sequence, tokens, logit_rows, next);
+                       std::uint32_t logit_rows, std::span<const std::int32_t> next,
+                       PromptCut cut) {
+    impl_->forward(sequence, tokens, logit_rows, next, cut);
 }
 
 bool Executor::packs_prompts() const noexcept { return impl_->span_tokens != 0; }
+std::uint32_t Executor::narrow_prompt_tokens() const noexcept {
+    return impl_->span_tokens == 0
+               ? 0
+               : std::max(std::uint32_t(kVectorTokens), impl_->prompt_miss_tokens);
+}
 
 void Executor::forward_pieces(std::span<const PromptPiece> pieces,
                               std::span<const std::int32_t> next) {
@@ -6714,9 +6918,10 @@ void Executor::load_image(std::uint32_t sequence, const SequenceImage& image,
     impl_->load_image(sequence, image, pages, page_bytes);
 }
 
-void Executor::set_media(std::uint32_t sequence, std::span<const MediaItem> items,
-                         std::vector<std::int32_t> rope_positions, std::int32_t rope_delta) {
-    impl_->set_media(sequence, items, std::move(rope_positions), rope_delta);
+std::size_t Executor::set_media(std::uint32_t sequence, std::span<const MediaItem> items,
+                                std::vector<std::int32_t> rope_positions,
+                                std::int32_t rope_delta) {
+    return impl_->set_media(sequence, items, std::move(rope_positions), rope_delta);
 }
 
 bool Executor::vision() const noexcept { return impl_->vision_context != nullptr; }

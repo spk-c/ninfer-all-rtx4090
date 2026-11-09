@@ -465,6 +465,28 @@ supervisor such as a container restart policy reloads the model instead of keepi
 up. A router instead unloads the failed model once its requests are gone and reports it as failed in
 `GET /models`; its next request loads it again.
 
+A device that stops finishing work raises no CUDA error: a thread that waits for it stays in the
+driver, while `/health` and the other endpoints keep answering. The process watches for this in two
+ways, each with a limit of 120 s while no host service of the device (host or disk experts, the CPU
+share of expert products) answers it:
+
+- Every thread's waits for the device. A wait past the limit prints
+  `ninfer: the <name> (thread <TID>) has waited <N> s for CUDA device <D> (<wait>) ...` on stderr;
+  a thread without a name, such as the startup thread that loads the model, is `thread <TID>`.
+- Every device of the server. Every 5 s the process copies 4 bytes to the device, runs a one-thread
+  kernel and copies the word back, on a stream of its own. A probe past the limit prints
+  `ninfer: CUDA device <D> has not finished a probe ...`. This also covers a device that no thread
+  waits for: an idle server, or a thread held inside a kernel launch or a copy from pageable memory.
+  The probe does not see one stream stop while the device still runs the others; the waits do.
+
+Either message is followed by `abort()`, as on a CUDA error: the process ends with `SIGABRT`, or,
+as a container's PID 1, which ignores its own `SIGABRT`, with the fault glibc's `abort()` raises
+next (a general-protection fault in libc on x86-64). Only a new process recovers the device, so run
+the server under a supervisor that restarts it, such as a container restart policy. Time the process
+stands still (a stop signal, a debugger, a paused container) does not count toward the limit.
+[`NINFER_DEVICE_STALL_SECONDS`](cli.md#device-stall-watch) changes the limit or turns both watches
+off.
+
 ## Endpoints
 
 | Method and path | Behavior |
@@ -537,7 +559,7 @@ read-only and fills only the llama.cpp fields NInfer can state truthfully:
    "params": {"n_predict": -1, "max_tokens": -1, "temperature": 1.0, "top_k": 20, "top_p": 0.95,
               "min_p": 0.0, "presence_penalty": 0.0, "frequency_penalty": 0.0, "seed": -1}},
  "total_slots": 1, "model_alias": "qwen3.8-27b", "model_path": "models/qwen3_8_27b.ninfer",
- "modalities": {"vision": false, "audio": false}, "build_info": "ninfer 2026-10-25.1+2026-10-25.1-5-gb3402a6fd",
+ "modalities": {"vision": false, "audio": false}, "build_info": "ninfer 2026-10-25.1+2026-10-25.1-5-gb3402a6fd (nvcc 13.4.92, 120a)",
  "endpoint_slots": true, "endpoint_props": true, "endpoint_metrics": true,
  "cors_proxy_enabled": false}
 ```
@@ -550,7 +572,7 @@ cap. The sampler is the loaded model's preset for the default thinking mode (thi
 per request. `seed` is `--seed`, or `-1` when requests draw a fresh random seed. `model_alias` is the
 public model id and `model_path` the artifact path the server was started with.
 `cors_proxy_enabled` reports `--webui-mcp-proxy` (see [WebUI](#webui)). `build_info` is
-`ninfer <version>` (see [Server version](#server-version)). There is no `chat_template` or writable
+`ninfer <version> (<toolchain>)` (see [Server version](#server-version)). There is no `chat_template` or writable
 `POST /props`.
 
 ### Server version
@@ -560,6 +582,11 @@ and `ninfer --version` print it and exit without loading a model; `GET /health` 
 `{"status": "ok", "version": "2026-10-25.1+2026-10-25.1-5-gb3402a6fd"}`; every response,
 the `503` during model load and `401` failures included, carries it in an `X-NInfer-Version`
 header; and the startup log, the `server_start` record and `/props` `build_info` include it.
+`--version`, the startup log line `build ...` and `build_info` add the build's toolchain in
+parentheses: the CUDA compiler release and the architectures, for example
+`(nvcc 13.4.92, 75 80 86 89 120a)`. The same sources can compile wrong with another nvcc release
+([toolkit gates](build-linux.md#cuda-toolkits)), so a report needs both. A portable release
+package's launcher prints only the version; its archive name carries the toolkit.
 The version is the build's release tag (`YYYY-MM-DD.N`): a published release reports the tag it is
 released under; any other build reports the release tag at or before its commit, or `untagged` when
 its checkout has no tags. The build id is `git describe --always --tags` of
@@ -1125,13 +1152,19 @@ model that keeps rewriting the same passages in its thinking, which token penalt
 because every pass varies a little.
 
 - **Check.** Every 512 model-origin thinking tokens, at the end of a decode round that does not
-  end on a `</think>` still waiting for its next byte, the guard tests two signs of a loop. First,
-  the last 2,048 characters of the thinking repeat one period of at most 64 characters, as a loop
-  written without spaces does. Second, the thinking is split into words (a run of letters, digits
-  and `_`, ASCII case folded) and every other non-space character, each a word of its own, and at
-  least 25 % of the last 2,000 words lie inside a 12-word passage that occurs at least three times
-  in the last 30,000 words. A passage repeated twice (a recap) does not count. The measure and thresholds are those of Strata's `reasoning_loop_recovery` and
-  its periodic-tail check (measured on other models; NInfer has not re-tuned them).
+  end on a `</think>` still waiting for its next byte, the guard tests three signs of a loop.
+  First, the last 2,048 characters of the thinking repeat one period of at most 64 characters, as a
+  loop written without spaces does. Second, they do so once every run of digits is read as one
+  number, the period holds a number, and one of its numbers moves by the same nonzero step through
+  at least eight periods, as a loop that counts (`'time1','time2',...`) does; numbers of the tail's
+  first and last runs, which its ends may cut, are not read. Third, the thinking is split into
+  words (a run of letters, digits and `_`, ASCII case folded) and every other non-space character,
+  each a word of its own, and at least 25 % of the last 2,000 words lie inside a 12-word passage
+  that occurs at least three times in the last 30,000 words. A passage repeated twice (a recap) does
+  not count. The word measure and its thresholds are those of Strata's `reasoning_loop_recovery` and
+  its periodic-tail check (measured on other models; NInfer has not re-tuned them). The counting
+  check fired on none of 2,126 s1K-1.1 and 14,866 Bespoke-Stratos-17k reasoning texts of 4,096
+  characters or more, checked every 2,000 bytes.
 - **`stop`** ends the reply there with `finish_reason` `length` (Anthropic `max_tokens`).
 - **`conclude`** commits the same control span a reached thinking budget does (Qwen's early-close
   guidance plus `</think>`), so the model answers from the thinking it has; no prompt is read again.
@@ -2027,8 +2060,12 @@ ignores `display`. `preserve_thinking` remains a NInfer extension for closed-tur
 history, `graft` selects a [prompt graft](#prompt-grafts), and llama.cpp's `lora` field sets the
 request's [LoRA adapter scales](#lora-adapters-and-control-vectors). `output_config.effort` passes its
 protocol-validated value to the selected template, substituting the nearest value the template
-accepts as described above. `output_config.format` accepts `{"type":"json_schema","schema":{...}}`,
-enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
+accepts as described above. As in the Anthropic API, effort is independent of the Thinking switch:
+with Thinking `disabled` or `between_tools`, a valid effort (which Claude Code sends) is accepted
+and dropped, because the templates apply effort only to a thinking turn, and the request runs
+without reasoning. Without a `thinking` field, an effort other than `none` turns thinking on, as a
+Chat Completions `reasoning_effort` does. `output_config.format` accepts
+`{"type":"json_schema","schema":{...}}`, enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
 
 User-defined tools support `name`, `description`, object `input_schema`, `input_examples`, and
 `strict`, which constrains the tool's input to its schema as described under [Structured
@@ -2263,7 +2300,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--embedding-residency device\|host` | Qwen3.5 family: the input token embedding in the GPU's weight arena, or in pinned host memory mapped into the GPU, which the gather reads in place over the bus each step. The table's VRAM goes to the KV cache (Qwen3.8-27B: 388 MiB for an IQ2_S table, 1.26 GiB for Q8); output is unchanged. Excludes `--embedding-q4/q6`; refused for an artifact whose embedding is tied to the output head and for the other families. On Windows (WDDM) mapped host memory may still count against the card | `device` |
 | `--expert-cache-mib N\|auto` | with host or disk experts, device memory for the most used experts; native Qwen, Gemma 4 and Flint allow `0` and then keep only their layer banks, and Flash-Next disk mode needs a cache. With automatic KV, native Qwen gives the cache priority over KV beyond one request's context | `auto` (what is free after startup) |
 | `--expert-misses staged\|mapped` | Qwen3.8-Flash-Next only, GGUF host experts: copy each missing expert to the device while the cached experts run, into a cache slot when the [expert tier](qwen3-8-flash-next.md#the-expert-cache) admits it (`staged`), or let the expert kernels read the missing ones across the bus (`mapped`) | `staged` |
-| `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next calls of more than eight tokens other than verifications of up to 64, Gemma 4, Flint and DeepSeek-V4.1 calls of more than eight tokens, and Qwen3.5/3.6 calls that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
+| `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next calls of more than eight tokens other than verifications of up to 64, Gemma 4, Flint and DeepSeek-V4.1 calls of more than eight tokens, and Qwen3.5/3.6 calls at or past the codec's prefill frontier or that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
 | `--iq1m-experts matrix\|vector` | DeepSeek-V4.1 and Qwen3.8-Flash-Next: IQ1_M routed experts of calls past eight tokens on the integer matrix kernel once a call routes more than 16 rows to each expert on average for their gate and up products and 6 for their down products (the vector kernel below), or always on the vector kernel in groups of eight columns; the two round the sums differently, so outputs differ slightly ([IQ1_M experts](deepseek-v41.md#iq1_m-experts-in-prompt-chunks)) | `matrix` |
 | `--expert-tail-skip N` | Qwen3.8-Flash-Next only, GGUF host experts with staged misses: a decode or verification call leaves out each routed expert its device cache lacks when every token of the call ranks it past place `N` (`1..9`) of its top ten; the other experts keep their router weights, so results change | off |
 | `--expert-prefill-buffers 1\|2` | Qwen3.8-Flash-Next only, GGUF host experts: device buffers a long prompt's uncached experts are copied into; `2` copies the next layer's while the current layer's experts run, when half the free memory holds both. With the automatic cache the buffers hold expert cache slots between prompts ([the expert cache](qwen3-8-flash-next.md#the-expert-cache)) | `2` with the automatic expert cache, else `1` |
@@ -2295,7 +2332,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys, `rk4v4-e8` opt-in E8-lattice INT4 keys and `rk2v4-e8` opt-in E8 root-code keys; all nine are accepted on every build target (see [Context and memory](cli.md#context-and-memory)); for Qwen3.8-Flash-Next it is the storage of the sparse-attention layers' KV; Flint keeps F16 only (`bf16`) | `bf16` |
 | `--kv-resident N\|all\|auto` | Qwen3.8-Flash-Next: positions of each sparse-attention layer's KV a sequence keeps in device memory; past them the layers' KV streams from pinned host memory (see [streamed KV](qwen3-8-flash-next.md#streamed-sparse-attention-kv)) | `auto`: 32,768 with host or disk experts, all with device experts |
-| `--spec none\|mtp\|dflash\|dflash2` | speculative backend; Qwen3.8-Flash-Next takes `mtp` from an artifact converted with its MTP block (see [MTP speculative decoding](qwen3-8-flash-next.md#mtp-speculative-decoding)) and `dflash2` from one carrying its DFlash2 drafter (see [DFlash2 speculative decoding](qwen3-8-flash-next.md#dflash2-speculative-decoding)), Gemma 4 from one converted with its assistant; Flint has no drafter and takes `--lookup-ngram` without `--spec` | for Flash-Next artifacts with host experts `dflash2` with 4 drafts (with `--draft-min-p 0.7`) when they carry the DFlash2 drafter, else `mtp` with 3 drafts (with `--draft-min-p 0.5`) when they carry the MTP block; `mtp` with 3 drafts for Gemma 4 artifacts with their assistant and host or disk experts; otherwise off |
+| `--spec none\|mtp\|dflash\|dflash2` | speculative backend; Qwen3.8-Flash-Next takes `mtp` from an artifact converted with its MTP block (see [MTP speculative decoding](qwen3-8-flash-next.md#mtp-speculative-decoding)) and `dflash2` from one carrying its DFlash2 drafter (see [DFlash2 speculative decoding](qwen3-8-flash-next.md#dflash2-speculative-decoding)), Gemma 4 from one converted with its assistant; Flint has no drafter and takes `--lookup-ngram` without `--spec` | for Flash-Next artifacts with host experts `dflash2` with 4 drafts (with `--draft-min-p 0.7`) on one device when they carry the DFlash2 drafter, else (over pipeline stages too) `mtp` with 3 drafts (with `--draft-min-p 0.5`) when they carry the MTP block; `mtp` with 3 drafts for Gemma 4 artifacts with their assistant and host or disk experts; otherwise off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2; `1..7` for Qwen3.8-Flash-Next's DFlash2 drafter (its block of 8), Gemma 4's assistant and Flint's context lookup | unset (Flint's lookup: 3) |
 | `--draft-min-p P` | Flash-Next MTP and DFlash2 only: verify a round's drafts through the first at or below this probability (MTP: its absolute probability, which also ends the drafting; DFlash2: its selector confidence); see [MTP](qwen3-8-flash-next.md#mtp-speculative-decoding) and [DFlash2](qwen3-8-flash-next.md#dflash2-speculative-decoding) | `0` (off) with `--spec mtp` or `--spec dflash2`; `0.5` when the engine chooses MTP and `0.7` when it chooses DFlash2 (no `--spec`), unless set |
 | `--draft-confidence C` | DSpark only: verify a round's drafts up to the first its confidence head scores below `C` (`0..1`); `0` verifies every draft | `0.5` |
@@ -2343,7 +2380,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--use-alt-prefix-caching` | the hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)), the default: content-addressed 64-token KV blocks shared across requests plus sparse state snapshots. It configures itself: `--kv-capacity` defaults to `auto` (free VRAM becomes Device block cache) and `--host-cache-mib` sizes the one pinned Host pool that blocks and snapshots share. Without this flag or `--use-original-prefix-caching`, an option only the checkpoint catalog serves selects the catalog instead: its capacities (`--device-state-slots`, `--host-state-slots`, `--host-kv-mib`, `--max-private-continuations`, `--max-shared-prefixes`, `--max-long-anchors-per-continuation`), its anchors and policies (`--auto-long-anchors`, `--long-anchor-spacing`, `--branch-anchors`, `--no-endpoint-anchors`, `--progress-anchor-tokens`, `--auto-prefix-grid`, `--derive-session-keys`, `--context-cache-policy`, `--release-diverged-checkpoints`, `--thorough-admission-search`, `--recency-eviction`, `--value-aware-demote`), the disk tier, slot files, pipeline `--devices`, `--no-prefix-reuse` or a `--graft`. Named, the flag rejects those options instead. Gemma 4 and Qwen3.8-Flash-Next keep their own context caches, which the catalog options configure. Requests that share a new prefix with one still prefilling wait for its snapshot instead of prefilling the prefix again, which needs `--concurrent-prefill` to admit them meanwhile. On an RTX 3090 with Qwen3.8-27B (`rk4v4`, 131K context) the agentic replay of `bench/agentic_ab` (seed 42, half scale) ran with an average time to first token of 55.6 s instead of 97.9 s on the catalog, served 84 % of prompt tokens from the cache instead of 46 %, and finished in 43.6 instead of 60.2 minutes; its one history-edit turn took 389 s instead of 183 s, and decode ran 1.4 % slower | default |
 | `--use-original-prefix-caching` | select the checkpoint catalog in place of the hybrid prefix cache. Rejected together with `--use-alt-prefix-caching` and with the hybrid options below | off |
-| `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`) | `max-concurrency + 2` |
+| `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`). Left at its default, the count drops, to one at the least, when the `--kv-capacity` asked for (or under `auto` one `--max-context` window beside the headroom) would not fit beside it, and startup logs `device snapshot slots 3 -> 1 to fit the requested KV capacity`; a given count is kept, and a capacity that does not fit beside it fails naming this option and the size of one slot | `max-concurrency + 2`, fewer where the KV capacity needs their memory |
 | `--cache-taps-per-request N` | hybrid: new prefill state snapshots per request (`0..64`) | `8`; `2` without a Host tier |
 | `--cache-tap-ladder N` | hybrid: history-snapshot ladder base G; flexible taps at `prompt − G·2^k` | `max(4096, 2 * prefill-chunk)` |
 | `--cache-tap-min-gap N` | hybrid: minimum tokens between ladder snapshots | `max(1024, prefill-chunk)` |
@@ -2804,7 +2841,14 @@ and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-
 CUDA Graph driver-state allowance reserved against that budget is computed from the enabled
 graph profiles and concurrency unless `--cuda-graph-allowance-mib` supplies an explicit total; a
 too-small value risks CUDA out-of-memory at graph capture and a too-large one shrinks the KV pool.
-Capacity resolves once at startup.
+Capacity resolves once at startup. The reservation also holds the Device state slots beyond one per
+lane: the hybrid cache's `--device-snapshot-slots` (about 75 MiB each for Qwen3.8-27B with
+`--gdn-state-fp16`) or the catalog's `--device-state-slots`. A default snapshot slot count gives
+way to the capacity: when an explicit `--kv-capacity`, or under `auto` one `--max-context` window
+beside the headroom, does not fit beside them, startup keeps the most slots that let it fit, down to
+one, and logs the change. A start that still does not fit fails with the bytes it needs and names
+what to lower: `--kv-capacity` or `--max-context` (`--kv-headroom-mib` under `auto`) and, while
+more slots are held than the cache needs, the slot option with the size of one slot.
 
 Admission reserves the full prompt-plus-effective-output page entitlement through request
 completion. A request remains queued until a legal resource plan can satisfy that entitlement.
