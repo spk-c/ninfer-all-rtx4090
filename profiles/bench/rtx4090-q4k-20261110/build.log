@@ -1,0 +1,1131 @@
+[1/294] Stamping NINFER build id from git (build-time)
+[2/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w4_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w4_h24_cached.cu
+[3/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w3_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w3_h24_cached.cu
+[4/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w4_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w4_h16_cached.cu
+[5/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w3_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w3_h16_cached.cu
+[6/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w4_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w4_h24_append.cu
+[7/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w3_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w3_h24_append.cu
+[8/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w4_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w4_h16_append.cu
+[9/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w3_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w3_h16_append.cu
+[10/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w5_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w5_h16_cached.cu
+[11/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w5_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w5_h24_cached.cu
+[12/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w5_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w5_h16_append.cu
+[13/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w6_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w6_h24_cached.cu
+[14/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w6_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w6_h16_cached.cu
+[15/292] Building CUDA object tests\CMakeFiles\ninfer_expert_delivery_test.dir\test_expert_delivery.cu.obj
+C:\coding\ninfer-q4k-validation\tests\test_expert_delivery.cu(444): warning #550-D: variable "mandatory_backing" was set but never used
+          std::uint64_t mandatory_backing = 0;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+test_expert_delivery.cu
+[16/292] Building CUDA object tests\CMakeFiles\ninfer_device_wait_test.dir\test_device_wait.cu.obj
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(97): warning #177-D: function "<unnamed>::stall" was declared but never referenced
+  int stall() {
+      ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(107): warning #177-D: function "<unnamed>::unnamed_stall" was declared but never referenced
+  int unnamed_stall() {
+      ^
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(122): warning #177-D: function "<unnamed>::probe_stall" was declared but never referenced
+  int probe_stall() {
+      ^
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(133): warning #177-D: function "<unnamed>::answered" was declared but never referenced
+  int answered() {
+      ^
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(152): warning #177-D: function "<unnamed>::unwatched" was declared but never referenced
+  int unwatched() {
+      ^
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(192): warning #177-D: function "<unnamed>::switched_off" was declared but never referenced
+  int switched_off() {
+      ^
+
+C:\coding\ninfer-q4k-validation\tests\test_device_wait.cu(207): warning #177-D: function "<unnamed>::refused_limit" was declared but never referenced
+  int refused_limit() {
+      ^
+
+test_device_wait.cu
+[17/292] Building CXX object tests\CMakeFiles\ninfer_structured_output_test.dir\text\test_structured_output.cpp.obj
+[18/292] Building CXX object tests\CMakeFiles\ninfer_unique_strings_test.dir\text\test_unique_strings.cpp.obj
+[19/292] Building CXX object tests\CMakeFiles\ninfer_structured_unique_test.dir\text\test_structured_unique.cpp.obj
+[20/292] Building CXX object tests\CMakeFiles\ninfer_unique_strings_masks_test.dir\text\test_unique_strings_masks.cpp.obj
+[21/292] Building CXX object tests\CMakeFiles\ninfer_artifact_reader_test.dir\artifact\test_reader.cpp.obj
+[22/292] Building CXX object tests\CMakeFiles\ninfer_artifact_selection_test.dir\artifact\test_selection.cpp.obj
+[23/292] Building CXX object tests\CMakeFiles\ninfer_artifact_permute_row_split_test.dir\artifact\test_permute_row_split.cpp.obj
+[24/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w5_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w5_h24_append.cu
+[25/292] Building CXX object tests\CMakeFiles\ninfer_admission_policy_test.dir\test_admission_policy.cpp.obj
+[26/292] Building CXX object tests\CMakeFiles\ninfer_host_memory_test.dir\test_host_memory.cpp.obj
+[27/292] Building CXX object tests\CMakeFiles\ninfer_context_cost_test.dir\test_context_cost.cpp.obj
+[28/292] Building CXX object tests\CMakeFiles\ninfer_prefill_pacing_test.dir\test_prefill_pacing.cpp.obj
+[29/292] Building CXX object tests\CMakeFiles\ninfer_slot_spill_guard_test.dir\test_slot_spill_guard.cpp.obj
+[30/292] Building CXX object tests\CMakeFiles\ninfer_checkpoint_recovery_impact_test.dir\host\test_checkpoint_recovery_impact.cpp.obj
+[31/292] Building CXX object tests\CMakeFiles\ninfer_worker_recovery_test.dir\test_worker_recovery.cpp.obj
+[32/292] Building CXX object tests\CMakeFiles\ninfer_kv_capacity_test.dir\test_kv_capacity.cpp.obj
+[33/292] Building CXX object tests\CMakeFiles\ninfer_device_profile_test.dir\test_device_profile.cpp.obj
+[34/292] Building CXX object tests\CMakeFiles\ninfer_resource_manager_test.dir\test_resource_manager.cpp.obj
+[35/292] Building CXX object tests\CMakeFiles\ninfer_context_cache_defaults_test.dir\test_context_cache_defaults.cpp.obj
+[36/292] Building CXX object tests\CMakeFiles\ninfer_sampling_defaults_test.dir\test_sampling_defaults.cpp.obj
+[37/292] Building CXX object tests\CMakeFiles\ninfer_prefix_cache_index_test.dir\test_prefix_cache_index.cpp.obj
+[38/292] Building CXX object tests\CMakeFiles\ninfer_media_decode_test.dir\test_media_decode.cpp.obj
+[39/292] Building CXX object tests\CMakeFiles\ninfer_engine_logprobs_real_test.dir\test_engine_logprobs_real.cpp.obj
+[40/292] Building CXX object tests\CMakeFiles\ninfer_prompt_input_test.dir\test_prompt_input.cpp.obj
+[41/292] Building CXX object tests\CMakeFiles\ninfer_log_colour_test.dir\test_log_colour.cpp.obj
+[42/292] Building CXX object tests\CMakeFiles\ninfer_perplexity_evaluation_test.dir\test_perplexity_evaluation.cpp.obj
+[43/292] Building CXX object tests\CMakeFiles\ninfer_pretty_logging_test.dir\test_pretty_logging.cpp.obj
+[44/292] Building CXX object tests\CMakeFiles\ninfer_perplexity_evaluation_test.dir\__\apps\perplexity\evaluation.cpp.obj
+[45/292] Building CXX object tests\CMakeFiles\ninfer_cli_options_test.dir\__\apps\cli\options.cpp.obj
+[46/292] Building CXX object tests\CMakeFiles\ninfer_cli_options_test.dir\test_cli_options.cpp.obj
+[47/292] Building CXX object tests\CMakeFiles\ninfer_slot_files_test.dir\test_slot_files.cpp.obj
+[48/292] Building CXX object tests\CMakeFiles\ninfer_openai_responses_test.dir\test_openai_responses.cpp.obj
+[49/292] Building CXX object tests\CMakeFiles\ninfer_openai_schema_test.dir\test_openai_schema.cpp.obj
+[50/292] Building CXX object tests\CMakeFiles\ninfer_openai_responses_store_test.dir\test_openai_responses_store.cpp.obj
+[51/292] Building CXX object tests\CMakeFiles\ninfer_anthropic_schema_test.dir\test_anthropic_schema.cpp.obj
+[52/292] Building CXX object tests\CMakeFiles\ninfer_mcp_proxy_test.dir\test_mcp_proxy.cpp.obj
+[53/292] Building CXX object tests\CMakeFiles\ninfer_model_registry_test.dir\test_model_registry.cpp.obj
+[54/292] Building CXX object tests\CMakeFiles\ninfer_text_completion_test.dir\test_text_completion.cpp.obj
+[55/292] Building CXX object tests\CMakeFiles\ninfer_rerank_test.dir\test_rerank.cpp.obj
+[56/292] Building CXX object tests\CMakeFiles\ninfer_serve_options_test.dir\test_serve_options.cpp.obj
+[57/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w6_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w6_h24_append.cu
+[58/292] Building CXX object tests\CMakeFiles\ninfer_systemone_test.dir\test_systemone.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1461): warning C4244: "=": Konvertierung von "double" in "float", möglicher Datenverlust
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1461): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\test_systemone.cpp(101): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::vector<float,std::allocator<float>>::assign<std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(_Iter,_Iter)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=double,
+            _Iter=std::_Vector_iterator<std::_Vector_val<std::_Simple_types<double>>>
+        ]
+C:\coding\ninfer-q4k-validation\tests\test_systemone.cpp(101): note: Ersten Verweis auf "std::vector<float,std::allocator<float>>::assign" in "`anonymous-namespace'::read" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::vector<float,std::allocator<float>>::_Assign_counted_range<double*>(_Iter,const unsigned __int64)" der Funktions-Vorlage.
+        with
+        [
+            _Iter=double *
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(4813): warning C4244: "=": Konvertierung von "double" in "float", möglicher Datenverlust
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(4813): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::vector<float,std::allocator<float>>::_Assign_counted_range<double*>(_Iter,const unsigned __int64)" der Funktions-Vorlage.
+        with
+        [
+            _Iter=double *
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1475): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_OutIt *std::_Copy_n_unchecked4<double*,unsigned __int64,float*>(_InIt,_SizeTy,_OutIt)" der Funktions-Vorlage.
+        with
+        [
+            _OutIt=float *,
+            _InIt=double *,
+            _SizeTy=unsigned __int64
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "TargetType" in "_Ty", möglicher Datenverlust
+        with
+        [
+            TargetType=double
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1436): note: Siehe Verweis auf die gerade kompilierte Instanziierung "float *std::_Uninitialized_copy_n<double*,std::allocator<float>>(_InIt,size_t,float *,_Alloc &)" der Funktions-Vorlage.
+        with
+        [
+            _InIt=double *,
+            _Alloc=std::allocator<float>
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1938): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Uninitialized_backout_al<std::allocator<float>>::_Emplace_back<double&>(double &)" der Funktions-Vorlage.
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Default_allocator_traits<_Alloc>::construct<_Ty,TargetType&>(_Alloc &,_Objty *const ,TargetType &)" der Funktions-Vorlage.
+        with
+        [
+            _Alloc=std::allocator<float>,
+            _Ty=float,
+            TargetType=double,
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Objty,TargetType&>(_Ty *const ,TargetType &) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Objty=float,
+            TargetType=double
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "TargetType" in "_Objty", möglicher Datenverlust
+        with
+        [
+            TargetType=double
+        ]
+        and
+        [
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Default_allocator_traits<_Alloc>::construct<_Ty,TargetType&>(_Alloc &,_Objty *const ,TargetType &)" der Funktions-Vorlage.
+        with
+        [
+            _Alloc=std::allocator<float>,
+            _Ty=float,
+            TargetType=double,
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Objty,TargetType&>(_Ty *const ,TargetType &) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Objty=float,
+            TargetType=double
+        ]
+[59/292] Building CXX object tests\CMakeFiles\ninfer_branch_memo_test.dir\test_branch_memo.cpp.obj
+[60/292] Building CXX object tests\CMakeFiles\ninfer_serve_metrics_test.dir\test_serve_metrics.cpp.obj
+[61/292] Building CXX object tests\CMakeFiles\ninfer_rope_scaling_test.dir\test_rope_scaling.cpp.obj
+[62/292] Building CXX object tests\CMakeFiles\ninfer_console_stats_test.dir\test_console_stats.cpp.obj
+[63/292] Building CXX object tests\CMakeFiles\ninfer_load_report_test.dir\test_load_report.cpp.obj
+[64/292] Building CXX object tests\CMakeFiles\ninfer_request_log_test.dir\test_request_log.cpp.obj
+[65/292] Building CXX object tests\CMakeFiles\ninfer_stop_control_test.dir\test_stop_control.cpp.obj
+[66/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w6_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w6_h16_append.cu
+[67/292] Building CXX object tests\CMakeFiles\ninfer_http_error_handler_test.dir\test_http_error_handler.cpp.obj
+[68/292] Building CXX object tests\CMakeFiles\ninfer_http_transport_test.dir\test_http_transport.cpp.obj
+[69/292] Building CXX object tests\CMakeFiles\ninfer_http_routes_test.dir\test_http_routes.cpp.obj
+[70/292] Building CXX object tests\CMakeFiles\ninfer_bench_support_test.dir\__\bench\inference\ninfer_bench_support.cpp.obj
+[71/292] Building CXX object tests\CMakeFiles\ninfer_bench_support_test.dir\test_ninfer_bench_support.cpp.obj
+[72/292] Building CXX object tests\CMakeFiles\ninfer_ngram_proposer_test.dir\models\qwen3_5\test_ngram_proposer.cpp.obj
+[73/292] Building CXX object tests\CMakeFiles\ninfer_ngram_archive_test.dir\models\qwen3_5\test_ngram_archive.cpp.obj
+[74/292] Building CXX object tests\CMakeFiles\ninfer_ngram_thinking_real.dir\models\qwen3_5\test_ngram_thinking_real.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): warning C4244: "=": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_thinking_real.cpp(90): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::optional<float> &std::optional<float>::operator =<int,0>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty2=int
+        ]
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_thinking_real.cpp(90): note: Ersten Verweis auf "std::optional<float>::operator =" in "ninfer_bundle_entry_ninfer_ngram_thinking_real" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(168): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty &std::_Optional_construct_base<_Ty>::_Construct<int>(int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(476): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "float", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+[75/292] Building CXX object tests\CMakeFiles\ninfer_ngram_archive_real.dir\models\qwen3_5\test_ngram_archive_real.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): warning C4244: "=": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_archive_real.cpp(133): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::optional<float> &std::optional<float>::operator =<int,0>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty2=int
+        ]
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_archive_real.cpp(133): note: Ersten Verweis auf "std::optional<float>::operator =" in "ninfer_bundle_entry_ninfer_ngram_archive_real" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(168): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty &std::_Optional_construct_base<_Ty>::_Construct<int>(int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(476): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "float", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+[76/292] Building CXX object tests\CMakeFiles\ninfer_ngram_graph_planning_test.dir\models\qwen3_5\test_ngram_graph_planning.cpp.obj
+[77/292] Building CXX object tests\CMakeFiles\ninfer_ngram_lifecycle_real.dir\models\qwen3_5\test_ngram_lifecycle_real.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): warning C4244: "=": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_lifecycle_real.cpp(36): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::optional<float> &std::optional<float>::operator =<int,0>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty2=int
+        ]
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_lifecycle_real.cpp(36): note: Ersten Verweis auf "std::optional<float>::operator =" in "`anonymous-namespace'::request" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(168): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty &std::_Optional_construct_base<_Ty>::_Construct<int>(int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(476): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "float", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+[78/292] Building CXX object tests\CMakeFiles\ninfer_shared_slot_release_test.dir\models\qwen3_5\test_shared_slot_release.cpp.obj
+[79/292] Building CXX object tests\CMakeFiles\ninfer_qwen_native_expert_layout_test.dir\models\qwen3_5\test_expert_layout.cpp.obj
+[80/292] Building CXX object tests\CMakeFiles\ninfer_ngram_stop_chat_real.dir\models\qwen3_5\test_ngram_stop_chat_real.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): warning C4244: "=": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_stop_chat_real.cpp(27): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::optional<float> &std::optional<float>::operator =<int,0>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty2=int
+        ]
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_ngram_stop_chat_real.cpp(27): note: Ersten Verweis auf "std::optional<float>::operator =" in "`anonymous-namespace'::request" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(168): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty &std::_Optional_construct_base<_Ty>::_Construct<int>(int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(476): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "float", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+[81/292] Building CXX object tests\CMakeFiles\ninfer_ngram_concurrent_real.dir\models\qwen3_5\test_ngram_concurrent_real.cpp.obj
+[82/292] Building CXX object tests\CMakeFiles\ninfer_qwen_native_streaming_real_test.dir\models\qwen3_5\test_native_streaming_real.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): warning C4244: "=": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(166): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_native_streaming_real.cpp(54): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::optional<float> &std::optional<float>::operator =<int,0>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty2=int
+        ]
+C:\coding\ninfer-q4k-validation\tests\models\qwen3_5\test_native_streaming_real.cpp(54): note: Ersten Verweis auf "std::optional<float>::operator =" in "`anonymous-namespace'::greedy" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(312): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Optional_construct_base<_Ty>::_Assign<int>(_Ty2 &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Ty2=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(168): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty &std::_Optional_construct_base<_Ty>::_Construct<int>(int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(476): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "float", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "_Ty" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=int
+        ]
+        and
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\optional(156): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Construct_in_place<float,_Ty>(float &,_Ty &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(472): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Ty,int>(_Ty *const ,int &&) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float
+        ]
+[83/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_loading_real_test.dir\models\qwen3_5\test_loading_real.cpp.obj
+[84/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_output_test.dir\models\qwen3_5\test_gemma_output.cpp.obj
+[85/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_loading_test.dir\models\qwen3_5\test_loading.cpp.obj
+[86/292] Building CXX object tests\CMakeFiles\ninfer_flint_frontend_test.dir\models\qwen3_5\test_flint_frontend.cpp.obj
+[87/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_frontend_test.dir\models\qwen3_5\test_frontend.cpp.obj
+[88/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_chat_template_prefix_stability_test.dir\models\qwen3_5\test_chat_template_prefix_stability.cpp.obj
+[89/292] Building CXX object tests\CMakeFiles\ninfer_deepseek_frontend_test.dir\models\qwen3_5\test_deepseek_frontend.cpp.obj
+[90/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_chat_template_media_positions_test.dir\models\qwen3_5\test_chat_template_media_positions.cpp.obj
+[91/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_reasoning_loop_test.dir\models\qwen3_5\test_reasoning_loop.cpp.obj
+[92/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_state_image_test.dir\models\qwen3_5\test_state_image.cpp.obj
+[93/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_graft_loader_test.dir\models\qwen3_5\test_graft_loader.cpp.obj
+[94/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_state_image_layout_test.dir\models\qwen3_5\test_state_image_layout.cpp.obj
+[95/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_runtime_mechanisms_test.dir\models\qwen3_5\test_runtime_mechanisms.cpp.obj
+[96/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_steering_loader_test.dir\models\qwen3_5\test_steering_loader.cpp.obj
+[97/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_context_store_test.dir\models\qwen3_5\test_context_store.cpp.obj
+[98/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_hybrid_prefix_real_test.dir\models\qwen3_5\test_engine_hybrid_prefix_real.cpp.obj
+[99/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_score_real_test.dir\models\qwen3_5\test_engine_score_real.cpp.obj
+[100/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_prefix_real_test.dir\models\qwen3_5\test_engine_prefix_real.cpp.obj
+[101/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_dflash_prefill_real_test.dir\models\qwen3_5\test_dflash_prefill_real.cpp.obj
+[102/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_vision_cpu_real_test.dir\models\qwen3_5\test_vision_cpu_real.cpp.obj
+[103/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_vision_overlay_real_test.dir\models\qwen3_5\test_vision_overlay_real.cpp.obj
+[104/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_vision_cpu_test.dir\models\qwen3_5\test_vision_cpu.cpp.obj
+[105/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_moe_real_test.dir\models\qwen3_5\test_engine_moe_real.cpp.obj
+[106/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_dflash2_real_test.dir\models\qwen3_5\test_engine_dflash2_real.cpp.obj
+[107/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_vision_workspace_test.dir\models\qwen3_5\test_vision_workspace.cpp.obj
+[108/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_stages_real_test.dir\models\qwen3_5\test_engine_stages_real.cpp.obj
+[109/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_suspend_real_test.dir\models\qwen3_5\test_engine_suspend_real.cpp.obj
+[110/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_dflash_real_test.dir\models\qwen3_5\test_engine_dflash_real.cpp.obj
+[111/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_visual_scatter_test.dir\models\qwen3_5\test_visual_scatter.cpp.obj
+[112/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_mtp_graph_profiles_test.dir\models\qwen3_5\test_mtp_graph_profiles.cpp.obj
+[113/292] Building CXX object tests\CMakeFiles\ninfer_tool_call_parser_test.dir\test_tool_call_parser.cpp.obj
+[114/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_text_qk_norm_rope_test.dir\models\qwen3_5\test_text_qk_norm_rope.cpp.obj
+[115/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_lookup_draft_test.dir\models\qwen3_5\test_lookup_draft.cpp.obj
+[116/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_mtp_adaptive_test.dir\models\qwen3_5\test_mtp_adaptive.cpp.obj
+[117/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_mlp_a8_decode_test.dir\models\qwen3_5\test_mlp_a8_decode_wiring.cpp.obj
+[118/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_ngram_hash_test.dir\models\qwen4_exp\test_ngram_hash.cpp.obj
+[119/292] Building CXX object tests\CMakeFiles\ninfer_qwen3_5_structured_round_test.dir\models\qwen3_5\test_structured_round.cpp.obj
+[120/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_ngram_table_test.dir\models\qwen4_exp\test_ngram_table.cpp.obj
+[121/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_config_test.dir\models\qwen4_exp\test_config.cpp.obj
+[122/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_ngram_component_test.dir\models\qwen4_exp\test_ngram_component.cpp.obj
+[123/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_slice_real.dir\models\qwen4_exp\test_slice_real.cpp.obj
+[124/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_long_context_real.dir\models\qwen4_exp\test_long_context_real.cpp.obj
+[125/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_engine_real.dir\models\qwen4_exp\test_engine_real.cpp.obj
+[126/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_generate_real.dir\models\qwen4_exp\test_generate_real.cpp.obj
+[127/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_expert_cache_test.dir\models\qwen4_exp\test_expert_cache.cpp.obj
+[128/292] Building CXX object tests\CMakeFiles\ninfer_expert_profile_test.dir\models\test_expert_profile.cpp.obj
+[129/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_ngram_draft_prefetch_test.dir\models\qwen4_exp\test_ngram_draft_prefetch.cpp.obj
+[130/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_hybrid_experts_test.dir\models\qwen4_exp\test_hybrid_experts.cpp.obj
+[131/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_kernels_test.dir\models\gemma4\test_kernels.cpp.obj
+[132/292] Building CUDA object tests\CMakeFiles\ninfer_divided_head_test.dir\models\test_divided_head.cu.obj
+test_divided_head.cu
+[133/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_vision_kernels_test.dir\models\gemma4\test_vision_kernels.cpp.obj
+[134/292] Building CXX object tests\CMakeFiles\ninfer_qwen4_exp_expert_stream_test.dir\models\qwen4_exp\test_expert_stream.cpp.obj
+[135/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_vision_cpu_kernels_test.dir\models\gemma4\test_vision_cpu_kernels.cpp.obj
+[136/292] Building CUDA object tests\CMakeFiles\ninfer_qwen4_exp_expert_misses_test.dir\models\qwen4_exp\test_expert_misses.cu.obj
+test_expert_misses.cu
+[137/292] Building CXX object tests\CMakeFiles\ninfer_flint_kernels_test.dir\models\flint\test_kernels.cpp.obj
+[138/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_kv_test.dir\models\gemma4\test_kv.cpp.obj
+[139/292] Building CXX object tests\CMakeFiles\ninfer_gemma4_vision_real_test.dir\models\gemma4\test_vision_real.cpp.obj
+[140/292] Building CXX object tests\CMakeFiles\ninfer_deepseek_v41_vision_kernels_test.dir\models\deepseek_v41\test_vision_kernels.cpp.obj
+[141/292] Building CXX object tests\CMakeFiles\ninfer_add_bias_test.dir\ops\test_add_bias.cpp.obj
+[142/292] Building CXX object tests\CMakeFiles\ninfer_gelu_test.dir\ops\test_gelu.cpp.obj
+[143/292] Building CXX object tests\CMakeFiles\ninfer_silu_mul_test.dir\ops\test_silu_mul.cpp.obj
+[144/292] Building CXX object tests\CMakeFiles\ninfer_hadamard_transform_test.dir\ops\test_hadamard_transform.cpp.obj
+[145/292] Building CXX object tests\CMakeFiles\ninfer_residual_add_test.dir\ops\test_residual_add.cpp.obj
+[146/292] Building CXX object tests\CMakeFiles\ninfer_deepseek_v41_vision_real_test.dir\models\deepseek_v41\test_vision_real.cpp.obj
+[147/292] Building CXX object tests\CMakeFiles\ninfer_deepseek_v41_kernels_test.dir\models\deepseek_v41\test_kernels.cpp.obj
+[148/292] Building CXX object tests\CMakeFiles\ninfer_steer_residual_test.dir\ops\test_steer_residual.cpp.obj
+[149/292] Building CXX object tests\CMakeFiles\ninfer_sigmoid_mul_test.dir\ops\test_sigmoid_mul.cpp.obj
+[150/292] Building CXX object tests\CMakeFiles\ninfer_ngram_rows_test.dir\ops\test_ngram_rows.cpp.obj
+[151/292] Building CXX object tests\CMakeFiles\ninfer_ple_inject_test.dir\ops\test_ple_inject.cpp.obj
+[152/292] Building CXX object tests\CMakeFiles\ninfer_hyper_connection_test.dir\ops\test_hyper_connection.cpp.obj
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: "Initialisierung": Konvertierung von "double" in "_Ty", möglicher Datenverlust
+        with
+        [
+            _Ty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\coding\ninfer-q4k-validation\tests\ops\test_hyper_connection.cpp(365): note: Siehe Verweis auf die gerade kompilierte Instanziierung "std::vector<float,std::allocator<float>>::vector<std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(_Iter,_Iter,const _Alloc &)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=double,
+            _Iter=std::_Vector_iterator<std::_Vector_val<std::_Simple_types<double>>>,
+            _Alloc=std::allocator<float>
+        ]
+C:\coding\ninfer-q4k-validation\tests\ops\test_hyper_connection.cpp(365): note: Ersten Verweis auf "std::vector<float,std::allocator<float>>::vector" in "`anonymous-namespace'::run_expand" anzeigen
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(700): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::vector<float,std::allocator<float>>::_Construct_n<double*,double*>(const unsigned __int64,double *&&,double *&&)" der Funktions-Vorlage.
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(2120): note: Siehe Verweis auf die gerade kompilierte Instanziierung "float *std::_Uninitialized_copy<_Ty,_Ty,std::allocator<float>>(_InIt,_Se,float *,_Alloc &)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=double *,
+            _InIt=double *,
+            _Se=double *,
+            _Alloc=std::allocator<float>
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1902): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Uninitialized_backout_al<std::allocator<float>>::_Emplace_back<double&>(double &)" der Funktions-Vorlage.
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Default_allocator_traits<_Alloc>::construct<_Ty,double&>(_Alloc &,_Objty *const ,double &)" der Funktions-Vorlage.
+        with
+        [
+            _Alloc=std::allocator<float>,
+            _Ty=float,
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Objty,double&>(_Ty *const ,double &) noexcept(<expr>)" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: "Initialisierung": Konvertierung von "double" in "_Objty", möglicher Datenverlust
+        with
+        [
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: der Vorlageninstanziierungskontext (der älteste zuerst) ist
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: Siehe Verweis auf die gerade kompilierte Instanziierung "void std::_Default_allocator_traits<_Alloc>::construct<_Ty,double&>(_Alloc &,_Objty *const ,double &)" der Funktions-Vorlage.
+        with
+        [
+            _Alloc=std::allocator<float>,
+            _Ty=float,
+            _Objty=float
+        ]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: Siehe Verweis auf die gerade kompilierte Instanziierung "_Ty *std::construct_at<_Objty,double&>(_Ty *const ,double &) noexcept" der Funktions-Vorlage.
+        with
+        [
+            _Ty=float,
+            _Objty=float
+        ]
+[153/292] Building CXX object tests\CMakeFiles\ninfer_qsa_indexer_test.dir\ops\test_qsa_indexer.cpp.obj
+[154/292] Building CXX object tests\CMakeFiles\ninfer_kv_stream_test.dir\ops\test_kv_stream.cpp.obj
+[155/292] Building CXX object tests\CMakeFiles\ninfer_moe_route_test.dir\ops\test_moe_route.cpp.obj
+[156/292] Building CXX object tests\CMakeFiles\ninfer_sparse_attention_test.dir\ops\test_sparse_attention.cpp.obj
+[157/292] Building CXX object tests\CMakeFiles\ninfer_moe_experts_test.dir\ops\test_moe_experts.cpp.obj
+[158/292] Building CXX object tests\CMakeFiles\ninfer_rmsnorm_test.dir\ops\test_rmsnorm.cpp.obj
+[159/292] Building CXX object tests\CMakeFiles\ninfer_moe_experts_native_test.dir\ops\test_moe_experts_native.cpp.obj
+[160/292] Building CXX object tests\CMakeFiles\ninfer_rmsnorm_pack_tail_test.dir\ops\test_rmsnorm_pack_tail.cpp.obj
+[161/292] Building CXX object tests\CMakeFiles\ninfer_moe_experts_gguf_test.dir\ops\test_moe_experts_gguf.cpp.obj
+[162/292] Building CXX object tests\CMakeFiles\ninfer_gated_rmsnorm_test.dir\ops\test_gated_rmsnorm.cpp.obj
+[163/292] Building CXX object tests\CMakeFiles\ninfer_l2norm_test.dir\ops\test_l2norm.cpp.obj
+[164/292] Building CXX object tests\CMakeFiles\ninfer_layer_norm_test.dir\ops\test_layer_norm.cpp.obj
+[165/292] Building CXX object tests\CMakeFiles\ninfer_gated_delta_net_test.dir\ops\test_gated_delta_net.cpp.obj
+[166/292] Building CXX object tests\CMakeFiles\ninfer_causal_conv1d_silu_test.dir\ops\test_causal_conv1d_silu.cpp.obj
+[167/292] Building CXX object tests\CMakeFiles\ninfer_gated_delta_net_two_stage_test.dir\ops\test_gated_delta_net_two_stage.cpp.obj
+[168/292] Building CXX object tests\CMakeFiles\ninfer_argmax_test.dir\ops\test_argmax.cpp.obj
+[169/292] Building CXX object tests\CMakeFiles\ninfer_gdn_gating_test.dir\ops\test_gdn_gating.cpp.obj
+[170/292] Building CXX object tests\CMakeFiles\ninfer_embedding_test.dir\ops\test_embedding.cpp.obj
+[171/292] Building CXX object tests\CMakeFiles\ninfer_gdn_gating_proj_test.dir\ops\test_gdn_gating_proj.cpp.obj
+[172/292] Building CXX object tests\CMakeFiles\ninfer_rope_test.dir\ops\test_rope.cpp.obj
+[173/292] Building CXX object tests\CMakeFiles\ninfer_vision_pos_embed_test.dir\ops\test_vision_pos_embed.cpp.obj
+[174/292] Building CXX object tests\CMakeFiles\ninfer_sampling_test.dir\ops\test_sampling.cpp.obj
+[175/292] Building CXX object tests\CMakeFiles\ninfer_scalar_test.dir\ops\test_scalar.cpp.obj
+[176/292] Building CXX object tests\CMakeFiles\ninfer_cast_test.dir\ops\test_cast.cpp.obj
+[177/292] Building CXX object tests\CMakeFiles\ninfer_scatter_test.dir\ops\test_scatter.cpp.obj
+[178/292] Building CXX object tests\CMakeFiles\ninfer_prepare_ragged_prefix_test.dir\ops\test_prepare_ragged_prefix.cpp.obj
+[179/292] Building CXX object tests\CMakeFiles\ninfer_target_logprobs_test.dir\ops\test_target_logprobs.cpp.obj
+[180/292] Building CXX object tests\CMakeFiles\ninfer_scatter_bf16_batch_test.dir\ops\test_scatter_bf16_batch.cpp.obj
+[181/292] Building CXX object tests\CMakeFiles\ninfer_readout_logprobs_test.dir\ops\test_readout_logprobs.cpp.obj
+[182/292] Building CXX object tests\CMakeFiles\ninfer_paged_kv_window_test.dir\ops\test_paged_kv_window.cpp.obj
+[183/292] Building CXX object tests\CMakeFiles\ninfer_logprob_topk_test.dir\ops\test_logprob_topk.cpp.obj
+[184/292] Building CXX object tests\CMakeFiles\ninfer_position_test.dir\ops\test_position.cpp.obj
+[185/292] Building CXX object tests\CMakeFiles\ninfer_gguf_flash_attention_test.dir\ops\test_gguf_flash_attention.cpp.obj
+[186/292] Building CXX object tests\CMakeFiles\ninfer_softmax_attention_test.dir\ops\softmax_attention\main.cpp.obj
+[187/292] Building CXX object tests\CMakeFiles\ninfer_dflash2_ops_test.dir\ops\test_dflash2_ops.cpp.obj
+[188/292] Building CXX object tests\CMakeFiles\ninfer_candidate_selector_test.dir\ops\test_candidate_selector.cpp.obj
+[189/292] Building CXX object tests\CMakeFiles\ninfer_softmax_attention_test.dir\ops\softmax_attention\plain_and_packed.cpp.obj
+[190/292] Building CXX object tests\CMakeFiles\ninfer_softmax_attention_test.dir\ops\softmax_attention\context.cpp.obj
+[191/292] Building CUDA object tests\CMakeFiles\ninfer_linear_topk_test.dir\ops\test_linear_topk.cu.obj
+test_linear_topk.cu
+[192/292] Building CXX object tests\CMakeFiles\ninfer_sliding_window_attention_test.dir\ops\test_sliding_window_attention.cpp.obj
+[193/292] Building CXX object tests\CMakeFiles\ninfer_softmax_attention_test.dir\ops\softmax_attention\causal_cache.cpp.obj
+[194/292] Building CXX object tests\CMakeFiles\ninfer_kv_plane_types_test.dir\ops\test_kv_plane_types.cpp.obj
+[195/292] Building CXX object tests\CMakeFiles\ninfer_kv_cache_append_test.dir\ops\test_kv_cache_append.cpp.obj
+[196/292] Building CXX object tests\CMakeFiles\ninfer_rmsnorm_rope_test.dir\ops\test_rmsnorm_rope.cpp.obj
+[197/292] Building CXX object tests\CMakeFiles\ninfer_prepare_masked_block_test.dir\ops\test_prepare_masked_block.cpp.obj
+[198/292] Building CXX object tests\CMakeFiles\ninfer_sparse_moe_candidates_test.dir\test_sparse_moe_candidates.cpp.obj
+[199/292] Building CXX object tests\CMakeFiles\ninfer_context_kv_materialize_test.dir\ops\test_context_kv_materialize.cpp.obj
+[200/292] Building CUDA object tests\CMakeFiles\ninfer_sparse_moe_route_network_test.dir\ops\test_sparse_moe_route_network.cu.obj
+test_sparse_moe_route_network.cu
+[201/292] Building CXX object tests\CMakeFiles\ninfer_sparse_moe_test.dir\ops\test_sparse_moe.cpp.obj
+[202/292] Building CXX object tests\CMakeFiles\ninfer_mtp_pack_test.dir\ops\test_mtp_pack.cpp.obj
+[203/292] Building CUDA object tests\CMakeFiles\ninfer_fixed_point_test.dir\ops\test_fixed_point.cu.obj
+test_fixed_point.cu
+[204/292] Building CUDA object tests\CMakeFiles\ninfer_e8_root_decode_test.dir\ops\test_e8_root_decode.cu.obj
+test_e8_root_decode.cu
+[205/292] Building CXX object tests\CMakeFiles\ninfer_mtp_round_test.dir\ops\test_mtp_round.cpp.obj
+[206/292] Building CXX object tests\CMakeFiles\ninfer_speculative_round_test.dir\ops\test_speculative_round.cpp.obj
+[207/292] Building CXX object tests\CMakeFiles\ninfer_attn_input_proj_test.dir\ops\test_attn_input_proj.cpp.obj
+[208/292] Building CXX object tests\CMakeFiles\ninfer_attn_input_proj_fused_rmsnorm_test.dir\ops\test_attn_input_proj_fused_rmsnorm.cpp.obj
+[209/292] Building CUDA object tests\CMakeFiles\ninfer_mma_fragments_test.dir\ops\test_mma_fragments.cu.obj
+test_mma_fragments.cu
+[210/292] Building CXX object tests\CMakeFiles\ninfer_gdn_input_small_t_test.dir\ops\test_gdn_input_small_t.cpp.obj
+[211/292] Building CXX object tests\CMakeFiles\ninfer_nvfp4_int8_real_test.dir\ops\test_nvfp4_int8_real.cpp.obj
+[212/292] Building CXX object tests\CMakeFiles\ninfer_gdn_input_proj_test.dir\ops\test_gdn_input_proj.cpp.obj
+[213/292] Building CXX object tests\CMakeFiles\ninfer_gdn_input_proj_parts_test.dir\ops\test_gdn_input_proj_parts.cpp.obj
+[214/292] Building CXX object tests\CMakeFiles\ninfer_attn_input_small_t_test.dir\ops\test_attn_input_small_t.cpp.obj
+[215/292] Building CXX object tests\CMakeFiles\ninfer_dynamic_grouped_conv_prepare_test.dir\ops\test_dynamic_grouped_conv_prepare.cpp.obj
+[216/292] Building CXX object tests\CMakeFiles\ninfer_linear_dynamic_grouped_conv_add_test.dir\ops\test_linear_dynamic_grouped_conv_add.cpp.obj
+[217/292] Building CXX object tests\CMakeFiles\ninfer_gdn_input_proj_conv_snapshot_test.dir\ops\test_gdn_input_proj_conv_snapshot.cpp.obj
+[218/292] Building CXX object tests\CMakeFiles\ninfer_gdn_projected_conv_test.dir\ops\test_gdn_projected_conv.cpp.obj
+[219/292] Building CXX object tests\CMakeFiles\ninfer_gated_delta_net_replay_record_test.dir\ops\test_gated_delta_net_replay_record.cpp.obj
+[220/292] Building CXX object tests\CMakeFiles\ninfer_gdn_input_proj_conv_record_test.dir\ops\test_gdn_input_proj_conv_record.cpp.obj
+[221/292] Building CXX object tests\CMakeFiles\ninfer_gdn_state_fp16_test.dir\ops\test_gdn_state_fp16.cpp.obj
+[222/292] Building CXX object tests\CMakeFiles\ninfer_vocabulary_transcode_test.dir\ops\test_vocabulary_transcode.cpp.obj
+[223/292] Building CXX object tests\CMakeFiles\ninfer_linear_q4_a16_test.dir\ops\linear\test_q4_a16.cpp.obj
+[224/292] Building CXX object tests\CMakeFiles\ninfer_gdn_replay_fold_test.dir\ops\test_gdn_replay_fold.cpp.obj
+[225/292] Building CXX object tests\CMakeFiles\ninfer_route_coverage_test.dir\ops\test_route_coverage.cpp.obj
+[226/292] Building CXX object tests\CMakeFiles\ninfer_linear_q5_a16_test.dir\ops\linear\test_q5_a16.cpp.obj
+[227/292] Building CXX object tests\CMakeFiles\ninfer_linear_q6_a16_test.dir\ops\linear\test_q6_a16.cpp.obj
+[228/292] Building CXX object tests\CMakeFiles\ninfer_linear_q8_a16_test.dir\ops\linear\test_q8_a16.cpp.obj
+[229/292] Building CXX object tests\CMakeFiles\ninfer_linear_rowsplit_runtime_shape_test.dir\ops\linear\test_rowsplit_runtime_shape.cpp.obj
+[230/292] Building CXX object tests\CMakeFiles\ninfer_linear_t2_a16_test.dir\ops\linear\test_t2_a16.cpp.obj
+[231/292] Building CXX object tests\CMakeFiles\ninfer_linear_t2_a8_test.dir\ops\linear\test_t2_a8.cpp.obj
+[232/292] Building CXX object tests\CMakeFiles\ninfer_linear_nvfp4_a16_test.dir\ops\linear\test_nvfp4_a16.cpp.obj
+[233/292] Building CXX object tests\CMakeFiles\ninfer_linear_capture_first_use_test.dir\ops\linear\test_capture_first_use.cpp.obj
+[234/292] Building CXX object tests\CMakeFiles\ninfer_linear_nvfp4_a4_test.dir\ops\linear\test_nvfp4_a4.cpp.obj
+[235/292] Building CXX object tests\CMakeFiles\ninfer_linear_nvfp4_int8_test.dir\ops\linear\test_nvfp4_int8.cpp.obj
+[236/292] Building CXX object tests\CMakeFiles\ninfer_linear_nvfp4_int8_fused_norm_test.dir\ops\linear\test_nvfp4_int8_fused_norm.cpp.obj
+[237/292] Building CXX object tests\CMakeFiles\ninfer_nvfp4_tma_staging_race_test.dir\ops\linear\test_nvfp4_tma_staging_race.cpp.obj
+[238/292] Building CXX object tests\CMakeFiles\ninfer_tma_shared_card_test.dir\ops\linear\test_tma_shared_card.cpp.obj
+[239/292] Building CXX object tests\CMakeFiles\ninfer_linear_fp8_a16_test.dir\ops\linear\test_fp8_a16.cpp.obj
+[240/292] Building CXX object tests\CMakeFiles\ninfer_linear_fp8_a8_test.dir\ops\linear\test_fp8_a8.cpp.obj
+[241/292] Building CXX object tests\CMakeFiles\ninfer_linear_bf16_a16_test.dir\ops\linear\test_bf16_a16.cpp.obj
+[242/292] Building CXX object tests\CMakeFiles\ninfer_linear_gguf_test.dir\ops\linear\test_gguf.cpp.obj
+[243/292] Building CXX object tests\CMakeFiles\ninfer_linear_gguf_moe_iq1m_test.dir\ops\linear\test_gguf_moe_iq1m.cpp.obj
+[244/292] Building CXX object tests\CMakeFiles\ninfer_linear_gguf_mmq_limits_test.dir\ops\linear\test_gguf_mmq_limits.cpp.obj
+[245/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_q4_a16_test.dir\ops\linear_add\test_q4_a16.cpp.obj
+[246/292] Building CXX object tests\CMakeFiles\ninfer_linear_stq_test.dir\ops\linear\test_stq.cpp.obj
+[247/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_q5_a16_test.dir\ops\linear_add\test_q5_a16.cpp.obj
+[248/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_bf16_a16_test.dir\ops\linear_add\test_bf16_a16.cpp.obj
+[249/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_q5_small_t_test.dir\ops\linear_add\test_q5_small_t.cpp.obj
+[250/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_q8_a16_test.dir\ops\linear_add\test_q8_a16.cpp.obj
+[251/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_nvfp4_test.dir\ops\linear_add\test_nvfp4.cpp.obj
+[252/292] Building CXX object tests\CMakeFiles\ninfer_linear_pair_q8_a16_test.dir\ops\linear_pair\test_q8_a16.cpp.obj
+[253/292] Building CXX object tests\CMakeFiles\ninfer_linear_add_fp8_test.dir\ops\linear_add\test_fp8.cpp.obj
+[254/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_q4_a16_test.dir\ops\linear_swiglu\test_q4_a16.cpp.obj
+[255/292] Building CXX object tests\CMakeFiles\ninfer_linear_pair_q8_a16_test.dir\ops\linear_pair\linear_pair_test_common.cpp.obj
+[256/292] Building CUDA object tests\CMakeFiles\ninfer_linear_gguf_mmq_store_test.dir\ops\linear\test_gguf_mmq_store.cu.obj
+test_gguf_mmq_store.cu
+[257/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_q8_a16_test.dir\ops\linear_swiglu\test_q8_a16.cpp.obj
+[258/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_nvfp4_test.dir\ops\linear_swiglu\test_nvfp4.cpp.obj
+[259/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_pair_rowsplit_test.dir\ops\linear_swiglu\test_pair_rowsplit.cpp.obj
+[260/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_fp8_test.dir\ops\linear_swiglu\test_fp8.cpp.obj
+[261/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_q4_a8int_test.dir\ops\linear_swiglu\test_q4_a8int.cpp.obj
+[262/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_t2_a8int_test.dir\ops\linear_swiglu\test_t2_a8int.cpp.obj
+[263/292] Building CXX object tests\CMakeFiles\ninfer_linear_swiglu_q4a8_int_test.dir\ops\linear_swiglu\test_q4a8_int.cpp.obj
+[264/292] Building CXX object tests\CMakeFiles\ninfer_moe_expert_cpu_test.dir\ops\test_moe_expert_cpu.cpp.obj
+[265/292] Building CXX object tests\CMakeFiles\ninfer_w4_cublas_prefill_test.dir\ops\linear_swiglu\test_w4_cublas_prefill.cpp.obj
+[266/292] Building CXX object tests\CMakeFiles\ninfer_tests.dir\ninfer_tests_dispatch.cpp.obj
+[267/292] Building CXX object tests\CMakeFiles\ninfer_gguf_expert_cpu_test.dir\ops\test_gguf_expert_cpu.cpp.obj
+[268/292] Building CXX object tests\CMakeFiles\ninfer_stream_cpu_test.dir\ops\test_stream_cpu.cpp.obj
+[269/292] Building CXX object bench\CMakeFiles\ninfer_bench.dir\inference\ninfer_bench.cpp.obj
+[270/292] Building CXX object bench\CMakeFiles\q4k_qualification_linear.dir\q4k_qualification_main.cpp.obj
+[271/292] Linking CXX executable tests\ninfer_expert_delivery_test.exe
+[272/292] Building CXX object bench\CMakeFiles\ninfer_bench.dir\inference\ninfer_bench_support.cpp.obj
+[273/292] Building CUDA object bench\CMakeFiles\ninfer_linear_bench.dir\ops\linear_bench.cu.obj
+linear_bench.cu
+[274/292] Building CUDA object tests\CMakeFiles\ninfer_linear_gguf_cooperative_test.dir\ops\linear\test_gguf_cooperative.cu.obj
+test_gguf_cooperative.cu
+[275/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w7_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w7_h24_cached.cu
+[276/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w7_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w7_h24_append.cu
+[277/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w8_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w8_h24_cached.cu
+[278/292] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w8_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w8_h24_append.cu
+[279/292] Linking CXX static library src\ops\ninfer_ops.lib
+[280/292] Linking CXX static library src\calibration\ninfer_calibration.lib
+[281/292] Linking CXX static library src\models\ninfer_model_loading.lib
+[282/292] Linking CXX static library src\runtime\ninfer_runtime_support.lib
+[283/292] Linking CXX static library tests\ninfer_linear_test_support.lib
+[284/292] Linking CXX static library src\models\ninfer_model_runtime.lib
+[285/292] Linking CXX static library tests\ninfer_linear_add_test_support.lib
+[286/292] Linking CXX static library src\runtime\ninfer_engine.lib
+[287/292] Linking CXX static library tests\ninfer_linear_swiglu_test_support.lib
+[288/292] Linking CXX static library src\serve\ninfer_serve.lib
+[289/292] Linking CXX executable apps\ninfer.exe; Staging Windows runtime DLL closure next to ninfer
+[290/292] Linking CXX executable tests\ninfer_tests.exe
+[291/292] Linking CXX executable bench\ninfer_bench.exe; Staging Windows runtime DLL closure next to ninfer_bench
+[292/292] Linking CXX executable bench\q4k_qualification_linear.exe; Staging Windows runtime DLL closure next to q4k_qualification_linear

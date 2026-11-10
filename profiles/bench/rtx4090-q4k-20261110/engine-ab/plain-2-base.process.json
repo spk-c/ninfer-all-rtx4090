@@ -1,0 +1,88 @@
+{
+  "mode": "plain",
+  "pair": 2,
+  "arm": "base",
+  "command": [
+    "C:\\coding\\ninfer-all\\build-rtx4090\\bench\\ninfer_bench.exe",
+    "--weights",
+    "C:\\ninfer-all\\models\\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer",
+    "-p",
+    "512,2048",
+    "-n",
+    "128",
+    "-pg",
+    "512,128;2048,128;8192,128",
+    "-r",
+    "2",
+    "--warmup",
+    "1",
+    "--kv-dtype",
+    "rk4v4",
+    "--max-ctx",
+    "16384",
+    "-o",
+    "json",
+    "--output-file",
+    "C:\\coding\\ninfer-all\\.local\\q4k-validation-20261110\\engine-ab\\plain-2-base.json",
+    "--gdn-state-fp16",
+    "--prefill-chunk",
+    "1024",
+    "--corpus",
+    "C:/coding/ninfer-q4k-validation/bench/fixtures/bench_corpus.ids"
+  ],
+  "start_unix_seconds": 1794275738.9350839,
+  "elapsed_seconds": 37.13744020462036,
+  "gpu_samples": 131,
+  "gpu_clock_mhz_median": 2655.0,
+  "gpu_clock_mhz_range": [
+    2460.0,
+    2670.0
+  ],
+  "temperature_c_median": 67.21,
+  "temperature_c_range": [
+    54.9,
+    76.04
+  ],
+  "power_w_median": 389.37,
+  "power_w_peak": 454.95,
+  "total_vram_mib_peak": 13768.0,
+  "process_dedicated_vram_mib_peak": 12240.2421875,
+  "tests": {
+    "pp512": {
+      "prefill_tok_s_mean": 3637.005691,
+      "decode_output_tok_s_mean": null,
+      "total_seconds_mean": 0.14089215,
+      "ttft_seconds_mean": 0.1408763
+    },
+    "pp2048": {
+      "prefill_tok_s_mean": 3705.824137,
+      "decode_output_tok_s_mean": null,
+      "total_seconds_mean": 0.55279485,
+      "ttft_seconds_mean": 0.55277705
+    },
+    "tg128": {
+      "prefill_tok_s_mean": null,
+      "decode_output_tok_s_mean": 69.60024935,
+      "total_seconds_mean": 1.8569777,
+      "ttft_seconds_mean": 0.0170101
+    },
+    "pp512+tg128": {
+      "prefill_tok_s_mean": 3650.698334,
+      "decode_output_tok_s_mean": 69.49760478,
+      "total_seconds_mean": 1.98273645,
+      "ttft_seconds_mean": 0.14034560000000001
+    },
+    "pp2048+tg128": {
+      "prefill_tok_s_mean": 3744.175684,
+      "decode_output_tok_s_mean": 69.20344291,
+      "total_seconds_mean": 2.3977906,
+      "ttft_seconds_mean": 0.54711525
+    },
+    "pp8192+tg128": {
+      "prefill_tok_s_mean": 3685.36664,
+      "decode_output_tok_s_mean": 68.3114955,
+      "total_seconds_mean": 4.0977632,
+      "ttft_seconds_mean": 2.2230733999999996
+    }
+  }
+}

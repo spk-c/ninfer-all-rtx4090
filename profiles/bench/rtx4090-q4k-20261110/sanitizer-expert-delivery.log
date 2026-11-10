@@ -1,0 +1,9 @@
+========= COMPUTE-SANITIZER
+cache admission suspendable=0 bank reject, zero/auto accept, physical rounding PASS
+cache admission suspendable=1 bank reject, zero/auto accept, physical rounding PASS
+tier policy admissions=6 evictions=2 hits=26 PASS
+slot pools bad=0 PASS
+alignment unaligned entries: layer 1 gate 38, layer 2 up 72 PASS
+ninfer: thread 3044 has waited 120 s for CUDA device 0 (a stream) while no host service answered it: the device stopped finishing work, which CUDA reports as no error. Ending the process; a new one recovers the device.
+========= Target application returned an error
+========= ERROR SUMMARY: 0 errors

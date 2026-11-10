@@ -1,0 +1,210 @@
+[
+  {
+    "name": "mmq-store",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 3221225781,
+    "seconds": 0.015000104904174805
+  },
+  {
+    "name": "dense-oracle",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_test"
+    ],
+    "environment": null,
+    "exit_code": 3221225781,
+    "seconds": 0.00599980354309082
+  },
+  {
+    "name": "expert-delivery",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_expert_delivery_test.exe"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 3.046269655227661
+  },
+  {
+    "name": "sanitizer-memcheck",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "memcheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 4294967295,
+    "seconds": 1.137244701385498
+  },
+  {
+    "name": "sanitizer-racecheck",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "racecheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 4294967295,
+    "seconds": 1.1392970085144043
+  },
+  {
+    "name": "sanitizer-synccheck",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "synccheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 4294967295,
+    "seconds": 1.1284019947052002
+  },
+  {
+    "name": "sanitizer-expert-delivery",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "memcheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_expert_delivery_test.exe"
+    ],
+    "environment": null,
+    "exit_code": 3221226505,
+    "seconds": 121.71913743019104
+  },
+  {
+    "name": "dflash2-real",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_qwen3_5_dflash2_real_test",
+      "5",
+      "1",
+      "1",
+      "1",
+      "int8",
+      "1",
+      "1"
+    ],
+    "environment": {
+      "NINFER_TEST_ARTIFACT": "C:/ninfer-all/models/Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer"
+    },
+    "exit_code": 0,
+    "seconds": 6.85718560218811
+  },
+  {
+    "name": "mmq-store",
+    "attempt": 2,
+    "log": "mmq-store.attempt2.log",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 6.666750431060791
+  },
+  {
+    "name": "dense-oracle",
+    "attempt": 2,
+    "log": "dense-oracle.attempt2.log",
+    "command": [
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_test"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 47.14413237571716
+  },
+  {
+    "name": "sanitizer-memcheck",
+    "attempt": 2,
+    "log": "sanitizer-memcheck.attempt2.log",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "memcheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 14.678454160690308
+  },
+  {
+    "name": "sanitizer-racecheck",
+    "attempt": 2,
+    "exit_code": "interrupted: full racecheck too expensive; targeted run follows",
+    "log": "sanitizer-racecheck.attempt2.log",
+    "seconds": 350.0811450481415
+  },
+  {
+    "name": "sanitizer-synccheck",
+    "attempt": 2,
+    "log": "sanitizer-synccheck.attempt2.log",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "synccheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 9.92889404296875
+  },
+  {
+    "name": "sanitizer-racecheck-smoke",
+    "attempt": 1,
+    "log": "sanitizer-racecheck-smoke.log",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "racecheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_tests.exe",
+      "ninfer_linear_gguf_mmq_store_test"
+    ],
+    "environment": {
+      "NINFER_Q4K_RACECHECK_SMOKE": "1"
+    },
+    "exit_code": 0,
+    "seconds": 153.59578466415405
+  },
+  {
+    "name": "sanitizer-expert-alignment",
+    "attempt": 1,
+    "log": "sanitizer-expert-alignment.log",
+    "command": [
+      "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\compute-sanitizer\\compute-sanitizer.exe",
+      "--tool",
+      "memcheck",
+      "--error-exitcode",
+      "99",
+      "C:\\coding\\ninfer-q4k-validation\\build-validation\\tests\\ninfer_expert_delivery_test.exe",
+      "--alignment-only"
+    ],
+    "environment": null,
+    "exit_code": 0,
+    "seconds": 1.1816692352294922
+  }
+]

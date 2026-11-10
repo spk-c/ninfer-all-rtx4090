@@ -1,0 +1,44 @@
+{
+  "cuda": {
+    "base": {
+      "equal": false,
+      "first_different_token_1_based": 41,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    },
+    "candidate": {
+      "equal": false,
+      "first_different_token_1_based": 41,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    }
+  },
+  "german": {
+    "base": {
+      "equal": false,
+      "first_different_token_1_based": 32,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    },
+    "candidate": {
+      "equal": false,
+      "first_different_token_1_based": 32,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    }
+  },
+  "long": {
+    "base": {
+      "equal": false,
+      "first_different_token_1_based": 8,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    },
+    "candidate": {
+      "equal": false,
+      "first_different_token_1_based": 8,
+      "plain_tokens": 64,
+      "dflash2_tokens": 64
+    }
+  }
+}

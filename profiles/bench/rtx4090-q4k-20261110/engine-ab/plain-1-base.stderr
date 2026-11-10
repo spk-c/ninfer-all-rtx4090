@@ -1,0 +1,8 @@
+[ninfer_bench] loading C:\ninfer-all\models\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer (max_context=16384, kv_cache=rk4v4)
+[engine] device profile nvidia-geforce-rtx-4090-sm89: 65 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27)
+[ninfer_bench] test 1/6 pp512: warmup=1 reps=2
+[ninfer_bench] test 2/6 pp2048: warmup=1 reps=2
+[ninfer_bench] test 3/6 tg128: warmup=1 reps=2
+[ninfer_bench] test 4/6 pp512+tg128: warmup=1 reps=2
+[ninfer_bench] test 5/6 pp2048+tg128: warmup=1 reps=2
+[ninfer_bench] test 6/6 pp8192+tg128: warmup=1 reps=2

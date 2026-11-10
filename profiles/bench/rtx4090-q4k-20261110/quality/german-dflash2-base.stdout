@@ -1,0 +1,1 @@
+We need answer in German. User: "Erkläre den Unterschied zwischen Prefill und Decode in drei kurzen Sätzen." Need three short sentences. Need likely about LLM inference: Prefill processes input prompt in parallel, builds KV cache; Decode generates tokens one by one autoregressively, slower per token due to

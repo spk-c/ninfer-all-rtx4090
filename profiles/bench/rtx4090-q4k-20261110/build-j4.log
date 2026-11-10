@@ -1,0 +1,138 @@
+[0/1] Re-running CMake...
+-- Configuring done (3.0s)
+-- Generating done (0.8s)
+-- Build files have been written to: C:/coding/ninfer-q4k-validation/build-validation
+[1/304] Stamping NINFER build id from git (build-time)
+[2/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w1_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w1_h24_cached.cu
+[3/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w1_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w1_h16_append.cu
+[4/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w1_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w1_h24_append.cu
+[5/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\prompt.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/prompt_i8.cuh(629): warning #177-D: variable "tile_acc" was declared but never referenced
+          unsigned tile_acc[PvF16 ? PVNtPerWarp : 1][2] = {};
+                   ^
+          detected during:
+            instantiation of "void ninfer::ops::causal_attention_prompt_i8_kernel<Geometry,Metadata,PackedValues,Keys,PvF16,PackGqa>(const __nv_bfloat16 *, const int8_t *, const int8_t *, const __half *, const __half *, Metadata, const int32_t *, float, __nv_bfloat16 *, int32_t) [with Geometry=ninfer::ops::CausalD256H24Kv4, Metadata=ninfer::ops::PagedKVDirectMetadata, PackedValues=true, Keys=ninfer::ops::KvKeyCoding::Lloyd4, PvF16=false, PackGqa=true]" at line 231 of C:\coding\ninfer-q4k-validation\src\ops\softmax_attention\dense\causal_cache\prompt.cu
+            instantiation of "void ninfer::ops::detail::<unnamed>::causal_attention_prompt_attention_launch_for<Geometry,CacheView,Metadata>(const ninfer::Tensor &, const ninfer::Tensor &, float, const CacheView &, Metadata, const int32_t *, uint32_t, ninfer::WorkspaceArena &, ninfer::Tensor &, __nv_bool, cudaStream_t) [with Geometry=ninfer::ops::CausalD256H24Kv4, CacheView=ninfer::PagedKVLayerView, Metadata=ninfer::ops::PagedKVDirectMetadata]" at line 335 of C:\coding\ninfer-q4k-validation\src\ops\softmax_attention\dense\causal_cache\prompt.cu
+
+prompt.cu
+[6/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w1_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w1_h16_cached.cu
+[7/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w2_h24_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w2_h24_cached.cu
+[8/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w2_h24_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w2_h24_append.cu
+[9/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w2_h16_append.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w2_h16_append.cu
+[10/302] Building CUDA object src\ops\CMakeFiles\ninfer_ops.dir\softmax_attention\dense\causal_cache\small_t_i8_w2_h16_cached.cu.obj
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:/coding/ninfer-q4k-validation/src\ops/softmax_attention/dense/causal_cache/geometry.cuh(64): warning #445-D: template parameter "Geometry" is not used in declaring the parameter types of function template "lambda []()->auto::operator auto (*)()"
+                                        []<typename Geometry>() { return Geometry::ModelQHeads; });
+                                                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+small_t_i8_w2_h16_cached.cu

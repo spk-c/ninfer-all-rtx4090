@@ -1,0 +1,19 @@
+{
+  "base": "C:\\coding\\ninfer-all\\build-rtx4090\\bench\\ninfer_bench.exe",
+  "candidate": "C:\\coding\\ninfer-q4k-validation\\build-validation\\bench\\ninfer_bench.exe",
+  "weights": "C:\\ninfer-all\\models\\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer",
+  "pairs": 3,
+  "order": "AB/BA per pair, reversed again for DFlash2",
+  "cases": [
+    "pp512",
+    "pp2048",
+    "tg128",
+    "pp512+tg128",
+    "pp2048+tg128",
+    "pp8192+tg128"
+  ],
+  "modes": [
+    "plain",
+    "dflash2"
+  ]
+}

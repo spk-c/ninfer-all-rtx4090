@@ -1,0 +1,96 @@
+OK   gguf q8_0 K=1536
+OK   gguf q8_0 K=2560
+OK   gguf q8_0 K=2816
+OK   gguf q8_0 K=2112
+OK   gguf q8_0 K=704
+OK   gguf q2_k K=1536
+OK   gguf q2_k K=2560
+OK   gguf q2_k K=2816
+OK   gguf q3_k K=1536
+OK   gguf q3_k K=2560
+OK   gguf q3_k K=2816
+OK   gguf q4_k K=1536 scalar
+OK   gguf q4_k K=2560 scalar
+OK   gguf q4_k K=2816 scalar
+OK   gguf q4_k K=1536 cooperative
+OK   gguf q4_k K=2560 cooperative
+OK   gguf q4_k K=2816 cooperative
+OK   gguf q5_k K=1536
+OK   gguf q5_k K=2560
+OK   gguf q5_k K=2816
+OK   gguf q6_k K=1536 scalar
+OK   gguf q6_k K=2560 scalar
+OK   gguf q6_k K=2816 scalar
+OK   gguf q6_k K=1536 cooperative
+OK   gguf q6_k K=2560 cooperative
+OK   gguf q6_k K=2816 cooperative
+OK   gguf iq2_xxs K=1536
+OK   gguf iq2_xxs K=2560
+OK   gguf iq2_xxs K=2816
+OK   gguf iq2_xs K=1536
+OK   gguf iq2_xs K=2560
+OK   gguf iq2_xs K=2816
+OK   gguf iq2_s K=1536
+OK   gguf iq2_s K=2560
+OK   gguf iq2_s K=2816
+OK   gguf iq3_xxs K=1536
+OK   gguf iq3_xxs K=2560
+OK   gguf iq3_xxs K=2816
+OK   gguf iq3_s K=1536
+OK   gguf iq3_s K=2560
+OK   gguf iq3_s K=2816
+OK   gguf iq3_s N=6144 K=5120 T=1,6
+OK   gguf iq3_s N=257 K=5120 T=5,6,7
+OK   gguf iq3_s N=10240 K=5120 T=6
+OK   gguf iq3_s N=5120 K=17408 T=5,6,7
+OK   gguf iq3_s N=5119 K=5120 T=6
+OK   gguf iq3_s N=5120 K=5120 T=6
+OK   gguf iq3_s N=5121 K=5120 T=6
+OK   gguf iq1_s K=1536
+OK   gguf iq1_s K=2560
+OK   gguf iq1_s K=2816
+OK   gguf iq1_m K=1536
+OK   gguf iq1_m K=2560
+OK   gguf iq1_m K=2816
+OK   gguf iq4_nl K=1536
+OK   gguf iq4_nl K=2560
+OK   gguf iq4_nl K=2816
+OK   gguf iq4_nl K=2112
+OK   gguf iq4_nl K=704
+OK   gguf iq4_xs K=1536
+OK   gguf iq4_xs K=2560
+OK   gguf iq4_xs K=2816
+OK   gguf iq4_xs N=255 K=5120 T=5,6,7
+OK   gguf iq4_xs N=256 K=5120 T=5,6,7
+OK   gguf iq4_xs N=257 K=5120 T=5,6,7
+OK   gguf iq4_xs N=5120 K=5120 T=5,6,7
+OK   gguf q4_0 K=1536
+OK   gguf q4_0 K=2560
+OK   gguf q4_0 K=2816
+OK   gguf q4_0 K=2112
+OK   gguf q4_0 K=704
+OK   gguf q5_0 K=1536
+OK   gguf q5_0 K=2560
+OK   gguf q5_0 K=2816
+OK   gguf q5_0 K=2112
+OK   gguf q5_0 K=704
+OK   gguf q2_0 K=1536
+OK   gguf q2_0 K=2560
+OK   gguf q2_0 K=2816
+OK   gguf q2_0 K=2112
+OK   gguf q2_0 K=704
+OK   gguf mxfp4 K=1536
+OK   gguf mxfp4 K=2560
+OK   gguf mxfp4 K=2816
+OK   gguf mxfp4 K=2112
+OK   gguf mxfp4 K=704
+OK   gguf q4_k K=2560 matrix compiled
+OK   gguf q4_k K=5120 matrix compiled
+OK   gguf q4_k K=2560 matrix async
+OK   gguf q4_k K=5120 matrix async
+OK   gguf q8_0 embedding from mapped host memory
+OK   gguf q4_k embedding from mapped host memory
+OK   gguf q6_k embedding from mapped host memory
+OK   gguf iq2_s embedding from mapped host memory
+OK   gguf iq3_s embedding from mapped host memory
+OK GGUF Linear
