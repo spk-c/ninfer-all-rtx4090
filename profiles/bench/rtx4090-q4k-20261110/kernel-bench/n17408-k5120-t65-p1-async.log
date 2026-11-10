@@ -1,0 +1,6 @@
+# execution=eager graph_calls=1 out=bf16 cuda_runtime=13040
+# actual_gpu=NVIDIA GeForce RTX 4090 sm=89 reference_gpu=device-derived
+# dram_spec_gbs=1008.1 sustained_read_gbs=937.5 cache=cold
+# dense_tensor_peak bf16_f32acc=nan int8=nan fp8_f16acc=nan fp8_f32acc=nan
+label                                           qt pol        N        K      T   median_us      min_us      p95_us   eff_GB/s  DRAM_%  READ_%    TFLOP/s  TC_profile     TC_%     mem_%  T1_lin_x  delta_%
+explicit                                      q4_k A16    17408     5120     65     123.904     121.856     125.856      428.3   42.48   45.68      93.51           -        -     42.48         -        -

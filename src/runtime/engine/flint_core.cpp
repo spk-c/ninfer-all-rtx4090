@@ -3,6 +3,7 @@
 #include "artifact/formats.h"
 #include "artifact/reader.h"
 #include "core/arena.h"
+#include "core/device_wait.h"
 #include "core/host_pages.h"
 #include "core/startup.h"
 #include "core/tensor_parallel.h"
@@ -20,6 +21,7 @@
 #include "runtime/contract/lookup_draft.h"
 #include "runtime/contract/rope_scaling.h"
 #include "runtime/engine/diagnostics.h"
+#include "runtime/engine/worker_fault.h"
 #include "runtime/engine/worker_recovery.h"
 #include "runtime/engine/effective_thinking_budget.h"
 #include "runtime/engine/generation_budget.h"
@@ -548,7 +550,8 @@ struct FlintCore::Impl {
         host_logprobs =
             std::make_unique<PinnedHostBuffer>(top * (sizeof(std::int32_t) + sizeof(float)));
         const std::int32_t enabled = 1;
-        CUDA_CHECK(cudaMemcpy(logprob_flag.p, &enabled, sizeof(enabled), cudaMemcpyHostToDevice));
+        CUDA_CHECK(ninfer::copy_and_wait(logprob_flag.p, &enabled, sizeof(enabled),
+                                         cudaMemcpyHostToDevice));
         std::size_t workspace = std::max<std::size_t>(
             {ops::sampling_workspace_capacity_bytes(static_cast<std::int32_t>(domain), 1,
                                                     static_cast<std::int32_t>(rows)),
@@ -579,7 +582,8 @@ struct FlintCore::Impl {
         }
         sample_workspace = std::make_unique<WorkspaceArena>(workspace);
         load_sampling_kernels();
-        worker           = std::thread([this] {
+        worker = std::thread([this] {
+            const DeviceWaitWatch watched(device, "Flint worker");
             device.bind_to_current_thread();
             loop();
         });
@@ -603,8 +607,9 @@ struct FlintCore::Impl {
     void load_sampling_kernels() {
         const cudaStream_t stream = instance.executor->head_stream();
         const ops::SamplingConfig greedy{};
-        CUDA_CHECK(cudaMemcpy(sample_config.p, &greedy, sizeof(greedy), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(sample_position.p, 0, sizeof(std::int32_t)));
+        CUDA_CHECK(ninfer::copy_and_wait(sample_config.p, &greedy, sizeof(greedy),
+                                         cudaMemcpyHostToDevice));
+        CUDA_CHECK(ninfer::fill_and_wait(sample_position.p, 0, sizeof(std::int32_t)));
         const auto* config  = static_cast<const ops::SamplingConfig*>(sample_config.p);
         const auto vocab    = static_cast<std::int32_t>(domain);
         const Tensor flag(logprob_flag.p, DType::I32, {1});
@@ -629,7 +634,7 @@ struct FlintCore::Impl {
         }
         if (drafts > 0) {
             for (DeviceBuffer* plane : {&spec_drafts, &spec_extents, &spec_lengths, &spec_anchors}) {
-                CUDA_CHECK(cudaMemset(plane->p, 0, plane->bytes));
+                CUDA_CHECK(ninfer::fill_and_wait(plane->p, 0, plane->bytes));
             }
             // A round's width is its drafts and the bonus column, one draft to all of them.
             for (std::uint32_t k = 1; k <= drafts; ++k) {
@@ -652,9 +657,9 @@ struct FlintCore::Impl {
                     *sample_workspace, stream);
             }
         }
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         // Each request clears its own row of the counts; the scratch increment leaves no trace.
-        CUDA_CHECK(cudaMemset(token_counts.p, 0, token_counts.bytes));
+        CUDA_CHECK(ninfer::fill_and_wait(token_counts.p, 0, token_counts.bytes));
     }
 
     // A request that neither computes a prompt chunk nor accepts a token for this long fails with
@@ -814,6 +819,41 @@ struct FlintCore::Impl {
         stats.running_requests      = running;
         stats.prefilling_requests   = prefilling;
         stats.decode_ready_requests = decoding;
+    }
+
+    // Drops every stored image of a prefix of the request's prompt.
+    void drop_stored_prefixes(const Request& r) {
+        for (std::size_t i = stored.size(); i-- > 0;) {
+            const std::vector<TokenId>& tokens = stored[i].tokens;
+            if (tokens.size() > r.prompt_tokens.size() ||
+                !std::equal(tokens.begin(), tokens.end(), r.prompt_tokens.begin())) {
+                continue;
+            }
+            free_pages.insert(free_pages.end(), stored[i].pages.begin(), stored[i].pages.end());
+            host_used -= stored[i].pages.size() * kHostPageBytes;
+            stored.erase(stored.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+        std::lock_guard lock(stats_mutex);
+        stats.host_kv_occupied_bytes = host_used;
+    }
+
+    // Ends one request whose logits came out non-finite, or whose sampled or licensed token lies
+    // outside the vocabulary: thrown where the request's own handler (fail) ends it alone, so the
+    // other requests and the Engine go on. Before its first token the request may have computed
+    // its prompt wrong or resumed from a wrong prefix, and no later logits have vouched for the
+    // images it stored on the way: every stored prefix of its prompt goes, so the same prompt
+    // computes again. Later the prompt's logits were finite, and its images stay.
+    [[noreturn]] void throw_numerical_failure(const Request& r) {
+        const std::string where =
+            r.generated.empty() ? std::string("at the end of the prompt")
+                                : "after " + std::to_string(r.generated.size()) + " generated tokens";
+        if (r.generated.empty()) { drop_stored_prefixes(r); }
+        publish_diagnostic(diagnostics, DiagnosticLevel::Error,
+                           "request %llu: non-finite logits or a token outside the vocabulary %s - "
+                           "ending the request",
+                           static_cast<unsigned long long>(r.id), where.c_str());
+        throw RequestError(RequestErrorKind::NumericalFailure,
+                           "the model produced non-finite logits " + where);
     }
 
     void fail(const std::shared_ptr<Request>& request, std::exception_ptr error) {
@@ -1262,13 +1302,21 @@ struct FlintCore::Impl {
         }
         CUDA_CHECK(cudaMemcpyAsync(tokens, sample_out.p, n * sizeof(std::int32_t),
                                    cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         instance.executor->check_experts();
         for (std::size_t b = 0; b < n; ++b) {
-            const std::int32_t token = tokens[b];
-            if (token == ops::kSamplerNonFiniteToken || token < 0 ||
-                std::uint32_t(token) >= domain) {
-                throw std::runtime_error("Flint produced non-finite logits");
+            std::int32_t token = tokens[b];
+            if (b == 0 && runtime::consume_armed_numerical_fault(
+                              purpose == ops::kSamplePurposePrefill
+                                  ? runtime::armed_prefill_numerical_faults
+                                  : runtime::armed_decode_numerical_faults)) {
+                token = ops::kSamplerNonFiniteToken; // the verification seam of worker_fault.h
+            }
+            if (token < 0 || std::uint32_t(token) >= domain) {
+                // Non-finite logits (the sampler's marker) or an id outside the vocabulary: the
+                // row's request ends where it takes the token (throw_numerical_failure).
+                out[b] = ops::kSamplerNonFiniteToken;
+                continue;
             }
             out[b] = token;
             if (!rows[b].logprobs) { continue; }
@@ -1410,7 +1458,7 @@ struct FlintCore::Impl {
             slot.anchor = slot.fed;
         }
         if (r.observation.prompt_progress) {
-            CUDA_CHECK(cudaStreamSynchronize(executor.head_stream()));
+            CUDA_CHECK(ninfer::wait_for_stream(executor.head_stream()));
             executor.check_experts();
             {
                 std::lock_guard lock(r.mutex);
@@ -1550,6 +1598,7 @@ struct FlintCore::Impl {
                 logits.slice(1, static_cast<std::int32_t>(at), static_cast<std::int32_t>(n));
             sample(rows, ops::kSamplePurposePrefill, sampled, records, &source);
             for (std::size_t k = 0; k < n; ++k) {
+                if (sampled[k] < 0) { throw_numerical_failure(r); }
                 if (r.branch_results.empty()) {
                     r.branch_token  = sampled[k];
                     r.branch_record = records[k];
@@ -1570,7 +1619,7 @@ struct FlintCore::Impl {
         Request& r          = *request;
         auto& executor      = *instance.executor;
         const auto prompt_n = static_cast<std::uint32_t>(r.prompt_tokens.size());
-        CUDA_CHECK(cudaStreamSynchronize(executor.head_stream()));
+        CUDA_CHECK(ninfer::wait_for_stream(executor.head_stream()));
         executor.check_experts();
         r.prefill_end = Clock::now();
         {
@@ -1625,6 +1674,7 @@ struct FlintCore::Impl {
     // finishes the request or queues what its next decode step feeds.
     void accept(const std::shared_ptr<Request>& request, TokenId token,
                 const runtime::RawTokenLogprob* logprob) {
+        if (token < 0) { throw_numerical_failure(*request); }
         (void)accept(request, std::span<const TokenId>(&token, 1),
                      logprob != nullptr ? std::span<const runtime::RawTokenLogprob>(logprob, 1)
                                         : std::span<const runtime::RawTokenLogprob>{});
@@ -2049,7 +2099,7 @@ struct FlintCore::Impl {
             cudaMemcpyAsync(host + b * w, spec_counts.p, b * 4, cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaMemcpyAsync(host + b * w + b, spec_accepted.p, b * 4, cudaMemcpyDeviceToHost,
                                    stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(ninfer::wait_for_stream(stream));
         instance.executor->check_experts();
 
         // The output policy takes its part of each licensed run; the executor then keeps the tokens
@@ -2062,13 +2112,19 @@ struct FlintCore::Impl {
             const std::int32_t licensed_n = host[b * w + j];
             const std::int32_t drafts_n   = host[b * w + b + j];
             const std::int32_t* run       = host + j * w;
-            if (licensed_n < 1 || licensed_n > columns || run[0] == ops::kSamplerNonFiniteToken) {
-                throw std::runtime_error("Flint produced non-finite logits");
+            if (licensed_n < 1 || licensed_n > columns) {
+                throw std::runtime_error("Flint verification returned an invalid licensed run");
             }
-            for (std::int32_t i = 0; i < licensed_n; ++i) {
-                if (run[i] < 0 || std::uint32_t(run[i]) >= domain) {
-                    throw std::runtime_error("Flint licensed a token outside the vocabulary");
-                }
+            // Non-finite logits (the sampler's marker) or an id outside the vocabulary in the run:
+            // this request ends, the round's other rows commit.
+            if (std::any_of(run, run + licensed_n, [&](std::int32_t token) {
+                    return token < 0 || std::uint32_t(token) >= domain;
+                })) {
+                try {
+                    throw_numerical_failure(r);
+                } catch (...) { fail(request, std::current_exception()); }
+                failed[j] = 1;
+                continue;
             }
             std::vector<runtime::RawTokenLogprob> records;
             if (rows[j].logprobs) {
@@ -2181,7 +2237,7 @@ struct FlintCore::Impl {
             std::vector<float> host(rows);
             CUDA_CHECK(cudaMemcpyAsync(host.data(), score_out.p, rows * 4, cudaMemcpyDeviceToHost,
                                        stream));
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(ninfer::wait_for_stream(stream));
             instance.executor->check_experts();
             out.insert(out.end(), host.begin(), host.end());
         }
@@ -2468,6 +2524,8 @@ std::vector<float> FlintCore::score(models::qwen3_5::PreparedPrompt prompt,
             --impl.outstanding;
         }
     } release{*impl_};
+
+    const DeviceWaitWatch watched(impl_->device, "Flint scoring caller");
     impl_->device.bind_to_current_thread();
     return impl_->score(tokens, first_target);
 }

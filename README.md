@@ -61,15 +61,16 @@ carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits ea
 
 ## What's New
 
-<!-- One line per date. List what shipped, a few words per item, and link each item to the document with its details. Keep descriptions, measurements and hardware out of this list. -->
+<!-- Novelties only: a new model, family, artifact, platform, option, endpoint, format or mode, or a measured speedup of a path that worked. No fixes of any kind (crashes, wrong output, failed starts, missed cases, regressions and the speedups that win them back, the options and defaults they bring), no guards, diagnostics, internal, CI, build, test or documentation changes, and no chronicle: a date without a novelty gets no line. One line per date, a few words per item, each linked to the document with its details; no descriptions, mechanisms, measurements or hardware. Full rule: CONTRIBUTING.md, "Documentation describes the current state". -->
 
-- **2026-11-05:** DeepSeek-V4.1 [prefill tail](docs/deepseek-v41.md#the-prefill-tail), IQ1_M experts on the [integer matrix kernel](docs/deepseek-v41.md#iq1_m-experts-in-prompt-chunks), and [Engram reads](docs/deepseek-v41.md#the-engram-table) with deduplication and read-ahead; rounded [tensor-parallel prompt partials](docs/maintainer/pipeline-stages.md#tensor-parallelism) keep their measured peer-write route in every prompt piece; [prefix cache retention](docs/maintainer/hybrid-prefix-cache-spec.md#93-host-superseded-snapshots-first-then-gdsf-dead-kv-first) keeps conversations cached after a much-asked document.
+- **2026-11-07:** Flash-Next [media prompts in the context cache](docs/qwen3-8-flash-next.md#media-conversations-on-one-rtx-4090) and [MTP drafts for media requests](docs/qwen3-8-flash-next.md#mtp-speculative-decoding).
+- **2026-11-06:** Faster Q4_K [prompts](docs/device-profiles.md#what-is-calibrated) for dense layers and routed experts.
+- **2026-11-05:** Faster DeepSeek-V4.1 [prefill tail](docs/deepseek-v41.md#the-prefill-tail), [IQ1_M expert prompts](docs/deepseek-v41.md#iq1_m-experts-in-prompt-chunks) and [Engram reads](docs/deepseek-v41.md#the-engram-table).
 - **2026-11-04:** Flash-Next [DFlash2 drafting](docs/qwen3-8-flash-next.md#dflash2-speculative-decoding), faster Flash-Next [tensor parallelism](docs/maintainer/pipeline-stages.md#tensor-parallelism-of-qwen38-flash-next) and [concurrent requests with host experts](docs/qwen3-8-flash-next.md#sequences-kv-and-the-context-cache), [BF16 and 8-bit tensor-parallel prompt partials](docs/maintainer/pipeline-stages.md#tensor-parallelism), faster [expert parallelism](docs/maintainer/pipeline-stages.md#expert-parallelism-of-the-other-moe-families), and DeepSeek-V4.1-Flash [conversion of ISTA-DASLab's llama.cpp-layout GGUFs and Coder build](docs/deepseek-v41.md#converting) with a [published Coder artifact](docs/deepseek-v41.md#running).
-- **2026-11-03:** Faster [tensor-parallel decode and prefill](docs/maintainer/pipeline-stages.md#tensor-parallelism) for Qwen3.5-core models, Flash-Next [MTP for several requests](docs/qwen3-8-flash-next.md#mtp-with-several-requests), and llama.cpp [control vectors and direction LoRA adapters](docs/serving.md#lora-adapters-and-control-vectors).
+- **2026-11-03:** Faster [tensor-parallel decode and prefill](docs/maintainer/pipeline-stages.md#tensor-parallelism) for Qwen3.5-core models and llama.cpp [control vectors and direction LoRA adapters](docs/serving.md#lora-adapters-and-control-vectors).
 - **2026-11-02:** [Tensor parallelism](docs/maintainer/pipeline-stages.md#tensor-parallelism) selects exchange routes by size from startup timings, including peer writes.
-- **2026-10-31:** [Automatic tensor splits](docs/maintainer/pipeline-stages.md#tensor-parallelism) adjust GPU shares using free memory after the first load.
-- **2026-10-30:** [Bundled media libraries](docs/release-archive-linux.md#media-libraries), [pre-Blackwell NVFP4](docs/cli.md#common-options), Qwen3.5 FP32 logits, attention kernel preload, and [prefill pacing](docs/serving.md#execution-behavior).
-- **2026-10-29:** [Faster tensor-parallel prefill](docs/maintainer/pipeline-stages.md#tensor-parallelism) with reduce-scatter and native NVFP4/FP8 on RTX 50.
+- **2026-10-30:** [Bundled media libraries](docs/release-archive-linux.md#media-libraries), [pre-Blackwell NVFP4](docs/cli.md#common-options), Qwen3.5 FP32 logits, a faster first request after startup, and [prefill pacing](docs/serving.md#execution-behavior).
+- **2026-10-29:** [Faster tensor-parallel prefill](docs/maintainer/pipeline-stages.md#tensor-parallelism), with native NVFP4/FP8 shares on RTX 50.
 - **2026-10-27:** [Tensor parallelism](docs/maintainer/pipeline-stages.md#tensor-parallelism) speeds up decode without peer access and covers all Flash-Next layers.
   Qwen3.5 gains [invariant attention](docs/maintainer/qwen3_5-model.md#invariant-attention).
   The [DeepSeek-V4.1-Flash STQ drafter](docs/deepseek-v41.md#the-stq-drafter) uses half the VRAM of Unsloth's drafter.
@@ -164,7 +165,7 @@ Every card by name, with what has run on it:
 
 | Architecture | Compute capability | Build | CUDA | Docker tags | Status |
 |---|---|---|---|---|---|
-| Blackwell: GeForce RTX 50, RTX PRO Blackwell | 12.0 | `120a` | 13.1 or newer | `cuda13.4` | measured; built-in device profiles |
+| Blackwell: GeForce RTX 50, RTX PRO Blackwell | 12.0 | `120a` | 13.1 or newer, not 13.2.0 or 13.2.1 | `cuda13.4` | measured; built-in device profiles |
 | Ada Lovelace | 8.9 | `89`, or the `86` build | 12.8 or newer | both, native `89` | measured; built-in device profiles |
 | Ampere | 8.6 | `86` (the default) | 12.8 or newer | both | measured (the reference card); built-in device profiles |
 | Ampere, A100 class | 8.0 | `80` | 12.8 or newer | both | built-in device profiles; not benchmarked |
@@ -614,8 +615,9 @@ for a pipeline across cards of different architectures
 <summary><b>Toolchains and options</b> — CUDA versions per target, guides</summary>
 
 `120a` runs the `mma.sync` compatibility path, which the ternary route needs. CUDA 12.8 or newer builds
-`75`, `80`, `86` and `89`, and `70` needs CUDA 12.8 or 12.9. A `120a` build needs CUDA 13.1 or newer, since
-12.8 and 12.9 miscompile sm_120a kernels and configure refuses them. The [Linux](docs/build-linux.md)
+`75`, `80`, `86` and `89`, and `70` needs CUDA 12.8 or 12.9. A `120a` build needs CUDA 13.1 or newer except
+13.2.0 and 13.2.1: those releases, 12.8 and 12.9 miscompile sm_120a kernels, and configure refuses them
+([CUDA toolkits](docs/build-linux.md#cuda-toolkits)). The [Linux](docs/build-linux.md)
 and [Windows](docs/build-windows.md) guides cover dependencies, the opt-in build options and the
 launcher scripts; [tests](tests/README.md) and [benchmarks](bench/README.md) have their own guides.
 

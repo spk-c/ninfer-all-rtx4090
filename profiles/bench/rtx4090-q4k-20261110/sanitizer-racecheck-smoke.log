@@ -1,0 +1,11 @@
+========= COMPUTE-SANITIZER
+OK GGUF MMQ async rows=128 K=5120 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=129 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=129 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=129 fixup=1 async=1
+Q4_K MoE independent FP64 arm=0 rms=0.00560962 max=0.00466135
+Q4_K MoE independent FP64 arm=1 rms=0.00560962 max=0.00466135
+OK GGUF MoE MMQ async pairs=1024 async=1
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)

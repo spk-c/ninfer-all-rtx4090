@@ -1,0 +1,9 @@
+[1/2] Building CUDA object tests\CMakeFiles\ninfer_expert_delivery_test.dir\test_expert_delivery.cu.obj
+C:\coding\ninfer-q4k-validation\tests\test_expert_delivery.cu(444): warning #550-D: variable "mandatory_backing" was set but never used
+          std::uint64_t mandatory_backing = 0;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+test_expert_delivery.cu
+[2/2] Linking CXX executable tests\ninfer_expert_delivery_test.exe

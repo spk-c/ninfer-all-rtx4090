@@ -1,0 +1,49 @@
+build rtx4090-v0.1.1-74-g237cdff9
+starting engine
+engine | device profile nvidia-geforce-rtx-4090-sm89: 65 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27)
+loading weights | 13.4 GiB
+weights ready | 13.4 GiB | 1.7s | 8.03 GiB/s
+CUDA graphs ready | 461 ms
+engine ready | qwen3.8-27b | total 4.1s | weights 13.4 GiB | CUDA sync auto
+phase       detail                      elapsed/progress
+tokens      generated ids             1596 1144 4087 303 5753 13 2570 25 328 18871 10248 45125 3262 167299 45650 41173 473 1962 48507 303 55593 211571 326 179212 1149 14235 2250 2716 22157 13 14235 4222 883 436 10673 42903 25 41173 473 11036 1879 9640 303 14835 11 21426 81726 6297 26 48507 26023 10885 799 539 799 211342 2403 3032 11 27467 791 3817 4016 310
+prepare     render/preprocess               489 us
+generate    vision                            0 us
+generate    text prefill                    269 ms
+generate    decode                          450 ms
+generate    total                           721 ms
+summary     sampling                  greedy (temperature 0)
+summary     finish reason             output-limit
+summary     prompt tokens             68
+summary     reused prompt tokens      0
+summary     generated tokens          64
+summary     model elapsed             720 ms
+summary     prefill speed             252.6 tok/s
+summary     decode speed              139.9 tok/s
+summary     throughput (overall)      88.9 tok/s
+summary     device                    0
+summary     max context               8192
+summary     KV capacity policy        explicit
+summary     KV capacity               8192
+summary     KV page groups            128 / 128
+summary     gpu weights used          13.4 GiB / 13.4 GiB
+summary     gpu sequence used         348.1 MiB / 348.1 MiB
+summary     kv cache dtype            rotated-lloyd4g64-v4g32
+summary     kv cache payload          140.0 MiB
+summary     gpu workspace peak        291.2 MiB / 291.2 MiB
+summary     runtime reservation       927.3 MiB
+summary     free after weights        9.12 GiB
+summary     free after startup        8.46 GiB
+summary     KV capacity headroom      0 B
+summary     planned slack             8.21 GiB
+summary     CUDA Graph allowance      288.0 MiB
+summary     CUDA Graph used           34.0 MiB
+summary     planned device total      14.3 GiB
+summary     dflash2 draft window      5
+summary     dflash2 rounds            21
+summary     dflash2 fallback steps    1
+summary     dflash2 drafted tokens    100
+summary     dflash2 accepted tokens   41
+summary     dflash2 acceptance rate   41.0%
+summary     dflash2 acceptance length 2.95 tok/round
+summary     dflash2 accepted by pos   15,10,8,5,3

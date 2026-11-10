@@ -392,10 +392,14 @@ struct HybridLaneState {
     // the reply resumes from the prompt-end tap.
     runtime::prefix_cache::SnapshotRef tap_snapshot;
     std::uint32_t tap_frontier = 0;
-    // The newest tap a deeper tap of the same prompt superseded. The block write-through at
-    // release does not evict it (§9.3): a request diverging later in this prompt (the next
-    // question about the same document) resumes from it, and the blocks written are its own.
+    // The newest tap a deeper tap of the same prompt superseded. This sequence's Host writes
+    // (its snapshot images and the block write-through at release) do not evict it (§9.3): a
+    // request diverging later in this prompt (the next question about the same document) resumes
+    // from it, and the blocks written are its own.
     runtime::prefix_cache::SnapshotRef superseded_tap;
+    // Snapshots this sequence published (taps and endpoint). The block write-through at release
+    // displaces no retained snapshot worth more than the most valuable of them still retained.
+    std::vector<runtime::prefix_cache::SnapshotRef> published;
     // The Host restore this sequence was admitted from (0 without one). Its first prefill pass
     // queues behind the restore's per-layer events; releasing the lane queues behind the whole
     // restore if it may still be landing.
@@ -1846,7 +1850,15 @@ private:
     void enqueue_dflash_context_append(std::span<const std::uint32_t> lanes,
                                        std::span<const std::uint32_t> starts,
                                        std::span<const std::uint32_t> counts);
-    void validate_licensed_tokens(std::span<const TokenId> tokens) const;
+    // Whether every token lies inside the public domain. A token outside it (the sampler's
+    // non-finite marker, or an id past the vocabulary) becomes 0, so nothing downstream reads an
+    // out-of-range id; a decode round marks the row in numerical_faults, a prompt's first token
+    // throws runtime::NumericalFault.
+    [[nodiscard]] bool license_tokens(std::span<TokenId> tokens) const noexcept;
+    // Rows of the decode round whose sampled or licensed tokens left the public domain, in the
+    // round's row order. wrap_pending reports them on the PendingBatch: the Engine ends those
+    // requests and commits the other rows.
+    std::array<bool, kMaximumConcurrency> numerical_faults{};
     // The drafts a lane's round may verify: none for a structured lane whose masks cost more than
     // a verification hides, so its round computes one mask for it.
     [[nodiscard]] static std::uint32_t speculative_extent(const RequestControl& request) noexcept;

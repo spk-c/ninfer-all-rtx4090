@@ -1,0 +1,16 @@
+START mmq-store
+DONE mmq-store 3221225781 0.02
+START dense-oracle
+DONE dense-oracle 3221225781 0.01
+START expert-delivery
+DONE expert-delivery 0 3.05
+START sanitizer-memcheck
+DONE sanitizer-memcheck 4294967295 1.14
+START sanitizer-racecheck
+DONE sanitizer-racecheck 4294967295 1.14
+START sanitizer-synccheck
+DONE sanitizer-synccheck 4294967295 1.13
+START sanitizer-expert-delivery
+DONE sanitizer-expert-delivery 3221226505 121.72
+START dflash2-real
+DONE dflash2-real 0 6.86

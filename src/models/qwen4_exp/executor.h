@@ -65,8 +65,9 @@ struct ExecutorOptions {
     // sequence of device- and host-resident experts replay CUDA Graphs, a graph per segment of
     // consecutive layers on one device, which the sequences share.
     bool cuda_graphs = true;
-    // A model loaded with its Vision tower: the most merged tokens the media of one prompt may
-    // hold, which sizes the encoder's workspace and the embeddings a prefill reads.
+    // A model loaded with its Vision tower: the most merged tokens of the media one prompt encodes
+    // (those past the prefix it resumes from), which sizes the encoder's workspace and the
+    // embeddings a prefill reads.
     std::uint32_t vision_max_merged_tokens = 16384;
     // How the sparse-attention layers store their paged KV: any storage kv_cache_append writes
     // for two heads of 256.
@@ -104,6 +105,15 @@ struct MediaItem {
 struct PromptPiece {
     std::uint32_t sequence = 0;
     std::span<const std::int32_t> tokens;
+};
+
+struct SequenceSnapshot;
+
+// A place inside a prompt step where Executor::forward keeps the sequence's state: after the
+// first `tokens` of the step, into `state`.
+struct PromptCut {
+    std::uint32_t tokens    = 0;
+    SequenceSnapshot* state = nullptr;
 };
 
 struct ExecutorMemory {
@@ -207,11 +217,19 @@ public:
     // logits of the last `logit_rows` of them in logits(), BF16 [vocab, logit_rows] on the head
     // device. Work is queued on the device streams; logits() is ready on head_stream(). Once the
     // table rows of `tokens` are read, the rows of `next` (the known tokens that follow, at most
-    // prompt_step()) are hinted, to be read while the device runs `tokens`.
+    // prompt_step()) are hinted, to be read while the device runs `tokens`. With a `cut` (needs
+    // packs_prompts(); 0 < cut.tokens < tokens.size()), the step's chunks restart at the cut, as
+    // two calls split there would run them, and cut.state takes the sequence's state there, as
+    // snapshot() after the first of those calls would, while the step runs on in one span.
     void forward(std::uint32_t sequence, std::span<const std::int32_t> tokens,
-                 std::uint32_t logit_rows, std::span<const std::int32_t> next = {});
+                 std::uint32_t logit_rows, std::span<const std::int32_t> next = {},
+                 PromptCut cut = {});
     // Whether forward_pieces() runs: prompt steps are layer-major spans.
     [[nodiscard]] bool packs_prompts() const noexcept;
+    // The widest prompt chunk a span runs alone over the cache and the missed experts rather than
+    // from the layer's copied experts (kPromptMissTokens with a CPU share, else 8 tokens); 0
+    // without spans. A step of such chunks only copies the experts it misses.
+    [[nodiscard]] std::uint32_t narrow_prompt_tokens() const noexcept;
     // The prompt tokens of several distinct sequences in one span (prompt_step() tokens in all,
     // at most max_logit_rows() pieces), each piece at its sequence's next positions with the
     // arithmetic forward() gives it, while each layer's uncached experts cross the bus once for
@@ -259,22 +277,24 @@ public:
     // Makes the sequence hold the image's state; returns once the copies are done.
     void load_image(std::uint32_t sequence, const SequenceImage& image,
                     std::span<std::byte* const> pages, std::size_t page_bytes);
-    // Vision: encodes the media of the prompt the (just reset) sequence prefills next, whose image
-    // and video tokens then take the items' merged embeddings in place of the token embedding.
-    // `rope_positions` holds the prompt's three RoPE position axes, axis-major [3, tokens]; every
-    // later position rotates at its index plus `rope_delta`. The embeddings are kept until another
-    // sequence's media replace them, so the prompt must be prefilled before that. Returns once the
-    // tower has run.
-    void set_media(std::uint32_t sequence, std::span<const MediaItem> items,
-                   std::vector<std::int32_t> rope_positions, std::int32_t rope_delta);
+    // Vision: encodes the media of the prompt the sequence prefills next from its position (a
+    // prefix of the prompt it holds, or none), whose image and video tokens then take the items'
+    // merged embeddings in place of the token embedding; items wholly inside that prefix are not
+    // encoded again, and the merged-token limit counts the others. `rope_positions` holds the
+    // prompt's three RoPE position axes, axis-major [3, tokens]; every later position rotates at
+    // its index plus `rope_delta`. The embeddings are kept until another sequence's media replace
+    // them, so the prompt must be prefilled before that. Returns the items encoded, once the tower
+    // has run.
+    std::size_t set_media(std::uint32_t sequence, std::span<const MediaItem> items,
+                          std::vector<std::int32_t> rope_positions, std::int32_t rope_delta);
     [[nodiscard]] bool vision() const noexcept;
 
     // Speculative decoding with the MTP block or the DFlash2 drafter; every call needs an
     // executor with drafts.
     [[nodiscard]] std::uint32_t draft_tokens() const noexcept;
-    // Whether the sequence's drafter follows its tokens (the MTP block's state, which a media
-    // prompt breaks until the sequence is reset, or the DFlash2 context ring); a sequence drafts
-    // only from a position past its first.
+    // Whether the sequence's drafter follows its tokens (the MTP block's state, which a prompt
+    // that ends in media breaks until the sequence is reset, or the DFlash2 context ring); a
+    // sequence drafts only from a position past its first.
     [[nodiscard]] bool can_draft(std::uint32_t sequence) const;
     // The sequence's drafter stops following its tokens until a reset or a restore of a state
     // that follows them: its passes skip the MTP block's catch-up or the ring's context, for a

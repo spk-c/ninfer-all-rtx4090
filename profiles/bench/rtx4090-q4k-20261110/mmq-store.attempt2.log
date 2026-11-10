@@ -1,0 +1,44 @@
+OK GGUF MMQ BF16 q8_0 nonfixup/split=1
+OK GGUF MMQ BF16 q2_k nonfixup/split=1
+OK GGUF MMQ BF16 q3_k nonfixup/split=1
+OK GGUF MMQ BF16 q4_k nonfixup/split=1
+OK GGUF MMQ BF16 q5_k nonfixup/split=1
+OK GGUF MMQ BF16 q6_k nonfixup/split=1
+OK GGUF MMQ BF16 iq2_xxs nonfixup/split=1
+OK GGUF MMQ BF16 iq2_xs nonfixup/split=1
+OK GGUF MMQ BF16 iq2_s nonfixup/split=1
+OK GGUF MMQ BF16 iq3_xxs nonfixup/split=1
+OK GGUF MMQ BF16 iq3_s nonfixup/split=1
+OK GGUF MMQ BF16 iq1_s nonfixup/split=1
+OK GGUF MMQ BF16 iq4_nl nonfixup/split=1
+OK GGUF MMQ BF16 iq4_xs nonfixup/split=1
+OK GGUF MMQ BF16 q4_0 nonfixup/split=1
+OK GGUF MMQ BF16 q5_0 nonfixup/split=1
+OK GGUF MMQ BF16 q2_0 nonfixup/split=1
+OK GGUF MMQ BF16 store, sm=128
+OK GGUF MMQ async rows=128 K=5120 T=64 fixup=1 async=0
+OK GGUF MMQ async rows=128 K=5120 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=128 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=129 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=256 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=1280 fixup=1 async=1
+OK GGUF MMQ async rows=128 K=5120 T=4096 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=64 fixup=1 async=0
+OK GGUF MMQ async rows=17408 K=5120 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=128 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=129 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=256 fixup=1 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=1280 fixup=0 async=1
+OK GGUF MMQ async rows=17408 K=5120 T=4096 fixup=0 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=64 fixup=1 async=0
+OK GGUF MMQ async rows=5120 K=17408 T=65 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=128 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=129 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=256 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=1280 fixup=1 async=1
+OK GGUF MMQ async rows=5120 K=17408 T=4096 fixup=0 async=1
+Q4_K MoE independent FP64 arm=0 rms=0.00560962 max=0.00466135
+Q4_K MoE independent FP64 arm=1 rms=0.00560962 max=0.00466135
+OK GGUF MoE MMQ async pairs=1024 async=1
+OK GGUF MoE MMQ async pairs=4096 async=1
+OK GGUF MoE MMQ async pairs=8192 async=1

@@ -1,0 +1,138 @@
+[
+  {
+    "clock_mhz": 210.0,
+    "temperature_c": 37.22,
+    "power_w": 50.1,
+    "total_vram_mib": 1862.0,
+    "unix_seconds": 1794275589.3193948,
+    "process_dedicated_vram_mib": 338.15234375
+  },
+  {
+    "clock_mhz": 2535.0,
+    "temperature_c": 37.85,
+    "power_w": 54.51,
+    "total_vram_mib": 1862.0,
+    "unix_seconds": 1794275589.5994604,
+    "process_dedicated_vram_mib": 338.15234375
+  },
+  {
+    "clock_mhz": 2535.0,
+    "temperature_c": 38.19,
+    "power_w": 60.18,
+    "total_vram_mib": 9734.0,
+    "unix_seconds": 1794275589.894081,
+    "process_dedicated_vram_mib": 8914.21875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 38.91,
+    "power_w": 80.57,
+    "total_vram_mib": 13074.0,
+    "unix_seconds": 1794275590.187173,
+    "process_dedicated_vram_mib": 11550.75390625
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 38.99,
+    "power_w": 92.64,
+    "total_vram_mib": 13074.0,
+    "unix_seconds": 1794275590.4699557,
+    "process_dedicated_vram_mib": 11551.1328125
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.08,
+    "power_w": 96.3,
+    "total_vram_mib": 13074.0,
+    "unix_seconds": 1794275590.7670186,
+    "process_dedicated_vram_mib": 11551.2578125
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.11,
+    "power_w": 101.22,
+    "total_vram_mib": 13074.0,
+    "unix_seconds": 1794275591.063534,
+    "process_dedicated_vram_mib": 11551.2578125
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.19,
+    "power_w": 100.95,
+    "total_vram_mib": 13600.0,
+    "unix_seconds": 1794275591.341265,
+    "process_dedicated_vram_mib": 12076.2421875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.11,
+    "power_w": 100.36,
+    "total_vram_mib": 13600.0,
+    "unix_seconds": 1794275591.6219072,
+    "process_dedicated_vram_mib": 12076.2421875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.13,
+    "power_w": 99.29,
+    "total_vram_mib": 13600.0,
+    "unix_seconds": 1794275591.9046373,
+    "process_dedicated_vram_mib": 12076.2421875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.16,
+    "power_w": 98.93,
+    "total_vram_mib": 13600.0,
+    "unix_seconds": 1794275592.187447,
+    "process_dedicated_vram_mib": 12076.2421875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 39.19,
+    "power_w": 98.74,
+    "total_vram_mib": 13600.0,
+    "unix_seconds": 1794275592.466991,
+    "process_dedicated_vram_mib": 12076.2421875
+  },
+  {
+    "clock_mhz": 2700.0,
+    "temperature_c": 40.02,
+    "power_w": 106.14,
+    "total_vram_mib": 13624.0,
+    "unix_seconds": 1794275592.7505474,
+    "process_dedicated_vram_mib": 12100.2421875
+  },
+  {
+    "clock_mhz": 2685.0,
+    "temperature_c": 46.33,
+    "power_w": 145.64,
+    "total_vram_mib": 13624.0,
+    "unix_seconds": 1794275593.0352,
+    "process_dedicated_vram_mib": 12100.2421875
+  },
+  {
+    "clock_mhz": 2685.0,
+    "temperature_c": 48.5,
+    "power_w": 187.78,
+    "total_vram_mib": 13624.0,
+    "unix_seconds": 1794275593.3198905,
+    "process_dedicated_vram_mib": 12100.2421875
+  },
+  {
+    "clock_mhz": 2685.0,
+    "temperature_c": 48.9,
+    "power_w": 261.3,
+    "total_vram_mib": 13624.0,
+    "unix_seconds": 1794275593.6002443,
+    "process_dedicated_vram_mib": 12100.2421875
+  },
+  {
+    "clock_mhz": 2685.0,
+    "temperature_c": 49.5,
+    "power_w": 309.6,
+    "total_vram_mib": 1806.0,
+    "unix_seconds": 1794275593.887926,
+    "process_dedicated_vram_mib": 24.05078125
+  }
+]

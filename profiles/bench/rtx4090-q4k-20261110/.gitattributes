@@ -1,0 +1,2 @@
+# Preserve unified-diff context markers and LF for the reproducible test patch.
+qualification-harness.patch text eol=lf whitespace=-blank-at-eol

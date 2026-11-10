@@ -1,0 +1,12 @@
+candidate cuda none completed
+candidate cuda dflash2 completed
+candidate german none completed
+candidate german dflash2 completed
+candidate long none completed
+candidate long dflash2 completed
+cuda-none equal
+cuda-dflash2 equal
+german-none equal
+german-dflash2 equal
+long-none equal
+long-dflash2 equal

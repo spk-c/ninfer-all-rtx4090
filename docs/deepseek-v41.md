@@ -104,6 +104,9 @@ device, which also holds the model, serves fewer experts, so that every device's
 same time over its bus; [expert
 parallelism](maintainer/pipeline-stages.md#expert-parallelism-of-the-other-moe-families)).
 
+The Q4_K async prompt tiles (`gguf_matrix/q4_k`, `gguf_moe_matrix/q4_k`) do not apply to this
+family: its routed experts are IQ1_S, IQ1_M, IQ2_XXS and IQ2_S, none Q4_K.
+
 ## Converting
 
 The converter reads the weights from the GGUF shards, the Engram GGUF, the drafter of beamster's
@@ -609,7 +612,11 @@ keeps instead of prefilling those tokens again:
   (or `--host-cache-mib`) sets the store.
 - **Shared prefixes.** A prompt chunk also ends where the frontend marks a prefix other requests
   share (the end of the leading system messages, of the tool declarations, a declared cache
-  boundary), and the state there goes to an image too.
+  boundary), and the state there goes to an image too. That end also ends a prompt span, so the
+  first prompt with such a prefix copies or reads the experts once more than a prompt without it.
+  Flash-Next keeps the state inside its span instead; here a span keeps one state, the one its
+  prefill tail and drafter taps are planned for (`state_at`), and a second one is not
+  implemented.
 
 A window state cannot be cut back, so a prompt resumes only where a state was kept, not at an
 arbitrary common prefix.

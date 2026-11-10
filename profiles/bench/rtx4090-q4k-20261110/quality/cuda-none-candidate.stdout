@@ -1,0 +1,1 @@
+We need answer user: "Explain how GPU memory bandwidth affects token-by-token model decoding in three sentences." Need produce exactly three sentences? Likely yes. Need concise. Need final only three sentences. Ensure each sentence explains. Let's craft: In autoregressive decoding, each new token requires loading model weights and KV cache

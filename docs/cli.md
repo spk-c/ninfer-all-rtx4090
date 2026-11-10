@@ -61,13 +61,15 @@ and suppresses this insertion. The option cannot be combined with `--no-thinking
 
 `--reasoning-loop off|stop|conclude` (default `off`) ends the reply (`stop`) or closes the thinking
 with the same control span and lets the model answer (`conclude`) when the open thinking keeps
-repeating itself. Every 512 thinking tokens the guard checks two signs: 25 % of the last 2,000
-words lie inside a 12-word passage seen three times, or the last 2,048 characters repeat one
-period of at most 64 characters. `conclude` stops instead when the output left cannot hold the
-control span and one more token; Gemma 4 and Flint have no early-close control, so there it always stops. The
-run summary prints `reasoning loop` when the guard fires. The option cannot be combined with
-`--no-thinking`. The check and its limits are described in
-[serving](serving.md#openai-chat-completions), under `--reasoning-loop`.
+repeating itself. Every 512 thinking tokens the guard checks three signs: 25 % of the last 2,000
+words lie inside a 12-word passage seen three times, the last 2,048 characters repeat one period of
+at most 64 characters, or they do so with their numbers masked while every number of the period
+keeps its own step and one of them moves (a loop that counts, `'time1','time2',...`; a counter
+beside values that change otherwise is an enumeration and does not fire). `conclude` stops
+instead when the output left cannot hold the control span and one more token; Gemma 4 and Flint
+have no early-close control, so there it always stops. The run summary prints `reasoning loop`
+when the guard fires. The option cannot be combined with `--no-thinking`. The check and its
+limits are described in [serving](serving.md#openai-chat-completions), under `--reasoning-loop`.
 
 `--max-new` counts every committed generated token, including internally inserted control tokens.
 The inserted suffix is never truncated, and a request is never rejected for lacking room for it.
@@ -275,7 +277,7 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--embedding-residency device\|host` | Qwen3.5 family: the input token embedding in the GPU's weight arena, or in pinned host memory mapped into the GPU, which the gather reads in place over the bus each step. The table's VRAM goes to the KV cache (Qwen3.8-27B: 388 MiB for an IQ2_S table, 1.26 GiB for Q8); output is unchanged. Excludes `--embedding-q4/q6`; refused for an artifact whose embedding is tied to the output head and for the other families. On Windows (WDDM) mapped host memory may still count against the card | `device` |
 | `--expert-cache-mib N\|auto` | with host or disk experts, device memory for the most used experts; native Qwen, Gemma 4, Flint and DeepSeek-V4.1 allow `0` and then keep only their layer banks, and Flash-Next disk mode needs a cache. With automatic KV, native Qwen gives the cache priority over KV beyond one request's context | `auto` (what is free after startup) |
 | `--expert-misses staged\|mapped` | Qwen3.8-Flash-Next only, GGUF host experts: copy each missing expert to the device while the cached experts run, into a cache slot when the [expert tier](qwen3-8-flash-next.md#the-expert-cache) admits it (`staged`), or let the expert kernels read the missing ones across the bus (`mapped`) | `staged` |
-| `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next calls of more than eight tokens other than verifications and prompt chunks of up to 64, Gemma 4, Flint and DeepSeek-V4.1 calls of more than eight tokens, and Qwen3.5/3.6 calls that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
+| `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next calls of more than eight tokens other than verifications and prompt chunks of up to 64, Gemma 4, Flint and DeepSeek-V4.1 calls of more than eight tokens, and Qwen3.5/3.6 calls at or past the codec's prefill frontier or that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
 | `--iq1m-experts matrix\|vector` | DeepSeek-V4.1 and Qwen3.8-Flash-Next: IQ1_M routed experts of calls past eight tokens on the integer matrix kernel once a call routes more than 16 rows to each expert on average for their gate and up products and 6 for their down products (the vector kernel below), or always on the vector kernel in groups of eight columns; the two round the sums differently, so outputs differ slightly ([IQ1_M experts](deepseek-v41.md#iq1_m-experts-in-prompt-chunks)) | `matrix` |
 | `--expert-tail-skip N` | Qwen3.8-Flash-Next only, GGUF host experts with staged misses: a decode or verification call leaves out each routed expert its device cache lacks when every token of the call ranks it past place `N` (`1..9`) of its top ten; the other experts keep their router weights, so results change | off |
 | `--expert-prefill-buffers 1\|2` | Qwen3.8-Flash-Next only, GGUF host experts: device buffers a long prompt's uncached experts are copied into; `2` copies the next layer's while the current layer's experts run, when half the free memory holds both. With the automatic cache the buffers hold expert cache slots between prompts ([the expert cache](qwen3-8-flash-next.md#the-expert-cache)) | `2` with the automatic expert cache, else `1` |
@@ -295,7 +297,7 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--no-ngram-table` | Qwen3.8-Flash-Next: run without the n-gram table, a non-standard experimental mode (the Q2_0 release's WikiText-2 perplexity rises from 2.66 to 5.01); DeepSeek-V4.1: without its Engram table (the IQ1_M release's perplexity on a 1,112-token WikiText slice rose from 3.07 to 9.68 on October 25) | off |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys, `rk4v4-e8` opt-in E8-lattice INT4 keys and `rk2v4-e8` opt-in E8 root-code keys; all nine are accepted on every build target (see [Context and memory](#context-and-memory)); for Qwen3.8-Flash-Next it is the storage of the sparse-attention layers' KV; for Gemma 4 the sliding-window blocks' K and V, with the full-attention blocks' one value plane in an unrotated coding (see [Gemma 4](gemma4.md#kv-cache-formats)); Flint keeps F16 only (`bf16`), DeepSeek-V4.1 BF16 only | `bf16` |
 | `--kv-resident N\|all\|auto` | Qwen3.8-Flash-Next: positions of each sparse-attention layer's KV a sequence keeps in device memory; past them the layers' KV streams from pinned host memory (see [streamed KV](qwen3-8-flash-next.md#streamed-sparse-attention-kv)) | `auto`: 32,768 with host or disk experts, all with device experts |
-| `--spec none\|mtp\|dflash\|dflash2\|dspark` | speculative backend; Qwen3.8-Flash-Next takes `mtp` from an artifact converted with its MTP block (see [MTP speculative decoding](qwen3-8-flash-next.md#mtp-speculative-decoding)) and `dflash2` from one carrying its DFlash2 drafter (see [DFlash2 speculative decoding](qwen3-8-flash-next.md#dflash2-speculative-decoding)), Gemma 4 from one converted with its assistant (see [Gemma 4](gemma4.md#speculative-decoding-with-the-assistant)); DeepSeek-V4.1 takes `dspark` from an artifact converted with its DSpark drafter (see [the DSpark drafter](deepseek-v41.md#the-dspark-drafter)); Flint has no drafter and takes `--lookup-ngram` without `--spec`, as DeepSeek-V4.1 does without `dspark` | for Flash-Next artifacts with host experts `dflash2` with 4 drafts (with `--draft-min-p 0.7`) when they carry the DFlash2 drafter, else `mtp` with 3 drafts (with `--draft-min-p 0.5`) when they carry the MTP block; `mtp` with 3 drafts for Gemma 4 artifacts with their assistant and host or disk experts; otherwise off |
+| `--spec none\|mtp\|dflash\|dflash2\|dspark` | speculative backend; Qwen3.8-Flash-Next takes `mtp` from an artifact converted with its MTP block (see [MTP speculative decoding](qwen3-8-flash-next.md#mtp-speculative-decoding)) and `dflash2` from one carrying its DFlash2 drafter (see [DFlash2 speculative decoding](qwen3-8-flash-next.md#dflash2-speculative-decoding)), Gemma 4 from one converted with its assistant (see [Gemma 4](gemma4.md#speculative-decoding-with-the-assistant)); DeepSeek-V4.1 takes `dspark` from an artifact converted with its DSpark drafter (see [the DSpark drafter](deepseek-v41.md#the-dspark-drafter)); Flint has no drafter and takes `--lookup-ngram` without `--spec`, as DeepSeek-V4.1 does without `dspark` | for Flash-Next artifacts with host experts `dflash2` with 4 drafts (with `--draft-min-p 0.7`) on one device when they carry the DFlash2 drafter, else (over pipeline stages too) `mtp` with 3 drafts (with `--draft-min-p 0.5`) when they carry the MTP block; `mtp` with 3 drafts for Gemma 4 artifacts with their assistant and host or disk experts; otherwise off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2; `1..7` for Qwen3.8-Flash-Next's DFlash2 drafter (its block of 8), Gemma 4's assistant and the context lookup of Flint and DeepSeek-V4.1; `1..5` for DSpark, its block | unset (their lookup: 3; DSpark: 5) |
 | `--draft-min-p P` | Flash-Next MTP and DFlash2 only: verify a round's drafts through the first at or below this probability (MTP: its absolute probability, which also ends the drafting; DFlash2: its selector confidence); see [MTP](qwen3-8-flash-next.md#mtp-speculative-decoding) and [DFlash2](qwen3-8-flash-next.md#dflash2-speculative-decoding) | `0` (off) with `--spec mtp` or `--spec dflash2`; `0.5` when the engine chooses MTP and `0.7` when it chooses DFlash2 (no `--spec`), unless set |
 | `--draft-confidence C` | DSpark only: verify a round's drafts up to the first its confidence head scores below `C` (`0..1`); `0` verifies every draft | `0.5` |
@@ -385,6 +387,23 @@ NINFER_CUDA_SYNC=blocking ./build/apps/ninfer models/qwen3_8_27b.ninfer --prompt
 The Engine-ready log reports the selected mode. Empty or unrecognized values, or failure to apply
 the schedule, fail startup. This controls device scheduling (including stream synchronization);
 it does not override individual CUDA event creation flags.
+
+## Device stall watch
+
+A device that stops finishing work raises no CUDA error, so the CLI, the HTTP server and the tools
+end the process instead: when a wait of any thread for the device, or a probe the process submits
+to every device it uses every 5 s, lasts 120 s while no host service answers the device ([Stop the
+server](serving.md#stop-the-server) shows the messages). `NINFER_DEVICE_STALL_SECONDS` sets that
+limit in whole seconds, and `0` turns the waits' watch and the probes off. Set it under tools that
+slow the device many times over, such as Nsight Compute and compute-sanitizer, where one wait can
+last minutes:
+
+```bash
+NINFER_DEVICE_STALL_SECONDS=0 ncu --set full \
+  ./build/apps/ninfer models/qwen3_8_27b.ninfer --prompt "Hello"
+```
+
+A value that is not a whole number of seconds fails startup.
 
 ## Context and memory
 

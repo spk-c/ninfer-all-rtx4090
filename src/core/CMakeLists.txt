@@ -2,6 +2,7 @@ add_library(ninfer_core STATIC
   arena.cu
   device.cu
   device_launch.cpp
+  device_wait.cu
   peer_preflight.cpp
   expert_parallel.cpp
   stage_link.cu
@@ -10,6 +11,7 @@ add_library(ninfer_core STATIC
   dtype.cpp
   gpu_clock_floor.cpp
   host_memory.cpp
+  io_priority.cpp
   host_pages.cpp
   zero_pages.cpp
   host_worker_pool.cpp

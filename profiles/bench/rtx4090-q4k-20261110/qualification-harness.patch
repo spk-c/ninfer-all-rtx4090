@@ -1,0 +1,213 @@
+diff --git a/bench/CMakeLists.txt b/bench/CMakeLists.txt
+index 656b7a00..8307214c 100644
+--- a/bench/CMakeLists.txt
++++ b/bench/CMakeLists.txt
+@@ -5,3 +5,8 @@ include(context_cost/benchmarks.cmake)
+ include(models/qwen3_5/benchmarks.cmake)
+ 
+ ninfer_finalize_bundle(ninfer_benches)
++
++# Local qualification harness; intentionally separate from the product executables.
++add_executable(q4k_qualification_linear q4k_qualification_main.cpp)
++target_link_libraries(q4k_qualification_linear PRIVATE ninfer_linear_bench)
++ninfer_stage_runtime_dlls(q4k_qualification_linear)
+diff --git a/bench/ops/linear_bench.cu b/bench/ops/linear_bench.cu
+index 2caeeb09..05d01757 100644
+--- a/bench/ops/linear_bench.cu
++++ b/bench/ops/linear_bench.cu
+@@ -10,6 +10,7 @@
+ 
+ #include "core/weight.h"
+ #include "ninfer/ops/linear.h"
++#include "ops/common/device_route.h"
+ 
+ #include "core/device.h"
+ #include "direct_bf16_weight.cuh"
+@@ -974,6 +975,8 @@ void write_csv(const std::filesystem::path& path, const std::vector<Result>& res
+ } // namespace
+ 
+ int main(int argc, char** argv) {
++    const char* route = std::getenv("NINFER_Q4K_QUALIFICATION_ROUTE");
++    const ops::DeviceRouteForce qualification_route("gguf_matrix/q4_k", route ? route : "");
+     try {
+         const Options opt = parse_args(argc, argv);
+         int device_count  = 0;
+diff --git a/tests/ops/linear/test_gguf.cpp b/tests/ops/linear/test_gguf.cpp
+index 16565fb0..6f06f20c 100644
+--- a/tests/ops/linear/test_gguf.cpp
++++ b/tests/ops/linear/test_gguf.cpp
+@@ -14,6 +14,7 @@
+ #include "ops/common/device_route.h"
+ #include "ops/linear/gguf/ggml_bridge.h"
+ #include "ops/linear/gguf/gguf_linear.h"
++#include "qualification_q4k.h"
+ 
+ #include <cuda_bf16.h>
+ #include <cuda_fp16.h>
+@@ -81,7 +82,7 @@ std::vector<float> host_decode(QType qtype, const std::vector<std::uint8_t>& byt
+     const auto block = gguf_block_shape(qtype);
+     if (qtype != QType::GGUF_Q4_0 && qtype != QType::GGUF_Q5_0 && qtype != QType::GGUF_Q2_0 &&
+         qtype != QType::GGUF_MXFP4 && qtype != QType::GGUF_IQ3_S &&
+-        qtype != QType::GGUF_IQ4_XS) {
++        qtype != QType::GGUF_IQ4_XS && qtype != QType::GGUF_Q4_K) {
+         return out;
+     }
+     const std::size_t blocks = bytes.size() / block.bytes;
+@@ -101,6 +102,10 @@ std::vector<float> host_decode(QType qtype, const std::vector<std::uint8_t>& byt
+         }
+         const float d         = half_value(b);
+         for (int j = 0; j < block.elements; ++j) {
++            if (qtype == QType::GGUF_Q4_K) {
++                out.push_back(qualification_q4k(b, j));
++                continue;
++            }
+             if (qtype == QType::GGUF_IQ4_XS) {
+                 // Published IQ4 nonlinear table; scalar stored-block interpretation,
+                 // independent of the vector decoder and CUDA dequantization routine.
+diff --git a/tests/ops/linear/test_gguf_mmq_store.cu b/tests/ops/linear/test_gguf_mmq_store.cu
+index 9ff667c5..59435a32 100644
+--- a/tests/ops/linear/test_gguf_mmq_store.cu
++++ b/tests/ops/linear/test_gguf_mmq_store.cu
+@@ -5,6 +5,7 @@
+ #include "ops/linear/gguf/ggml_bridge.h"
+ #include "ops/linear/gguf/ggml_bridge_mmq.cuh"
+ #include "ops/linear/gguf/gguf_linear.h"
++#include "qualification_q4k.h"
+ 
+ #include <cuda_bf16.h>
+ #include <cuda_fp16.h>
+@@ -375,8 +376,15 @@ void compare_moe_routes(const TypeCase& c, int pairs, bool expect_async) {
+     constexpr int per_token = 2;
+     std::vector<DeviceBuffer> banks;
+     std::vector<const void*> pointers;
++    std::vector<std::vector<float>> exact;
+     for (int expert = 0; expert < experts; ++expert) {
+         const auto host = make_weight(c, rows, k, 0x7C11u + static_cast<unsigned>(expert));
++        if (pairs == 1024) {
++            exact.emplace_back(std::size_t(rows) * k);
++            for (std::size_t j = 0; j < exact.back().size(); ++j) {
++                exact.back()[j] = qualification_q4k(host.data() + (j / 256) * 144, int(j % 256));
++            }
++        }
+         banks.emplace_back(host.size());
+         banks.back().copy_from_host(host.data(), host.size());
+         pointers.push_back(banks.back().p);
+@@ -428,6 +436,36 @@ void compare_moe_routes(const TypeCase& c, int pairs, bool expect_async) {
+     if (results[0] != results[1]) {
+         throw std::runtime_error("the MoE plane differs between the compiled and async routes");
+     }
++    if (pairs == 1024) {
++        double error[2] = {}, worst[2] = {}, norm = 0, scale = 0;
++        for (int p = 0; p < pairs; ++p) {
++            const float* w = exact[ids[p]].data();
++            const auto* x = input_host.data() + std::size_t(p / per_token) * k;
++            for (int row = 0; row < rows; ++row) {
++                double want = 0;
++                for (int j = 0; j < k; ++j) {
++                    want += double(w[std::size_t(row) * k + j]) * __bfloat162float(x[j]);
++                }
++                for (int arm = 0; arm < 2; ++arm) {
++                    float got;
++                    std::memcpy(&got, results[arm].data() + (std::size_t(p) * rows + row) * 4, 4);
++                    const double d = double(got) - want;
++                    error[arm] += d * d;
++                    worst[arm] = std::max(worst[arm], std::abs(d));
++                }
++                norm += want * want;
++                scale = std::max(scale, std::abs(want));
++            }
++        }
++        for (int arm = 0; arm < 2; ++arm) {
++            const double rms = std::sqrt(error[arm] / norm), maximum = worst[arm] / scale;
++            std::cout << "Q4_K MoE independent FP64 arm=" << arm << " rms=" << rms
++                      << " max=" << maximum << '\n';
++            if (!(rms < 0.02 && maximum < 0.08)) {
++                throw std::runtime_error("Q4_K MoE differs from independent FP64 product");
++            }
++        }
++    }
+     std::cout << "OK GGUF MoE MMQ async pairs=" << pairs << " async=" << offered[1] << '\n';
+ }
+ 
+@@ -480,6 +518,19 @@ int main() {
+         return 77;
+     }
+     try {
++        if (std::getenv("NINFER_Q4K_RACECHECK_SMOKE")) {
++            const TypeCase& q4 = kCases[3];
++            for (const auto& shape :
++                 {std::pair{128, 5120}, std::pair{17408, 5120}, std::pair{5120, 17408}}) {
++                const int rows = shape.first, k = shape.second;
++                const auto host = make_weight(q4, rows, k, 0x3A11u + unsigned(rows));
++                for (const int columns : {65, 129}) {
++                    compare_routes(q4, host, rows, k, columns, true);
++                }
++            }
++            compare_moe_routes(q4, 1024, true);
++            return 0;
++        }
+         const int sm_count = gguf::multiprocessor_count();
+         for (const TypeCase& c : kCases) {
+             check_rejected_geometry(c);
+diff --git a/tests/test_expert_delivery.cu b/tests/test_expert_delivery.cu
+index 4093632e..40cde028 100644
+--- a/tests/test_expert_delivery.cu
++++ b/tests/test_expert_delivery.cu
+@@ -1140,6 +1140,9 @@ int main(int argc, char** argv) {
+     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) { return 77; }
+     try {
+         DeviceContext device(0);
++        if (argc == 2 && std::string(argv[1]) == "--alignment-only") {
++            return alignment(device);
++        }
+         if (argc == 2 && std::string(argv[1]) == "--admission-only") {
+             return admission_boundaries(device);
+         }
+diff --git a/tools/bench/compare_gguf_iq3s_4090.py b/tools/bench/compare_gguf_iq3s_4090.py
+index 7d1074fa..a53025d9 100644
+--- a/tools/bench/compare_gguf_iq3s_4090.py
++++ b/tools/bench/compare_gguf_iq3s_4090.py
+@@ -115,6 +115,8 @@ def run_one(exe: Path, weights: Path, out: Path, mode: str, pair: int,
+     if mode == "dflash2":
+         command += ["--spec", "dflash2", "--draft-tokens", "5",
+                     "--ngram-draft-tokens", "0"]
++    command += ["--gdn-state-fp16", "--prefill-chunk", "1024", "--corpus",
++                "C:/coding/ninfer-q4k-validation/bench/fixtures/bench_corpus.ids"]
+     start = time.time()
+     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace")
+diff --git a/tests/ops/linear/qualification_q4k.h b/tests/ops/linear/qualification_q4k.h
+new file mode 100644
+--- /dev/null
++++ b/tests/ops/linear/qualification_q4k.h
+@@ -0,0 +1,21 @@
++#pragma once
++#include <cmath>
++#include <cstdint>
++
++// Stored GGML Q4_K blocks: binary16 factors, eight six-bit scale/min pairs,
++// and adjacent 32-value low/high nibble groups. Independent of GPU decoders.
++inline float qualification_half(const std::uint8_t* p) {
++    const unsigned h = unsigned(p[0]) | (unsigned(p[1]) << 8);
++    const int e = (h >> 10) & 31;
++    const double v = e ? std::ldexp(1024.0 + (h & 1023), e - 25)
++                       : std::ldexp(double(h & 1023), -24);
++    return float(h & 32768 ? -v : v);
++}
++inline float qualification_q4k(const std::uint8_t* b, int j) {
++    const int g = j / 32;
++    const auto* s = b + 4;
++    const int scale = g < 4 ? s[g] & 63 : (s[g + 4] & 15) | ((s[g - 4] >> 6) << 4);
++    const int minimum = g < 4 ? s[g + 4] & 63 : (s[g + 4] >> 4) | ((s[g] >> 6) << 4);
++    const int q = (b[16 + (g / 2) * 32 + j % 32] >> (4 * (g % 2))) & 15;
++    return (qualification_half(b) * scale) * q - qualification_half(b + 2) * minimum;
++}
+diff --git a/bench/q4k_qualification_main.cpp b/bench/q4k_qualification_main.cpp
+new file mode 100644
+--- /dev/null
++++ b/bench/q4k_qualification_main.cpp
+@@ -0,0 +1,4 @@
++int ninfer_bundle_entry_ninfer_linear_bench(int, char**);
++int main(int argc, char** argv) {
++    return ninfer_bundle_entry_ninfer_linear_bench(argc, argv);
++}

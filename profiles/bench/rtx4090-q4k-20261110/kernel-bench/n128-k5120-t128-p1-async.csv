@@ -1,0 +1,2 @@
+label,qtype,policy,N,K,T,weight_bytes,x_bytes,out_bytes,model_bytes,useful_flops,median_us,min_us,p95_us,effective_gbs,dram_spec_gbs,dram_spec_pct,sustained_read_gbs,sustained_read_pct,useful_tflops,tensor_profile,tensor_peak_tflops,tensor_peak_pct,memory_floor_us,memory_floor_pct,t1_linear_extrapolation,delta_pct,warmup,repeat,flush_bytes,execution,graph_nodes,graph_calls
+"explicit",q4_k,A16,128,5120,128,368640,1310720,32768,1712128,1.67772e+08,39.936,38.912,48.128,42.8718,1008.1,4.25275,937.529,4.57285,4.20103,,,,1.69838,4.25275,,,3,20,268435456,eager,,1

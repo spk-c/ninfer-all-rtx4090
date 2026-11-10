@@ -1,0 +1,4 @@
+[1/5] Stamping NINFER build id from git (build-time)
+[2/3] Building CUDA object tests\CMakeFiles\ninfer_linear_gguf_mmq_store_test.dir\ops\linear\test_gguf_mmq_store.cu.obj
+test_gguf_mmq_store.cu
+[3/3] Linking CXX executable tests\ninfer_tests.exe

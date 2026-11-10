@@ -1,0 +1,41 @@
+build rtx4090-v0.1.1-74-g237cdff9
+starting engine
+engine | device profile nvidia-geforce-rtx-4090-sm89: 65 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27)
+loading weights | 10.9 GiB
+weights ready | 10.9 GiB | 1.4s | 8.00 GiB/s
+CUDA graphs ready | 327 ms
+engine ready | qwen3.8-27b | total 3.6s | weights 10.9 GiB | CUDA sync auto
+phase       detail                      elapsed/progress
+tokens      generated ids             1596 1144 4087 1156 579 3296 13 14235 22903 13 2570 3766 11173 11316 25 328 760 17593 7189 264 6105 70676 28428 279 17631 17587 13 6983 4202 18402 19902 21254 11 42903 11 321 25969 1149 11173 1599 2942 13 15380 25 3437 1829 557 279 70676 321 1332 557 424 30 14235 4087 4222 6105 11 28428 279 17631 17587 13
+prepare     render/preprocess              2.35 ms
+generate    vision                            0 us
+generate    text prefill                      1.2s
+generate    decode                          939 ms
+generate    total                             2.1s
+summary     sampling                  greedy (temperature 0)
+summary     finish reason             output-limit
+summary     prompt tokens             3585
+summary     reused prompt tokens      0
+summary     generated tokens          64
+summary     model elapsed             2.1s
+summary     prefill speed             3.06k tok/s
+summary     decode speed              67.1 tok/s
+summary     throughput (overall)      30.3 tok/s
+summary     device                    0
+summary     max context               8192
+summary     KV capacity policy        explicit
+summary     KV capacity               8192
+summary     KV page groups            128 / 128
+summary     gpu weights used          10.9 GiB / 10.9 GiB
+summary     gpu sequence used         230.2 MiB / 230.2 MiB
+summary     kv cache dtype            rotated-lloyd4g64-v4g32
+summary     kv cache payload          140.0 MiB
+summary     gpu workspace peak        291.2 MiB / 291.2 MiB
+summary     runtime reservation       533.4 MiB
+summary     free after weights        11.5 GiB
+summary     free after startup        11.0 GiB
+summary     KV capacity headroom      0 B
+summary     planned slack             11.0 GiB
+summary     CUDA Graph allowance      12.0 MiB
+summary     CUDA Graph used           8.00 MiB
+summary     planned device total      11.5 GiB

@@ -1,3 +1,4 @@
+#include "core/device_wait.h"
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
@@ -40,9 +41,11 @@ PendingBatch ProgramImpl::wrap_pending(std::span<const std::uint32_t> lanes,
             ContractAccess::make_sequence(this, runtime::LaneId{lane}, lane_epochs[lane]);
     }
     pending_transaction_ = transaction;
+    // A decode round's faults; a Begin round has none (its fault throws before it is wrapped).
+    const std::array<bool, kMaximumConcurrency> faults = std::exchange(numerical_faults, {});
     return ContractAccess::make_pending(
         this, transaction.id, std::span<const SequenceHandle>(handles.data(), lanes.size()),
-        round.tokens, round.row_counts, round.logprobs, round.row_stride, round.timing);
+        round.tokens, round.row_counts, round.logprobs, round.row_stride, round.timing, faults);
 }
 
 PrefillProgress ProgramImpl::wrap_prefill(std::uint32_t lane, runtime::PrefillStepResult step) {
@@ -318,7 +321,11 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             static_cast<std::uint64_t>(sequence.execution_frontier) + row_stride > capacity) {
             throw std::logic_error("forced-token sequence frontier is invalid");
         }
-        validate_licensed_tokens(row_major_tokens.subspan(row * row_stride, row_stride));
+        for (const TokenId token : row_major_tokens.subspan(row * row_stride, row_stride)) {
+            if (token < 0 || token >= dimension(parameters.model.resources().public_token_count)) {
+                throw std::logic_error("forced token is outside the public token domain");
+            }
+        }
         if (prefix_execution_splits[row] &&
             (*prefix_execution_splits[row] == 0 || *prefix_execution_splits[row] > row_stride)) {
             throw std::logic_error("forced-token execution split is outside its row");
@@ -1112,7 +1119,7 @@ ProgramImpl::fail_all_cleanup(ProgramCleanup cleanup) noexcept {
     if (hybrid_) {
         if (cleanup == ProgramCleanup::Shutdown) { save_hybrid_cache_for_shutdown(); }
         if (device.transfer_stream != nullptr) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
+            (void)ninfer::wait_for_stream(device.transfer_stream);
         }
         hybrid_->clear();
     }
@@ -1187,8 +1194,8 @@ bool ProgramImpl::rebuild_context_stores() noexcept {
 
     // Copies still in flight may target pages about to return to the pools.
     for (std::size_t rank = 0; rank < transfer_streams.size(); ++rank) {
-        (void)cudaStreamSynchronize(compute_streams[rank]);
-        (void)cudaStreamSynchronize(transfer_streams[rank]);
+        (void)ninfer::wait_for_stream(compute_streams[rank]);
+        (void)ninfer::wait_for_stream(transfer_streams[rank]);
     }
 
     // Handles into the old stores must not alias objects of the new ones.

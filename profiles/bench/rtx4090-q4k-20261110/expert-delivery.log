@@ -1,0 +1,26 @@
+cache admission suspendable=0 bank reject, zero/auto accept, physical rounding PASS
+cache admission suspendable=1 bank reject, zero/auto accept, physical rounding PASS
+tier policy admissions=6 evictions=2 hits=26 PASS
+slot pools bad=0 PASS
+alignment unaligned entries: layer 1 gate 38, layer 2 up 72 PASS
+host cache=0 bad=0 pairs=106496 hits=0 misses=612 evictions=0 admissions=0 bank_reuses=394 prefetched=28 read=0 copied=152529408 promoted=0 banks=2 PASS
+host cache=6291456 bad=0 pairs=106496 hits=262 misses=350 evictions=0 admissions=54 bank_reuses=246 prefetched=28 read=0 copied=84273664 promoted=3206656 banks=2 PASS
+host cache=67108864 bad=0 pairs=106496 hits=484 misses=128 evictions=0 admissions=128 bank_reuses=33 prefetched=3 read=0 copied=29310976 promoted=20151296 banks=2 PASS
+host shifting cache=6291456 bad=0 pairs=106496 hits=151 misses=241 evictions=19 admissions=73 bank_reuses=52 prefetched=5 read=0 copied=54726400 promoted=1603328 banks=2 PASS
+host cpu share 0.5 bad=0 echo_bad=0 cpu_experts=59 cpu_pairs=20119 hits=91 seeded_hits=3 PASS
+host cpu share 1.0 bad=0 echo_bad=0 cpu_experts=159 cpu_pairs=54255 hits=29 seeded_hits=3 PASS
+host elastic cache keep=18 hot_hits=18 bad=0 pairs=90112 PASS
+host lent banks slots=30 lent_admissions=52 lent_evictions=32 bad=0 pairs=90112 PASS
+host span prefetch bad=0 pairs=40960 prefetched=3 bank_reuses=112 PASS
+host lent landing slots=3 bad=0 pairs=92 round_admissions=1 lent_admissions=12 x_cached=1 PASS
+disk cache=0 bad=0 pairs=106496 hits=0 misses=612 evictions=0 admissions=0 bank_reuses=394 prefetched=28 read=152529408 copied=152529408 promoted=0 banks=2 PASS
+disk cache=6291456 bad=0 pairs=106496 hits=262 misses=350 evictions=0 admissions=54 bank_reuses=246 prefetched=28 read=84273664 copied=84273664 promoted=3206656 banks=2 PASS
+disk cache=67108864 bad=0 pairs=106496 hits=484 misses=128 evictions=0 admissions=128 bank_reuses=33 prefetched=3 read=29310976 copied=29310976 promoted=20151296 banks=2 PASS
+disk shifting cache=6291456 bad=0 pairs=106496 hits=151 misses=241 evictions=19 admissions=73 bank_reuses=52 prefetched=5 read=54726400 copied=54726400 promoted=1603328 banks=2 PASS
+disk cpu share 0.5 bad=0 echo_bad=0 cpu_experts=59 cpu_pairs=20119 hits=91 seeded_hits=3 PASS
+disk cpu share 1.0 bad=0 echo_bad=0 cpu_experts=159 cpu_pairs=54255 hits=29 seeded_hits=3 PASS
+disk elastic cache keep=18 hot_hits=18 bad=0 pairs=90112 PASS
+disk lent banks slots=30 lent_admissions=52 lent_evictions=32 bad=0 pairs=90112 PASS
+disk span prefetch bad=0 pairs=40960 prefetched=3 bank_reuses=112 PASS
+disk lent landing slots=3 bad=0 pairs=92 round_admissions=1 lent_admissions=12 x_cached=1 PASS
+truncated source: error propagated and GPU wait released PASS

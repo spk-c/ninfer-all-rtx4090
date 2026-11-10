@@ -4,6 +4,7 @@
 #include "artifact/reader.h"
 #include "core/device.h"
 #include "core/gpu_clock_floor.h"
+#include "core/io_priority.h"
 #include "core/nvtx.h"
 #include "core/startup.h"
 #include "runtime/contract/sampling.h"
@@ -112,7 +113,7 @@ EngineOptions with_family_attention(EngineOptions options) {
 // run. Flash-Next's disk experts have no CPU share: a layer reads every expert its cache lacks
 // before it runs, so a verification's drafts multiply the reads. Flash-Next takes its DFlash2
 // drafter where the artifact carries one, which drafted faster than its MTP block, else the block;
-// Gemma 4 its assistant.
+// over pipeline stages, where DFlash2 does not run, the block. Gemma 4 takes its assistant.
 EngineOptions with_family_speculation(EngineOptions options) {
     SpeculativeOptions& speculative = options.speculative;
     if (!speculative.automatic || speculative.backend != SpeculativeBackend::None ||
@@ -126,7 +127,8 @@ EngineOptions with_family_speculation(EngineOptions options) {
         return options;
     }
     const auto& components = artifact::Reader(options.artifact_path).directory().components;
-    if (flash_next && components.contains("dflash2")) {
+    const bool stages = options.devices.size() > 1 && !options.tensor_parallel;
+    if (flash_next && !stages && components.contains("dflash2")) {
         speculative.backend      = SpeculativeBackend::DFlash2;
         speculative.draft_tokens = SpeculativeOptions::kAutomaticDFlash2Tokens;
         // The round verifies through the first draft the selector is unsure of, unless
@@ -787,6 +789,24 @@ private:
 };
 
 Engine::Engine(EngineOptions options) {
+    // Before the artifact is read: Windows throttles the reads of a process that inherited a low
+    // I/O priority (a Task Scheduler task, a service, some IDE terminals).
+    if (const auto io = raise_low_io_priority()) {
+        if (io->after >= kIoPriorityNormal) {
+            runtime::publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
+                                        "raised the I/O priority this process inherited (%d, "
+                                        "below normal) to normal: Windows throttles low-priority "
+                                        "reads",
+                                        io->before);
+        } else {
+            runtime::publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Warning,
+                                        "this process inherited I/O priority %d (below normal) "
+                                        "and Windows refused to raise it: model, table and disk "
+                                        "tier reads may be several times slower; start the engine "
+                                        "from a normal-priority process",
+                                        io->before);
+        }
+    }
     StartupObserver startup_observer = options.startup_observer;
     StartupPhaseScope startup_phase(startup_observer, StartupPhase::EngineStartup);
     impl_ = std::make_shared<Impl>(std::move(options));

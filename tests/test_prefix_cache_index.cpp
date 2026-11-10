@@ -496,7 +496,8 @@ void test_persistence_roundtrip() {
     for (const SnapshotRef snapshot : snapshots) {
         const SnapshotView view = source.snapshot(snapshot);
         const auto copy         = restored.restore_host_snapshot(
-            mapped(view.anchor), view.frontier, view.tail, view.kind, view.hits, view.branch_point);
+            mapped(view.anchor), view.frontier, view.tail, view.kind, view.hits, view.branch_point,
+            view.periodic);
         require(copy.has_value(), "a persisted snapshot did not restore");
         require(restored.snapshot(*copy).branch_point == (snapshot == backed),
                 "a restored snapshot must keep its branch point flag");
@@ -545,8 +546,21 @@ void test_tail_device_fill() {
     require(index.snapshot(endpoint.snapshot).host_slabs.size() == 5,
             "a host-backed tail needs its own slab");
     index.release_path(path);
-    // Evict the block and the tail; both are host-backed so the snapshot survives.
-    require(index.evict_device_blocks(2) == 2, "block and tail must be evictable");
+    // While its image holds a Device slot, the snapshot keeps its tail on the Device: only the
+    // block goes.
+    require(index.evict_device_blocks(2) == 1 && backend.live.count(tail_id) == 1 &&
+                index.snapshot(endpoint.snapshot).tail_device_copy == CopyState::Resident,
+            "a snapshot holding a Device slot must keep its tail on the Device");
+    // Its slot goes to another snapshot once the free one is taken (it keeps its Host copy); then
+    // the tail can go too, and the host-backed snapshot survives.
+    const auto free_slot = index.acquire_device_slot();
+    const auto taken     = index.acquire_device_slot();
+    require(free_slot.has_value() && taken.has_value() &&
+                index.snapshot(endpoint.snapshot).device_slot == kNoId,
+            "a backed owner gives up its Device slot");
+    index.release_device_slot(*free_slot);
+    index.release_device_slot(*taken);
+    require(index.evict_device_blocks(1) == 1, "the tail must be evictable once the slot is gone");
     require(backend.live.count(tail_id) == 0, "the tail's device page must be released");
     const SnapshotView evicted = index.snapshot(endpoint.snapshot);
     require(index.valid(endpoint.snapshot) && evicted.tail_device_copy == CopyState::Absent,
@@ -803,55 +817,93 @@ void test_unshared_boundary() {
 }
 
 // Hits count only while they are recent (§9.3): once a third of the block capacity (Device pages
-// plus Host slabs) has been published since a snapshot's last hit, GDSF values it as never hit.
-// A document asked about nine times and then left must not outrank the conversations that follow
-// it for good (issue #222), while one still being asked about keeps its rank.
+// plus Host slabs) has been published since a snapshot's last hit, half of them count, and after
+// two thirds GDSF values it as never hit. A document asked about nine times and then left must not
+// outrank the conversations that follow it for good (issue #222), while one still being asked
+// about keeps its rank even when a round of conversations that missed passes one window between
+// two of its questions (issue #248).
 void test_hits_expire() {
-    for (const bool expired : {false, true}) {
-        RecordingBackend backend;
-        // 8 slabs: two tail-less images. max_nodes 256: hits expire after 85 published blocks.
-        PrefixCacheIndex index(small_config(8, 4), backend);
-        const auto doc      = make_tokens(64 * 4, 80);
-        const auto doc_path = insert_sequence(index, backend, doc);
-        const SnapshotRef document =
-            publish_at(index, backend, doc_path, doc, 64 * 4, SnapshotKind::Tap);
-        for (int hit = 0; hit < 9; ++hit) { index.note_hit(document); }
-        require(index.snapshot(document).hits == 9, "hits count while recent");
-        const auto chat      = make_tokens(64 * 4, 81);
-        const auto chat_path = insert_sequence(index, backend, chat);
-        const SnapshotRef conversation =
-            publish_at(index, backend, chat_path, chat, 64 * 4, SnapshotKind::Endpoint);
-        backup_snapshot(index, document);
-        backup_snapshot(index, conversation);
-        if (expired) {
-            // Other traffic publishes 72 blocks: the document's hits, published at clock 8, still
-            // count at 88 and expire when the next snapshot brings the clock to 96 (8 + 85 <= 96).
-            const auto other      = make_tokens(64 * 72, 82);
-            const auto other_path = insert_sequence(index, backend, other);
-            require(index.snapshot(document).hits == 9, "the window has not passed yet");
-            index.release_path(other_path);
+    enum class Age { Recent, OneWindow, TwoWindows };
+    // Plain: a conversation's own snapshot hit right after its publication. Burst: a branch point
+    // asked about in one burst right after its publication. Periodic: a branch point first asked
+    // about after a pause. Returning: a conversation's own snapshot first hit after a pause.
+    enum class Kind { Plain, Burst, Periodic, Returning };
+    for (const Kind kind : {Kind::Plain, Kind::Burst, Kind::Periodic, Kind::Returning}) {
+        const bool paused = kind == Kind::Periodic || kind == Kind::Returning;
+        const bool branch = kind == Kind::Burst || kind == Kind::Periodic;
+        for (const Age age : {Age::Recent, Age::OneWindow, Age::TwoWindows}) {
+            RecordingBackend backend;
+            // 8 slabs: two tail-less images. max_nodes 256: the window is 85 published blocks.
+            PrefixCacheIndex index(small_config(8, 4), backend);
+            // 48 blocks of other content, published before the document or between its
+            // publication and its first hit: either way the hits happen at clock 56.
+            const auto pause = make_tokens(64 * 48, 79);
+            std::vector<NodeRef> pause_path;
+            if (!paused) { pause_path = insert_sequence(index, backend, pause); }
+            const auto doc      = make_tokens(64 * 4, 80);
+            const auto doc_path = insert_sequence(index, backend, doc);
+            const SnapshotRef document =
+                publish_at(index, backend, doc_path, doc, 64 * 4, SnapshotKind::Tap);
+            if (paused) { pause_path = insert_sequence(index, backend, pause); }
+            if (branch) {
+                // Its own prompt moved past it, then another request resumed from it: the questions
+                // about a document branch here.
+                index.supersede(document, Supersession::NextTap);
+            }
+            for (int hit = 0; hit < 9; ++hit) { index.note_hit(document); }
+            require(index.snapshot(document).hits == 9 &&
+                        index.snapshot(document).branch_point == branch &&
+                        index.snapshot(document).periodic == paused,
+                    "hits count while recent; a hit after half a window marks a periodic one");
+            const auto chat      = make_tokens(64 * 4, 81);
+            const auto chat_path = insert_sequence(index, backend, chat);
+            const SnapshotRef conversation =
+                publish_at(index, backend, chat_path, chat, 64 * 4, SnapshotKind::Endpoint);
+            backup_snapshot(index, document);
+            backup_snapshot(index, conversation);
+            // A periodic snapshot keeps half its hits for a second window, a branch point or not;
+            // one hit in a burst keeps none past the first, so it does not hold the cache longer
+            // than the hits that earned it.
+            const std::uint32_t half = paused ? 4U : 0U;
+            if (age != Age::Recent) {
+                // The document's hits, counted at clock 56, count fully until 141 (56 + 85) and a
+                // periodic snapshot's half until 226. The conversation brings the clock to 64;
+                // 72 blocks bring it to 136, 157 to 221; the next snapshot adds 8.
+                const std::uint32_t blocks = age == Age::OneWindow ? 72U : 157U;
+                const auto other           = make_tokens(64 * blocks, 82);
+                const auto other_path      = insert_sequence(index, backend, other);
+                require(index.snapshot(document).hits == (age == Age::OneWindow ? 9U : half),
+                        "the window has not passed yet, or a periodic snapshot's half counts");
+                index.release_path(other_path);
+            }
+            const auto next      = make_tokens(64 * 4, 83);
+            const auto next_path = insert_sequence(index, backend, next);
+            const SnapshotRef fresh =
+                publish_at(index, backend, next_path, next, 64 * 4, SnapshotKind::Endpoint);
+            const std::uint32_t counted = age == Age::Recent ? 9U : age == Age::OneWindow ? half : 0U;
+            require(index.snapshot(document).hits == counted,
+                    "all hits count within one window, a periodic snapshot's half within two, "
+                    "none after");
+            backup_snapshot(index, fresh);
+            // Equal C / Z: the counted hits decide while there are any, and recency once they expired.
+            const bool kept = counted > 0;
+            require(index.snapshot(document).host == (kept ? CopyState::Resident : CopyState::Absent) &&
+                        index.snapshot(conversation).host ==
+                            (kept ? CopyState::Absent : CopyState::Resident),
+                    kept ? "a document asked about within its counted hits must keep its Host copy"
+                         : "a snapshot whose hits expired must yield its Host copy");
+            index.note_hit(document);
+            require(index.snapshot(document).hits == counted + 1U,
+                    "a hit counts on top of the hits still counted");
+            require(index.snapshot(document).periodic ==
+                        (paused || age != Age::Recent),
+                    "a hit after a window's pause marks a document asked about periodically");
+            index.release_path(pause_path);
+            index.release_path(doc_path);
+            index.release_path(chat_path);
+            index.release_path(next_path);
+            index.check_invariants();
         }
-        const auto next      = make_tokens(64 * 4, 83);
-        const auto next_path = insert_sequence(index, backend, next);
-        const SnapshotRef fresh =
-            publish_at(index, backend, next_path, next, 64 * 4, SnapshotKind::Endpoint);
-        require(index.snapshot(document).hits == (expired ? 0U : 9U),
-                expired ? "hits must expire once the window has passed"
-                        : "hits must still count within the window");
-        backup_snapshot(index, fresh);
-        // Equal C / Z: the nine hits decide while they count, and recency once they expired.
-        require(index.snapshot(document).host == (expired ? CopyState::Absent : CopyState::Resident) &&
-                    index.snapshot(conversation).host ==
-                        (expired ? CopyState::Resident : CopyState::Absent),
-                expired ? "a document nobody asks about any more must yield its Host copy"
-                        : "a document still asked about must keep its Host copy");
-        index.note_hit(document);
-        require(index.snapshot(document).hits == (expired ? 1U : 10U),
-                "a hit counts on top of the hits still counted");
-        index.release_path(doc_path);
-        index.release_path(chat_path);
-        index.release_path(next_path);
-        index.check_invariants();
     }
 }
 
@@ -1117,6 +1169,119 @@ void test_write_through_keeps_superseded_tap() {
     require(serve(1) == 64 * 12, "the next question must resume from the ladder tap");
 }
 
+// A snapshot whose image holds a Device slot keeps its tail on the Device, so a Host eviction
+// takes only its Host copy. Before, Device pressure evicted the tail first, and a lane's block
+// write-through then removed the snapshot whole: another conversation's resume point, whose image
+// was still on the Device. A 4 GiB Host tier served issue #222's rotation less than 2 GiB did.
+void test_slot_snapshot_keeps_tail() {
+    RecordingBackend backend;
+    // 5 slabs: one image with its tail.
+    PrefixCacheIndex index(small_config(5, 2), backend);
+    const auto chat      = make_tokens(64 * 2 + 10, 90);
+    const auto chat_path = insert_sequence(index, backend, chat);
+    for (const NodeRef node : chat_path) { index.pin_node(node); }
+    const SnapshotRef resume =
+        publish_at(index, backend, chat_path, chat, 64 * 2 + 10, SnapshotKind::Endpoint);
+    for (const NodeRef node : chat_path) { index.unpin_node(node); }
+    backup_snapshot(index, resume);
+    index.release_path(chat_path);
+    // Device pressure takes the unbacked blocks' only copies last; the tail is not offered.
+    require(index.device_evictable_blocks() == 2,
+            "a Device-slot snapshot's tail must not be a Device eviction candidate");
+    const auto other      = make_tokens(64, 91);
+    const auto other_path = insert_sequence(index, backend, other);
+    index.pin_node(other_path[0]);
+    const auto slab = index.begin_host_fill(other_path[0]);
+    require(slab.has_value(), "the write-through takes the Host copy of a snapshot whole on the Device");
+    index.complete_host_fill(other_path[0]);
+    index.unpin_node(other_path[0]);
+    const SnapshotView view = index.snapshot(resume);
+    require(index.valid(resume) && view.host == CopyState::Absent && view.device_slot != kNoId &&
+                view.tail_device_copy == CopyState::Resident,
+            "the snapshot must stay whole on the Device after its Host copy yields");
+    index.release_path(other_path);
+    index.check_invariants();
+}
+
+// A lane's blocks serve the snapshots it published: their write-through displaces no retained
+// snapshot worth more than the most valuable of those.
+void test_write_through_claim() {
+    RecordingBackend backend;
+    // 4 slabs: one tail-less image.
+    PrefixCacheIndex index(small_config(4, 4), backend);
+    const auto a      = make_tokens(64 * 8, 92);
+    const auto path_a = insert_sequence(index, backend, a);
+    const SnapshotRef valuable =
+        publish_at(index, backend, path_a, a, 64 * 8, SnapshotKind::Boundary);
+    backup_snapshot(index, valuable);
+    index.release_path(path_a);
+    const auto b            = make_tokens(64 * 2, 93);
+    const auto path_b       = insert_sequence(index, backend, b);
+    const SnapshotRef cheap = publish_tap(index, path_b[1]);
+    const SnapshotRef published[] = {cheap, valuable};
+    require(index.retained_priority(std::span<const SnapshotRef>(published, 1)) <
+                index.retained_priority(std::span<const SnapshotRef>(published, 2)),
+            "the claim is the most valuable retained snapshot");
+    require(index.retained_priority({}) == -std::numeric_limits<double>::infinity(),
+            "a lane that published nothing claims nothing");
+    const double claim = index.retained_priority(std::span<const SnapshotRef>(published, 1));
+    index.pin_node(path_b[0]);
+    require(!index.begin_host_fill(path_b[0], {}, claim).has_value(),
+            "a lane's blocks must not displace a retained snapshot worth more than its own");
+    require(index.snapshot(valuable).host == CopyState::Resident,
+            "the more valuable snapshot keeps its Host copy");
+    index.supersede(cheap, Supersession::NextTap);
+    require(index.retained_priority(std::span<const SnapshotRef>(published, 1)) ==
+                -std::numeric_limits<double>::infinity(),
+            "a superseded snapshot claims nothing");
+    const auto slab = index.begin_host_fill(path_b[0]);
+    require(slab.has_value() && index.snapshot(valuable).host == CopyState::Absent,
+            "without a claim the write-through takes the Host copy of a snapshot whole on the Device");
+    index.complete_host_fill(path_b[0]);
+    index.unpin_node(path_b[0]);
+    index.release_path(path_b);
+    index.check_invariants();
+}
+
+// The image a lane writes to the Host never displaces the lane's newest superseded tap, as its
+// block write-through does not: the next question about the same document resumes from it.
+void test_image_write_keeps_superseded_tap() {
+    for (const bool keep : {true, false}) {
+        RecordingBackend backend;
+        // 8 slabs: two tail-less images.
+        PrefixCacheIndex index(small_config(8, 4), backend);
+        const auto other      = make_tokens(64 * 8, 94);
+        const auto other_path = insert_sequence(index, backend, other);
+        const SnapshotRef valuable =
+            publish_at(index, backend, other_path, other, 64 * 8, SnapshotKind::Boundary);
+        backup_snapshot(index, valuable);
+        index.release_path(other_path);
+        const auto doc      = make_tokens(64 * 3, 95);
+        const auto doc_path = insert_sequence(index, backend, doc);
+        const SnapshotRef ladder = publish_tap(index, doc_path[1]);
+        backup_snapshot(index, ladder);
+        const SnapshotRef opener = publish_tap(index, doc_path[2]);
+        index.supersede(ladder, Supersession::NextTap);
+        index.pin_snapshot(opener);
+        const bool written = index.begin_snapshot_host_fill(opener, keep ? ladder : SnapshotRef{});
+        if (written) { index.complete_snapshot_host_fill(opener); }
+        index.unpin_snapshot(opener);
+        if (keep) {
+            require(!written && index.valid(ladder) &&
+                        index.snapshot(ladder).host == CopyState::Resident,
+                    "the lane's own image must not displace its newest superseded tap");
+        } else {
+            require(written && (!index.valid(ladder) || index.snapshot(ladder).host ==
+                                                            CopyState::Absent),
+                    "without the keep a superseded tap yields its slabs first");
+        }
+        require(index.snapshot(valuable).host == CopyState::Resident,
+                "the more valuable snapshot keeps its Host copy");
+        index.release_path(doc_path);
+        index.check_invariants();
+    }
+}
+
 void test_image_only_host_tier() {
     RecordingBackend backend;
     PrefixIndexConfig config = small_config(8, 1);
@@ -1142,7 +1307,13 @@ void test_image_only_host_tier() {
     index.release_path(path_a);
     index.check_invariants();
 
-    // The tail is unbacked: evicting it loses the snapshot even though its image is on host.
+    // The tail is unbacked: once its image leaves the Device slot, evicting the tail loses the
+    // snapshot even though its image is on host.
+    const auto taken = index.acquire_device_slot();
+    require(taken.has_value() && index.valid(endpoint.snapshot) &&
+                index.snapshot(endpoint.snapshot).device_slot == kNoId,
+            "an image-backed owner gives up its Device slot");
+    index.release_device_slot(*taken);
     std::uint32_t released = 0;
     while (index.valid(endpoint.snapshot) && released < 4) {
         released += index.evict_device_blocks(1);
@@ -1499,6 +1670,26 @@ void test_tap_planner() {
     }
     require(find(excluded, 12000).has_value(), "an excluded explicit tap moves to the span start");
 
+    // A media item's exclusion reaches the end of the block the item begins in: a frontier inside
+    // that block would have the item in no block key. Items that end past it keep their own end.
+    require(media_exclusion(970, 990).begin == 970 && media_exclusion(970, 990).end == 1024,
+            "a media item inside one block excludes the rest of that block");
+    require(media_exclusion(960, 1024).end == 1024 && media_exclusion(1000, 1300).end == 1300 &&
+                media_exclusion(1023, 1024).end == 1024 && media_exclusion(0, 4).end == 64,
+            "a media item's exclusion ends at its own end or its first block's end");
+    const std::vector<TapExclusion> media{media_exclusion(970, 990)};
+    require(!inside_exclusion(970, media) && inside_exclusion(971, media) &&
+                inside_exclusion(990, media) && inside_exclusion(1023, media) &&
+                !inside_exclusion(1024, media) && !inside_exclusion(960, media),
+            "a frontier past a media item waits for the end of the item's first block");
+    // The generation opener 20 tokens past a 20-token item moves to the item's start.
+    const std::vector<TapHint> after_media{{1010, TapHintKind::GenerationOpener}};
+    const auto short_media = plan_taps(1013, 0, after_media, {}, media, config);
+    for (const PlannedTap& tap : short_media) {
+        require(!inside_exclusion(tap.position, media), "tap in a media item's first block");
+    }
+    require(find(short_media, 970).has_value(), "the opener past a short media item moves before it");
+
     // Budget: the highest-priority tap survives.
     TapPlannerConfig one = config;
     one.max_new_taps     = 1;
@@ -1590,6 +1781,9 @@ int main() {
         test_persistence_roundtrip();
         test_restore_plan();
         test_image_only_host_tier();
+        test_slot_snapshot_keeps_tail();
+        test_write_through_claim();
+        test_image_write_keeps_superseded_tap();
         test_random_stress();
         test_tap_planner();
     } catch (const std::exception& error) {
