@@ -46,6 +46,10 @@ constexpr int kLatent        = 512; // the attention latent: key and value of ev
 constexpr int kIndexDim      = 128; // the indexer's head width
 constexpr int kTailSlots     = 16;  // a ratio-2 compressor's kept rows per sequence
 constexpr int kRing          = 256; // a sequence's window ring: the window and a round's drafts
+// A sequence's window ring, and a compressed position's latent, key and key scales (kernels.h).
+constexpr std::size_t kRingBytes          = std::size_t(kRing) * kernels::kWindowRowBytes;
+constexpr std::size_t kCompressedRowBytes = std::size_t(kernels::kLatentRowBytes) +
+                                            kernels::kKeyRowBytes + kernels::kKeyScaleBytes;
 constexpr int kCandidateBits = 32;
 // Index scores of a prompt chunk are computed for as many rows at once as this many bytes hold.
 constexpr std::size_t kScoreBudget = std::size_t(64) << 20;
@@ -156,19 +160,25 @@ std::vector<float> rope_freq(int dim, float base, std::uint32_t original, float 
     return f;
 }
 
-// A context-sized cache plane: a row of `row_bytes` per sequence, `position_bytes` a token
-// position. Owned whole, or, beside an elastic expert cache, a growable region whose rows are
-// backed only as far as their sequence has reached (Impl::back).
+// A context-sized cache plane: a row of `row_bytes` per sequence, `entry_bytes` for every `ratio`
+// token positions. Owned whole, or, beside an elastic expert cache, a growable region whose rows
+// are backed only as far as their sequence has reached (Impl::back).
 struct KvArea {
     DeviceBuffer owned;
     GrowableRegion region;
     void* p = nullptr;
-    std::size_t bytes = 0, row_bytes = 0, position_bytes = 0;
+    std::size_t bytes = 0, row_bytes = 0, entry_bytes = 0, ratio = 1;
     std::vector<std::uint32_t> backed; // positions backed, by sequence
 
+    // The bytes of a row that its first `positions` positions reach.
+    [[nodiscard]] std::size_t extent(std::uint32_t positions) const {
+        return std::min(row_bytes, (std::size_t(positions) + ratio - 1) / ratio * entry_bytes);
+    }
+
     KvArea() = default;
-    KvArea(std::size_t owners, std::size_t row, std::size_t position, bool growing, int device)
-        : bytes(owners * row), row_bytes(row), position_bytes(position), backed(owners, 0) {
+    KvArea(std::size_t owners, std::size_t row, std::size_t entry, std::size_t per, bool growing,
+           int device)
+        : bytes(owners * row), row_bytes(row), entry_bytes(entry), ratio(per), backed(owners, 0) {
         if (growing) {
             region = GrowableRegion(bytes, {.device = device});
             p      = region.data();
@@ -213,16 +223,18 @@ struct LayerPlan {
     gguf::GgmlType gate_up_type{}, down_type{};
     std::int64_t gate_up_row_bytes = 0, down_row_bytes = 0;
     DeviceBuffer tables; // device experts: [E] gate, [E] up, [E] gate_up, [E] down
+    // A drafter block under --draft-experts: its kept experts' weights, router rows and biases.
+    DeviceBuffer kept_experts, kept_router;
     int delivery_layer = -1;
     int engram         = -1; // index among the Engram blocks
     Weight engram_projection;
     const float* engram_gate = nullptr;
-    // Every sequence's window ring, [sequences][kRing][512] BF16.
+    // Every sequence's window ring, [sequences][kRing] rows of kWindowRowBytes (kernels.h).
     DeviceBuffer ring;
-    // kv source: the compressed latents [sequences][rows][512] and index keys [sequences][rows][128]
-    // (BF16), rows = max_context / ratio; ratio 2: the tails [sequences][kTailSlots][512] FP32 of kv
-    // and score.
-    KvArea latents, keys;
+    // kv source: the compressed latents [sequences][rows] of kLatentRowBytes, the index keys'
+    // codes [sequences][rows] of kKeyRowBytes and their scales of kKeyScaleBytes, rows =
+    // max_context / ratio; ratio 2: the tails [sequences][kTailSlots][512] FP32 of kv and score.
+    KvArea latents, keys, key_scales;
     int rows = 0;
     DeviceBuffer tail_kv, tail_score;
     // The checkpoint of every sequence's ring and tails (snapshot()).
@@ -282,6 +294,7 @@ struct Executor::Impl {
     std::vector<KvArea*> sequence_areas;
     std::atomic<std::uint64_t> kv_backed{0};
     std::uint64_t kv_fixed = 0, kv_bytes = 0;
+    std::uint64_t drafter_expert_bytes = 0; // see ExecutorMemory
     std::vector<LayerPlan> layers;
     // The CPU's share of missing experts; it outlives the delivery that calls it.
     std::unique_ptr<CpuExperts> cpu_experts;
@@ -379,6 +392,9 @@ struct Executor::Impl {
     } ahead;
     // One sequence's rings and tails, the state a branch pass returns to.
     DeviceBuffer branch_state;
+    // Every sequence's held state (hold()): its rings and tails, state() order, branch_bytes each.
+    DeviceBuffer hold_state;
+    std::size_t hold_bytes = 0;
     // The vision tower, and a prompt step's images: their rows' flags (pinned, then on the
     // device, one byte per staged row), the pieces of their span rows a step places, the device
     // rows a piece passes through (one image span at most, also the tower's output), the patches
@@ -499,18 +515,24 @@ struct Executor::Impl {
             // numbers rather than fail inside an allocation.
             std::size_t needed = 0;
             for (std::uint32_t i = 0; i < config.num_hidden_layers; ++i) {
-                needed += (options.checkpoints ? 2 : 1) * std::size_t(sequences) * kRing * kLatent * 2;
+                needed += (options.checkpoints ? 2 : 1) * std::size_t(sequences) * kRingBytes;
                 if (config.kv_source[i]) {
                     const std::size_t rows = options.max_context / config.compress_ratios[i];
-                    needed += std::size_t(sequences) * rows * (kLatent + kIndexDim) * 2;
+                    needed += std::size_t(sequences) * rows * kCompressedRowBytes;
                 }
             }
             if (model.dspark()) {
                 needed += model.dspark()->layers.size() * (options.checkpoints ? 2 : 1) *
-                              std::size_t(sequences) * kRing * kLatent * 2 +
+                              std::size_t(sequences) * kRingBytes +
                           std::size_t(window) * model.dspark_config()->target_layers.size() * hidden * 4;
             }
-            needed += std::size_t(prefill_ring) * kLatent * 2;
+            needed += std::size_t(prefill_ring) * kernels::kWindowRowBytes;
+            if (options.checkpoints) {
+                // The held state (hold()): another copy of every sequence's rings.
+                needed += (config.num_hidden_layers +
+                           (model.dspark() ? model.dspark()->layers.size() : 0)) *
+                          std::size_t(sequences) * kRingBytes;
+            }
             std::size_t free_bytes = 0, total_bytes = 0;
             CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
             const std::size_t reserve = start_reserve();
@@ -524,7 +546,7 @@ struct Executor::Impl {
                     " MiB are free after the weights; lower --max-concurrency or --max-context");
             }
         }
-        const std::size_t ring_bytes = std::size_t(kRing) * kLatent * 2;
+        const std::size_t ring_bytes = kRingBytes;
         const std::size_t tail_bytes = std::size_t(kTailSlots) * kLatent * 4;
         std::size_t branch_bytes     = 0;
         for (std::uint32_t i = 0; i < config.num_hidden_layers; ++i) {
@@ -579,11 +601,14 @@ struct Executor::Impl {
             }
             if (p.kv_source) {
                 p.rows = int(options.max_context / std::uint32_t(p.ratio));
-                p.latents = KvArea(std::size_t(sequences), std::size_t(p.rows) * kLatent * 2,
-                                   std::size_t(kLatent) * 2 / p.ratio, growing, device_id);
-                p.keys    = KvArea(std::size_t(sequences), std::size_t(p.rows) * kIndexDim * 2,
-                                   std::size_t(kIndexDim) * 2 / p.ratio, growing, device_id);
-                kv_bytes += p.latents.bytes + p.keys.bytes;
+                const auto area = [&](int entry) {
+                    return KvArea(std::size_t(sequences), std::size_t(p.rows) * entry, std::size_t(entry),
+                                  std::size_t(p.ratio), growing, device_id);
+                };
+                p.latents    = area(kernels::kLatentRowBytes);
+                p.keys       = area(kernels::kKeyRowBytes);
+                p.key_scales = area(kernels::kKeyScaleBytes);
+                kv_bytes += p.latents.bytes + p.keys.bytes + p.key_scales.bytes;
                 capacity_rows = std::max(capacity_rows, p.rows);
                 if (p.ratio > 1) {
                     p.tail_kv    = DeviceBuffer(tail_bytes * sequences);
@@ -610,15 +635,21 @@ struct Executor::Impl {
         }
         plan_prefill_tail();
         if (model.dspark()) { plan_drafter(ring_bytes, branch_bytes); }
-        staging = DeviceBuffer(std::size_t(prefill_ring) * kLatent * 2);
+        staging = DeviceBuffer(std::size_t(prefill_ring) * kernels::kWindowRowBytes);
         staging.fill(0);
         kv_bytes += staging.bytes;
         branch_state = DeviceBuffer(branch_bytes);
         kv_bytes += branch_state.bytes;
+        if (options.checkpoints) {
+            hold_bytes = branch_bytes;
+            hold_state = DeviceBuffer(branch_bytes * std::size_t(sequences));
+            kv_bytes += hold_state.bytes;
+        }
         for (LayerPlan& p : layers) {
             if (!p.kv_source) { continue; }
             sequence_areas.push_back(&p.latents);
             sequence_areas.push_back(&p.keys);
+            sequence_areas.push_back(&p.key_scales);
         }
         kv_fixed = kv_bytes;
         if (growing) {
@@ -777,6 +808,87 @@ struct Executor::Impl {
         p.tables.copy_from_host(table.data(), table.size() * sizeof(void*));
     }
 
+    // --draft-experts: a drafter block's kept experts (Model::dspark_kept, ascending), copied from
+    // the pinned host weights to one device buffer with the kernels' zero tails, and their router
+    // rows and biases, so the block routes among them as experts 0..N-1. Startup only.
+    void keep_drafter_experts(LayerPlan& p, const LayerWeights& lw, std::span<const std::int32_t> kept) {
+        const int n           = int(kept.size());
+        constexpr std::size_t kAlign = 256, kTail = 512;
+        const auto aligned    = [](std::size_t bytes) { return (bytes + kAlign - 1) / kAlign * kAlign; };
+        p.kept_router         = DeviceBuffer(aligned(std::size_t(n) * hidden * 4) + std::size_t(n) * 4);
+        auto* router          = static_cast<float*>(p.kept_router.p);
+        auto* bias            = reinterpret_cast<float*>(static_cast<std::byte*>(p.kept_router.p) +
+                                                         aligned(std::size_t(n) * hidden * 4));
+        for (int i = 0; i < n; ++i) {
+            const auto x = std::size_t(kept[std::size_t(i)]);
+            CUDA_CHECK(cudaMemcpy(router + std::size_t(i) * hidden, p.router + x * hidden,
+                                  std::size_t(hidden) * 4, cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(bias + i, p.router_bias + x, 4, cudaMemcpyDeviceToDevice));
+        }
+        p.router      = router;
+        p.router_bias = bias;
+        p.experts     = n;
+        // Each run: `bytes` per expert at `source` (host), expert x at source + x * bytes.
+        struct Run {
+            const std::byte* source;
+            std::size_t bytes;
+            std::byte* target = nullptr;
+        };
+        std::vector<Run> runs;
+        if (p.stq) {
+            for (ops::stq::Matrices* m : {&p.stq->gate, &p.stq->up, &p.stq->down}) {
+                runs.push_back({reinterpret_cast<const std::byte*>(m->trellis),
+                                std::size_t(m->trellis_stride) * 2});
+                runs.push_back({reinterpret_cast<const std::byte*>(m->suh), std::size_t(m->k) * 2});
+                runs.push_back({reinterpret_cast<const std::byte*>(m->svh), std::size_t(m->n) * 2});
+            }
+        } else {
+            const Weight gate_up = matrix(model, *lw.moe.gate_up);
+            const Weight down    = matrix(model, *lw.moe.down);
+            p.gate_up_type       = ops::detail::gguf_type(gate_up.qtype);
+            p.down_type          = ops::detail::gguf_type(down.qtype);
+            p.gate_up_row_bytes  = row_bytes(gate_up);
+            p.down_row_bytes     = row_bytes(down);
+            runs.push_back({static_cast<const std::byte*>(gate_up.qdata),
+                            std::size_t(2 * width) * std::size_t(p.gate_up_row_bytes)});
+            runs.push_back({static_cast<const std::byte*>(down.qdata),
+                            std::size_t(hidden) * std::size_t(p.down_row_bytes)});
+        }
+        std::size_t total = 0;
+        for (const Run& run : runs) { total += aligned(run.bytes * std::size_t(n) + kTail); }
+        p.kept_experts = DeviceBuffer(total);
+        p.kept_experts.fill(0);
+        auto* at = static_cast<std::byte*>(p.kept_experts.p);
+        for (Run& run : runs) {
+            run.target = at;
+            for (int i = 0; i < n; ++i) {
+                CUDA_CHECK(cudaMemcpy(at + std::size_t(i) * run.bytes,
+                                      run.source + std::size_t(kept[std::size_t(i)]) * run.bytes,
+                                      run.bytes, cudaMemcpyHostToDevice));
+            }
+            at += aligned(run.bytes * std::size_t(n) + kTail);
+        }
+        if (p.stq) {
+            std::size_t r = 0;
+            for (ops::stq::Matrices* m : {&p.stq->gate, &p.stq->up, &p.stq->down}) {
+                m->trellis = reinterpret_cast<const std::uint16_t*>(runs[r++].target);
+                m->suh     = reinterpret_cast<const __half*>(runs[r++].target);
+                m->svh     = reinterpret_cast<const __half*>(runs[r++].target);
+            }
+            return;
+        }
+        std::vector<const void*> table(4 * std::size_t(n));
+        for (int x = 0; x < n; ++x) {
+            const std::byte* gu = runs[0].target + std::size_t(x) * runs[0].bytes;
+            table[std::size_t(x)]         = gu;
+            table[std::size_t(n + x)]     = gu + std::int64_t(width) * p.gate_up_row_bytes;
+            table[std::size_t(2 * n + x)] = gu;
+            table[std::size_t(3 * n + x)] = runs[1].target + std::size_t(x) * runs[1].bytes;
+        }
+        p.tables = DeviceBuffer(table.size() * sizeof(void*));
+        p.tables.copy_from_host(table.data(), table.size() * sizeof(void*));
+    }
+
     // The drafter's blocks with their rings (and checkpoints), its tables and its buffers.
     void plan_drafter(std::size_t ring_bytes, std::size_t& branch_bytes) {
         const DSparkConfig& dc = *model.dspark_config();
@@ -808,8 +920,13 @@ struct Executor::Impl {
             const LayerWeights& lw = dw.layers[b];
             LayerPlan p = plan_block(lw, 0, int(dc.experts), int(dc.top_k),
                                      dc.stq ? &dw.stq_layers.at(b) : nullptr);
+            const bool kept = !model.dspark_kept().empty();
+            if (kept) {
+                keep_drafter_experts(p, lw, model.dspark_kept().at(b));
+                drafter_expert_bytes += p.kept_experts.bytes + p.kept_router.bytes;
+            }
             if (!dc.stq) {
-                plan_resident(p, lw.moe);
+                if (!kept) { plan_resident(p, lw.moe); }
                 // The seed's kv rows: of [query_a; kv] when the two are one parent.
                 Weight kv = p.query_kv.back();
                 if (p.query_kv.size() == 1) {
@@ -1250,13 +1367,11 @@ struct Executor::Impl {
 
     [[nodiscard]] std::size_t missing(const KvArea& a, std::size_t owner, std::uint32_t positions) const {
         if (!a.region || positions <= a.backed[owner]) { return 0; }
-        return a.region.unmapped_bytes(owner * a.row_bytes,
-                                       std::min(a.row_bytes, std::size_t(positions) * a.position_bytes));
+        return a.region.unmapped_bytes(owner * a.row_bytes, a.extent(positions));
     }
     [[nodiscard]] bool extend(KvArea& a, std::size_t owner, std::uint32_t positions) {
         if (!a.region || positions <= a.backed[owner]) { return true; }
-        if (!a.region.map(owner * a.row_bytes,
-                          std::min(a.row_bytes, std::size_t(positions) * a.position_bytes), stream)) {
+        if (!a.region.map(owner * a.row_bytes, a.extent(positions), stream)) {
             return false;
         }
         a.backed[owner] = positions;
@@ -1272,14 +1387,14 @@ struct Executor::Impl {
         const auto reached = [&](std::size_t lo, std::size_t hi) {
             for (std::size_t o = 0; o < a.backed.size(); ++o) {
                 const std::size_t row = o * a.row_bytes;
-                const std::size_t end = row + std::min(a.row_bytes, std::size_t(a.backed[o]) * a.position_bytes);
+                const std::size_t end = row + a.extent(a.backed[o]);
                 if (row < hi && lo < end) { return true; }
             }
             return false;
         };
         const std::size_t row = owner * a.row_bytes;
-        const std::size_t hi  = row + std::min(a.row_bytes, std::size_t(was) * a.position_bytes);
-        for (std::size_t at = (row + std::size_t(positions) * a.position_bytes) / g * g; at < hi; at += g) {
+        const std::size_t hi  = row + a.extent(was);
+        for (std::size_t at = (row + a.extent(positions)) / g * g; at < hi; at += g) {
             if (!reached(at, at + g)) { a.region.unmap(at, g); }
         }
     }
@@ -1871,10 +1986,10 @@ struct Executor::Impl {
                           static_cast<__nv_bfloat16*>(qr.data), qr32, stream);
         // The window latents: a chunk's into the staging ring after the window before it, decode
         // rows' into their sequences' rings.
-        const std::int64_t ring_stride = std::int64_t(kRing) * kLatent;
-        auto* ring = static_cast<__nv_bfloat16*>(p.ring.p);
-        auto* own  = ring + std::int64_t(s.sequence) * ring_stride;
-        auto* stage_ring = static_cast<__nv_bfloat16*>(staging.p);
+        const auto ring_stride = std::int64_t(kRingBytes);
+        auto* ring             = static_cast<std::uint8_t*>(p.ring.p);
+        auto* own              = ring + std::int64_t(s.sequence) * ring_stride;
+        auto* stage_ring       = static_cast<std::uint8_t*>(staging.p);
         if (s.chunk) {
             kernels::ring_copy(own, kRing, stage_ring, prefill_ring,
                                std::max(0, int(s.first) - window + 1), int(s.first), stream);
@@ -1906,8 +2021,8 @@ struct Executor::Impl {
             if (p.kv_source) { compress_block(p, x32, t, s); }
             const LayerPlan& source = layers[std::size_t(p.kv_from)];
             if (p.index_source) { index_block(p, source, qr32, x32, t, s, topk, candidates); }
-            a.compressed            = static_cast<const __nv_bfloat16*>(source.latents.p);
-            a.compressed_seq_stride = std::int64_t(source.rows) * kLatent;
+            a.compressed            = static_cast<const std::uint8_t*>(source.latents.p);
+            a.compressed_seq_stride = std::int64_t(source.latents.row_bytes);
             a.topk                  = topk;
             a.k                     = index_topk;
         }
@@ -2052,10 +2167,12 @@ struct Executor::Impl {
         l.key_norm         = p.index_key_norm;
         l.eps              = eps;
         l.freq             = p.freq;
-        l.index_cache      = static_cast<__nv_bfloat16*>(p.keys.p);
-        l.index_seq_stride = std::int64_t(p.rows) * kIndexDim;
-        l.kv_cache         = static_cast<__nv_bfloat16*>(p.latents.p);
-        l.kv_seq_stride    = std::int64_t(p.rows) * kLatent;
+        l.index_cache            = static_cast<std::uint8_t*>(p.keys.p);
+        l.index_seq_stride       = std::int64_t(p.keys.row_bytes);
+        l.index_scales           = static_cast<std::uint8_t*>(p.key_scales.p);
+        l.index_scale_seq_stride = std::int64_t(p.key_scales.row_bytes);
+        l.kv_cache               = static_cast<std::uint8_t*>(p.latents.p);
+        l.kv_seq_stride          = std::int64_t(p.latents.row_bytes);
         kernels::latent_post(l, stream);
     }
 
@@ -2128,8 +2245,10 @@ struct Executor::Impl {
             a.positions    = pos + r0;
             a.sequences    = seq != nullptr ? seq + r0 : nullptr;
             a.sequence     = int(s.sequence);
-            a.keys         = static_cast<const __nv_bfloat16*>(source.keys.p);
-            a.key_seq_stride = std::int64_t(source.rows) * kIndexDim;
+            a.keys                 = static_cast<const std::uint8_t*>(source.keys.p);
+            a.key_seq_stride       = std::int64_t(source.keys.row_bytes);
+            a.key_scales           = static_cast<const std::uint8_t*>(source.key_scales.p);
+            a.key_scale_seq_stride = std::int64_t(source.key_scales.row_bytes);
             kernels::ListedRows rows;
             if (p.uses_candidates) {
                 a.candidates      = candidates + std::int64_t(r0) * candidate_words;
@@ -2634,8 +2753,8 @@ struct Executor::Impl {
             a.eps        = eps;
             a.positions  = pos;
             a.freq       = p.freq;
-            a.cache      = static_cast<__nv_bfloat16*>(p.ring.p);
-            a.seq_stride = std::int64_t(kRing) * kLatent;
+            a.cache      = static_cast<std::uint8_t*>(p.ring.p);
+            a.seq_stride = std::int64_t(kRingBytes);
             a.sequences  = seq;
             a.sequence   = int(sequence);
             a.ring       = kRing;
@@ -3174,17 +3293,39 @@ struct Executor::Impl {
         verify_widths = std::move(row_widths);
     }
 
-    void commit(std::span<const std::uint32_t> sequences, std::span<const std::uint32_t> kept) {
-        if (kept.size() != sequences.size() || verify_widths.size() != sequences.size()) {
+    // `hold_after[j]` (0: none), at most kept[j]: `holds[j]` also receives the state after that
+    // many of sequence j's tokens, as hold() keeps it. The verification wrote every row by its
+    // position, so the device state a commit leaves serves each position of the kept rows: a
+    // commit of fewer rows leaves the same bytes. Returns the rows whose state was kept, a bit
+    // each.
+    std::uint32_t commit(std::span<const std::uint32_t> sequences,
+                         std::span<const std::uint32_t> kept,
+                         std::span<const std::uint32_t> hold_after = {},
+                         std::span<SequenceSnapshot* const> holds = {}) {
+        if (kept.size() != sequences.size() || verify_widths.size() != sequences.size() ||
+            hold_after.size() != holds.size() ||
+            (!hold_after.empty() && hold_after.size() != sequences.size())) {
             throw std::invalid_argument("deepseek_v41 commit: invalid call");
         }
+        std::uint32_t held = 0;
         for (std::size_t j = 0; j < sequences.size(); ++j) {
             const std::uint32_t s = sequences[j];
             if (s >= options.sequences || kept[j] < 1 || kept[j] > verify_widths[j] ||
-                verified[s].size() != verify_widths[j]) {
+                verified[s].size() != verify_widths[j] ||
+                (!hold_after.empty() && hold_after[j] > kept[j])) {
                 throw std::invalid_argument("deepseek_v41 commit: invalid row");
             }
-            advance_history(s, std::span<const std::int32_t>(verified[s]).first(kept[j]));
+            const std::span<const std::int32_t> tokens(verified[s]);
+            const std::uint32_t before = hold_after.empty() ? 0 : hold_after[j];
+            if (before != 0 && holds[j] != nullptr && hold_bytes != 0 && resumable(s)) {
+                advance_history(s, tokens.first(before));
+                holds[j]->position = positions[s] + before;
+                holds[j]->history  = histories[s];
+                advance_history(s, tokens.subspan(before, kept[j] - before));
+                held |= 1U << j;
+            } else {
+                advance_history(s, tokens.first(kept[j]));
+            }
             verified[s].clear();
             positions[s] += kept[j];
         }
@@ -3198,7 +3339,11 @@ struct Executor::Impl {
                      static_cast<const std::int32_t*>(d_sequences.p) + row(j), sequences[j]);
             }
         }
+        for (std::size_t j = 0; j < sequences.size(); ++j) {
+            if ((held >> j & 1U) != 0) { copy_hold_state(sequences[j], true); }
+        }
         verify_widths.clear();
+        return held;
     }
 
     // ---- Branches -------------------------------------------------------------------------------
@@ -3206,7 +3351,7 @@ struct Executor::Impl {
     // One sequence's rings and tails, (device, bytes) in order: the live state or its checkpoint.
     std::vector<std::pair<std::uint8_t*, std::size_t>> state(std::uint32_t sequence, bool checkpoint) const {
         std::vector<std::pair<std::uint8_t*, std::size_t>> out;
-        const std::size_t ring_bytes = std::size_t(kRing) * kLatent * 2;
+        const std::size_t ring_bytes = kRingBytes;
         const std::size_t tail_bytes = std::size_t(kTailSlots) * kLatent * 4;
         for (const LayerPlan& p : layers) {
             const auto& ring = checkpoint ? p.checkpoint_ring : p.ring;
@@ -3233,6 +3378,15 @@ struct Executor::Impl {
         for (std::size_t i = 0; i < from.size(); ++i) {
             CUDA_CHECK(cudaMemcpyAsync(to[i].first, from[i].first, from[i].second,
                                        cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    void copy_hold_state(std::uint32_t sequence, bool save) {
+        auto* kept = static_cast<std::uint8_t*>(hold_state.p) + sequence * hold_bytes;
+        for (const auto& [device_state, bytes] : state(sequence, false)) {
+            CUDA_CHECK(cudaMemcpyAsync(save ? kept : device_state, save ? device_state : kept, bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+            kept += bytes;
         }
     }
 
@@ -3352,7 +3506,7 @@ struct Executor::Impl {
         for (const auto& [unused, n] : state(0, false)) { bytes += n; }
         for (const LayerPlan& p : layers) {
             if (!p.kv_source) { continue; }
-            bytes += std::uint64_t(position / std::uint32_t(p.ratio)) * (kLatent + kIndexDim) * 2;
+            bytes += std::uint64_t(position / std::uint32_t(p.ratio)) * kCompressedRowBytes;
         }
         return bytes;
     }
@@ -3383,10 +3537,10 @@ struct Executor::Impl {
         for (const LayerPlan& p : layers) {
             if (!p.kv_source) { continue; }
             const std::size_t rows = position / std::uint32_t(p.ratio);
-            copy(static_cast<std::uint8_t*>(p.latents.p) + std::size_t(sequence) * p.latents.row_bytes,
-                 rows * kLatent * 2);
-            copy(static_cast<std::uint8_t*>(p.keys.p) + std::size_t(sequence) * p.keys.row_bytes,
-                 rows * kIndexDim * 2);
+            for (const KvArea* area : {&p.latents, &p.keys, &p.key_scales}) {
+                copy(static_cast<std::uint8_t*>(area->p) + std::size_t(sequence) * area->row_bytes,
+                     rows * area->entry_bytes);
+            }
         }
     }
 
@@ -3427,6 +3581,23 @@ struct Executor::Impl {
         verified[sequence].clear();
         reset_decoder(sequence); // a snapshot holds a complete state
     }
+
+    bool hold(std::uint32_t sequence, SequenceSnapshot& out) {
+        if (hold_bytes == 0 || !resumable(sequence)) { return false; }
+        copy_hold_state(sequence, true);
+        out.position = positions[sequence];
+        out.history  = histories[sequence];
+        return true;
+    }
+
+    void restore_hold(std::uint32_t sequence, const SequenceSnapshot& from) {
+        if (hold_bytes == 0) { throw std::logic_error("deepseek_v41: an executor without checkpoints"); }
+        copy_hold_state(sequence, false);
+        positions[sequence] = from.position;
+        histories[sequence] = from.history;
+        verified[sequence].clear();
+        reset_decoder(sequence);
+    }
 };
 
 Executor::Executor(const Model& model, DeviceContext& device, ExecutorOptions options)
@@ -3445,6 +3616,7 @@ ExecutorMemory Executor::memory() const noexcept {
                           .engram_resident_bytes = impl_->engram ? impl_->engram->resident_bytes() : 0,
                           .vision_encode_bytes = impl_->tower ? impl_->tower->workspace_bytes() : 0,
                           .vision_owned_bytes  = impl_->vision_owned_bytes(),
+                          .drafter_expert_bytes = impl_->drafter_expert_bytes,
                           .experts = impl_->delivery ? impl_->delivery->memory() : ExpertDeliveryMemory{}};
 }
 
@@ -3582,14 +3754,23 @@ void Executor::verify(std::span<const std::uint32_t> sequences, std::span<const 
     impl_->verify(sequences, tokens, widths);
 }
 
-void Executor::commit(std::span<const std::uint32_t> sequences, std::span<const std::uint32_t> kept) {
-    impl_->commit(sequences, kept);
+std::uint32_t Executor::commit(std::span<const std::uint32_t> sequences,
+                               std::span<const std::uint32_t> kept,
+                               std::span<const std::uint32_t> hold_after,
+                               std::span<SequenceSnapshot* const> holds) {
+    return impl_->commit(sequences, kept, hold_after, holds);
 }
 
 void Executor::snapshot(std::uint32_t sequence, SequenceSnapshot& out) { impl_->snapshot(sequence, out); }
 
 void Executor::restore(std::uint32_t sequence, const SequenceSnapshot& from) {
     impl_->restore(sequence, from);
+}
+
+bool Executor::hold(std::uint32_t sequence, SequenceSnapshot& out) { return impl_->hold(sequence, out); }
+
+void Executor::restore_hold(std::uint32_t sequence, const SequenceSnapshot& from) {
+    impl_->restore_hold(sequence, from);
 }
 
 } // namespace ninfer::models::deepseek_v41

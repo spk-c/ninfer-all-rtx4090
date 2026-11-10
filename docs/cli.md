@@ -104,8 +104,8 @@ GPU residency is frozen when the Engine starts:
 - no `--spec` omits MTP/DFlash/DFlash2 weights and state and the optimized proposal head, except
   where the Engine chooses a drafter (Qwen3.8-Flash-Next and Gemma 4 with host experts; see
   `--spec` below);
-- `--spec mtp`, `--spec dflash` (35B-A3B), and `--spec dflash2` (Qwen3.8-27B, Qwen3.8-Flash-Next)
-  load only the selected speculative backend;
+- `--spec mtp`, `--spec dflash` (35B-A3B), and `--spec dflash2` (Qwen3.8-27B, Qwen3.6-35B-A3B,
+  Qwen3.8-Flash-Next) load only the selected speculative backend;
 - a speculative backend loads the artifact's optimized proposal head when it stores one, unless
   `--full-draft-head` keeps the drafts on the full output head and omits it;
 - Vision is disabled by default, omitting its weights and Vision-specific unified-workspace extent;
@@ -218,6 +218,16 @@ penalties, and prefix reuse. An artifact without the companion weights reports a
 component when selected. Vision, MTP and DFlash follow the same rule: their weights are required
 only when that component is enabled at startup.
 
+A Qwen3.6-35B-A3B artifact converted with
+[incoai's DFlash2 drafter](https://huggingface.co/incoai/Qwen3.6-35B-A3B-DFlash2)
+(`--components ...,dflash2 --source dflash2=PATH`) takes the same `--spec dflash2`. That drafter was
+trained on blocks of eight positions, so `--draft-tokens` past 7 asks it for positions it never saw.
+On an RTX 5090 with the NVFP4 artifact resident (400 greedy tokens, 2026-11-10) a code answer
+decoded 403 tokens per second without drafts, 829 with three MTP drafts and 805, 919 and 892 with
+three, five and seven DFlash2 drafts; a prose answer 403, 548 and 465, 420 and 385; the benchmark
+corpus (`ninfer_bench`, 128 tokens) 403, 497 and 427, 350 and 455. Draft with it where the output is
+code; MTP stays ahead elsewhere.
+
 A request that samples (temperature above zero) verifies MTP and DFlash drafts with coupled
 draws: the model draws each verified position with the request's seed and that position as the key,
 exactly as plain decoding does, and keeps a draft only while it equals that draw. Every emitted
@@ -295,16 +305,17 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--ngram-ram-mib N` | `disk`: budget for cached rows and their index (`0` disables); `ram-hot`: budget for the profile's resident rows and index | `0` for disk; `4096` for ram-hot |
 | `--ngram-lock` | `ram`, `ram-hot`: lock the resident rows in physical memory (`mlock`, `VirtualLock`) | off |
 | `--no-ngram-table` | Qwen3.8-Flash-Next: run without the n-gram table, a non-standard experimental mode (the Q2_0 release's WikiText-2 perplexity rises from 2.66 to 5.01); DeepSeek-V4.1: without its Engram table (the IQ1_M release's perplexity on a 1,112-token WikiText slice rose from 3.07 to 9.68 on October 25) | off |
-| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys, `rk4v4-e8` opt-in E8-lattice INT4 keys and `rk2v4-e8` opt-in E8 root-code keys; all nine are accepted on every build target (see [Context and memory](#context-and-memory)); for Qwen3.8-Flash-Next it is the storage of the sparse-attention layers' KV; for Gemma 4 the sliding-window blocks' K and V, with the full-attention blocks' one value plane in an unrotated coding (see [Gemma 4](gemma4.md#kv-cache-formats)); Flint keeps F16 only (`bf16`), DeepSeek-V4.1 BF16 only | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4\|bf16p` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys, `rk4v4-e8` opt-in E8-lattice INT4 keys and `rk2v4-e8` opt-in E8 root-code keys; those nine are accepted on every build target; `bf16p` is opt-in BF16 packed losslessly into 23% fewer bytes, for Qwen3.5 and Qwen3.8-Flash-Next from sm_75, without `--tensor-attention positions` (see [Context and memory](#context-and-memory)); for Qwen3.8-Flash-Next it is the storage of the sparse-attention layers' KV; for Gemma 4 the sliding-window blocks' K and V, with the full-attention blocks' one value plane in an unrotated coding (see [Gemma 4](gemma4.md#kv-cache-formats)); Flint keeps F16 only (`bf16`), DeepSeek-V4.1 BF16 only | `bf16` |
 | `--kv-resident N\|all\|auto` | Qwen3.8-Flash-Next: positions of each sparse-attention layer's KV a sequence keeps in device memory; past them the layers' KV streams from pinned host memory (see [streamed KV](qwen3-8-flash-next.md#streamed-sparse-attention-kv)) | `auto`: 32,768 with host or disk experts, all with device experts |
 | `--spec none\|mtp\|dflash\|dflash2\|dspark` | speculative backend; Qwen3.8-Flash-Next takes `mtp` from an artifact converted with its MTP block (see [MTP speculative decoding](qwen3-8-flash-next.md#mtp-speculative-decoding)) and `dflash2` from one carrying its DFlash2 drafter (see [DFlash2 speculative decoding](qwen3-8-flash-next.md#dflash2-speculative-decoding)), Gemma 4 from one converted with its assistant (see [Gemma 4](gemma4.md#speculative-decoding-with-the-assistant)); DeepSeek-V4.1 takes `dspark` from an artifact converted with its DSpark drafter (see [the DSpark drafter](deepseek-v41.md#the-dspark-drafter)); Flint has no drafter and takes `--lookup-ngram` without `--spec`, as DeepSeek-V4.1 does without `dspark` | for Flash-Next artifacts with host experts `dflash2` with 4 drafts (with `--draft-min-p 0.7`) on one device when they carry the DFlash2 drafter, else (over pipeline stages too) `mtp` with 3 drafts (with `--draft-min-p 0.5`) when they carry the MTP block; `mtp` with 3 drafts for Gemma 4 artifacts with their assistant and host or disk experts; otherwise off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2; `1..7` for Qwen3.8-Flash-Next's DFlash2 drafter (its block of 8), Gemma 4's assistant and the context lookup of Flint and DeepSeek-V4.1; `1..5` for DSpark, its block | unset (their lookup: 3; DSpark: 5) |
 | `--draft-min-p P` | Flash-Next MTP and DFlash2 only: verify a round's drafts through the first at or below this probability (MTP: its absolute probability, which also ends the drafting; DFlash2: its selector confidence); see [MTP](qwen3-8-flash-next.md#mtp-speculative-decoding) and [DFlash2](qwen3-8-flash-next.md#dflash2-speculative-decoding) | `0` (off) with `--spec mtp` or `--spec dflash2`; `0.5` when the engine chooses MTP and `0.7` when it chooses DFlash2 (no `--spec`), unless set |
+| `--draft-experts N` | DSpark only: each drafter block keeps its `N` most routed experts on the GPU and routes among them, the rest in pinned memory; `0` keeps all ([details](deepseek-v41.md#the-drafters-experts)) | `64` with the STQ drafter and host or disk experts, otherwise all |
 | `--draft-confidence C` | DSpark only: verify a round's drafts up to the first its confidence head scores below `C` (`0..1`); `0` verifies every draft | `0.5` |
 | `--lm-head-draft` | require the optimized proposal head | used when the artifact stores it |
 | `--full-draft-head` | draft through the full output head even when the artifact stores a proposal head | off |
 | `--mtp-attention-window N` | MTP only: the draft head attends to the first 64 keys and the newest `N` before its query, verification keeps full attention (see [serving](serving.md#mtp-attention-window)) | `0` (whole history) |
-| `--lookup-ngram N` | context-lookup drafting alongside `--spec` (Flint and DeepSeek-V4.1 without it; DeepSeek-V4.1 refuses it beside `--spec dspark`): the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
+| `--lookup-ngram N` | context-lookup drafting alongside `--spec` (Flint and DeepSeek-V4.1 without it; DeepSeek-V4.1 refuses it beside `--spec dspark`): the last `N` tokens are matched against the sequence so far and what followed is proposed, from the occurrence the sequence was already copying while it still matches, else from the newest; exact, since verification rejects a wrong guess | `0` (off) |
 | `--ngram-draft-tokens N` | copy drafting alongside `--spec`: up to `N` tokens (1..63) copied from earlier prompt, tool-result or output text that the last `--ngram-min-match` tokens match, verified by the target; `0` disables it; see [Ngram copy proposals](ngram.md) | `15` with `--spec`, else `0` |
 | `--ngram-min-match N` | shortest match a copy is drawn from, `4..64` | `12` |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [quality trades](maintainer/quality-trade-experiments.md)) | off |
@@ -411,9 +422,9 @@ The registered model IDs have a native context limit of 262,144 tokens. `--max-c
 to four times that, 1,048,576 tokens, with plain RoPE or YaRN (`--rope-yarn`) past the native
 window. What fits depends on the card, the artifact, the media workload, the output budget and the
 KV format. The artifact describes its model configuration and weight representations;
-`--kv-dtype` independently selects runtime KV storage, BF16 by default. All nine formats — `bf16`,
+`--kv-dtype` independently selects runtime KV storage, BF16 by default. Nine formats — `bf16`,
 `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`, `k8v4`, `nvfp4` — are accepted on every
-build target: the Blackwell-only `mma.sync...kind::f8f6f4` restriction applies to FP8/NVFP4
+build target, and the tenth, `bf16p`, from sm_75 on: the Blackwell-only `mma.sync...kind::f8f6f4` restriction applies to FP8/NVFP4
 *weights and activations*, not to KV storage. Measured size, decode speed and perplexity of seven of
 them on an RTX 3090 are in [performance](performance.md#kv-formats-on-qwen38-27b) and the
 [configuration calculator](config-calculator.html).
@@ -431,7 +442,27 @@ nearest of E8's 240 roots and a byte holding a log-radius and a residual axis: 2
 and KV head against 280 for `rk4v4-e8` and 408 for `rk8v4`, the one format that holds 1,048,576
 tokens beside Ternary Bonsai 2 on a 24 GB card, at a quality cost (quick-corpus perplexity 5.631 to
 5.820 on Bonsai 2, and fewer accepted DFlash2 drafts). `fp8` and `k8v4` are each beaten by `rk8v4`
-on size, speed and quality together, so neither has a niche. The prepared prompt must fit
+on size, speed and quality together, so neither has a niche.
+
+`bf16p` keeps every BF16 bit in 23% fewer bytes: a K or V row of 256 values takes 392 bytes instead
+of 512, 784 bytes per token and KV head against 1,024, so the answers equal `bf16`'s token for
+token. The form is Infernix's: each value keeps its sign and seven fraction bits, and a 4-bit offset
+from the row's 14-binade exponent window; up to six exponents outside the window go into an 8-byte
+side record. A row that needs more has no packed form: it is stored as NaN, and its request ends as
+one with non-finite logits (none did in the runs below). Qwen3.5 models and Qwen3.8-Flash-Next take
+it; Gemma 4 (an F16 cache), Volta and `--tensor-attention positions` refuse it, and Flint and
+DeepSeek-V4.1 keep their own caches. On an RTX PRO 6000 Blackwell Server (2026-11-10, 256 greedy
+tokens, two runs each, the same tokens in every pair), Qwen3.8-Flash-Next UD-IQ2_XS with its experts
+on the GPU decoded as fast as under `bf16` at a 30,216-token prompt (111.4-113.6 against
+110.9-113.4 tok/s) and prefilled 1-4% faster. Ternary Bonsai 2 decoded 12.5% slower at a
+6,797-token prompt (121.8 against 139.2 tok/s), 24% slower at 30,216 tokens (91.9 against 120.8)
+and 13% slower with MTP (223.5-223.8 against 255.9-257.4), and prefilled up to 18% slower (5.85k
+against 7.09-7.16k tok/s at 30,216 tokens): its dense attention kernels decode each packed tile
+into shared memory before the tensor-core products, and took 2.1 (prompt) and 2.5 (decode) times
+as long per call as with BF16 tiles. On an RTX 4090 the same Bonsai runs decoded 6.7% slower at
+6,797 tokens (93.8 against 100.4-100.6 tok/s), 12.6% slower at 30,216 (75.1 against 85.9-86.0) and
+3.3% slower with MTP (176.4 against 182.4-182.5), and prefilled 5-14% slower. The prepared prompt
+must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU

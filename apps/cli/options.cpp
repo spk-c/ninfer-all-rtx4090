@@ -125,6 +125,8 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "rk2v4-e8") { return KvCacheStorage::RotatedE8RootKeyInt4Value; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    // bf16p: BF16 rows packed losslessly into 392 bytes (bf16p_codec.cuh). Opt-in.
+    if (text == "bf16p") { return KvCacheStorage::Bf16Packed; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -218,7 +220,7 @@ std::string usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  bf16 (default), int8, fp8, rk8v4, rk4v4,\n"
-           "                                rk4v4-e8, rk2v4-e8, nvfp4 or k8v4\n" +
+           "                                rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p\n" +
            std::string(product::kKvResidentHelp) +
            "\n"
            "SPECULATIVE DECODING\n"
@@ -237,6 +239,10 @@ std::string usage_text(const char* argv0) {
            "                                chooses MTP, 0.7 when it chooses DFlash2)\n"
            "  --draft-confidence C          dspark: verify drafts while their confidence is\n"
            "                                at least C, 0..1 (default 0.5; 0 keeps every draft)\n"
+           "  --draft-experts N             dspark: each drafter block keeps its N most routed\n"
+           "                                experts on the GPU, 3..128 (0 keeps all; default 64\n"
+           "                                with the STQ drafter and host or disk experts,\n"
+           "                                else all)\n"
            "  --lm-head-draft               draft with the optimized proposal head, which\n"
            "                                the artifact must store (the default when it does)\n"
            "  --full-draft-head             draft with the full output head even when the\n"
@@ -483,6 +489,8 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--draft-confidence") {
             options.speculative.draft_confidence =
                 parse_float(value(arg), "draft-confidence", 0.0F, 1.0F);
+        } else if (arg == "--draft-experts") {
+            options.speculative.draft_experts = parse_u32(value(arg), "draft-experts", true);
         } else if (arg == "--draft-min-p") {
             options.speculative.draft_min_p = parse_float(value(arg), "draft-min-p", 0.0F, 1.0F);
         } else if (arg == "--ngram-draft-tokens") {

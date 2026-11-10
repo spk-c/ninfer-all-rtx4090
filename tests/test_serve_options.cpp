@@ -75,6 +75,23 @@ int main() {
         } catch (const std::invalid_argument&) { rejected = true; }
         failures += check(rejected, "an invalid --prefill-stall-budget-ms was accepted");
     }
+    // The drafter's kept experts: the Engine's default unless set, DSpark only.
+    failures += check(!parse({"ninfer-serve", "model.ninfer"}).speculative.draft_experts,
+                      "--draft-experts must default");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--spec", "dspark", "--draft-experts",
+                             "32"}).speculative.draft_experts == 32U,
+                      "server did not preserve --draft-experts");
+    for (const auto& args : std::vector<std::vector<std::string>>{
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-experts", "64"},
+             {"--draft-experts", "64"}}) {
+        std::vector<std::string> full{"ninfer-serve", "model.ninfer"};
+        full.insert(full.end(), args.begin(), args.end());
+        bool rejected = false;
+        try {
+            (void)parse(full);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "an invalid --draft-experts was accepted");
+    }
     // DSpark's confidence floor: the drafter's default unless set, 0..1, DSpark only.
     failures += check(!parse({"ninfer-serve", "model.ninfer"}).speculative.draft_confidence,
                       "DSpark's floor must default");
@@ -90,6 +107,18 @@ int main() {
         bool rejected = false;
         try { (void)parse(full); } catch (const std::invalid_argument&) { rejected = true; }
         failures += check(rejected, "server accepted an invalid --draft-confidence");
+    }
+    {
+        // Without --spec, --draft-tokens sizes a context lookup (Flint, DeepSeek-V4.1).
+        const auto lookup = parse({"ninfer-serve", "model.ninfer", "--lookup-ngram", "4",
+                                   "--draft-tokens", "5"}).speculative;
+        failures += check(lookup.backend == ninfer::SpeculativeBackend::None &&
+                              lookup.lookup_ngram == 4 && lookup.draft_tokens == 5,
+                          "server refused or lost a context lookup's --draft-tokens");
+        bool rejected = false;
+        try { (void)parse({"ninfer-serve", "model.ninfer", "--draft-tokens", "5"}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "server accepted --draft-tokens without --spec or --lookup-ngram");
     }
     failures += check(parse({"ninfer-serve", "model.ninfer"}).embedding_residency ==
                               ninfer::EmbeddingResidency::Device &&
@@ -1011,13 +1040,13 @@ int main() {
                      "--use-alt-prefix-caching"});
     } catch (const std::invalid_argument&) { both_caches_rejected = true; }
     failures += check(both_caches_rejected, "both prefix caching systems were accepted together");
-    bool hybrid_pipeline_rejected = false;
-    try {
-        (void)parse(
-            {"ninfer-serve", "model.ninfer", "--use-alt-prefix-caching", "--devices", "0,1"});
-    } catch (const std::invalid_argument&) { hybrid_pipeline_rejected = true; }
-    failures +=
-        check(hybrid_pipeline_rejected, "hybrid prefix cache was accepted across pipeline stages");
+    failures += check(
+        parse({"ninfer-serve", "model.ninfer", "--use-alt-prefix-caching", "--devices", "0,1"})
+                .context_cache.mode == ninfer::ContextCacheMode::Hybrid,
+        "--use-alt-prefix-caching did not keep the hybrid cache over two devices");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--devices", "0,1"})
+                              .context_cache.mode == ninfer::ContextCacheMode::Legacy,
+                      "two devices did not select the checkpoint catalog by default");
 
     const ServeOptions response_store =
         parse({"ninfer-serve", "model.ninfer", "--response-store-max-records", "42",

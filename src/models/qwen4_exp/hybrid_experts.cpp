@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "core/cuda_host_handshake.h"
 #include "core/device_wait.h"
+#include "core/mapped_host_copy.h"
 #include "models/qwen4_exp/read_pool.h"
 #include "ninfer/ops/residual_add.h"
 
@@ -16,6 +17,7 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -32,6 +34,28 @@ constexpr std::size_t aligned(std::size_t bytes) { return (bytes + 255) & ~std::
 
 // Native experts' CPU products differ from the GPU's, so only an explicit share moves misses to
 // the CPU; unset copies every one.
+// A host operand the exchange's stream copies to the device after it waited for the supervisor.
+// Where copies queue behind one another across streams (serialized_copy_queue), that copy would sit
+// ahead of the supervisor's expert copies, which must land to end the wait; there the operand is
+// mapped memory and a kernel copies it.
+class ExchangeOperand {
+public:
+    ExchangeOperand(std::size_t bytes, bool mapped) {
+        if (mapped) { mapped_ = std::make_unique<MappedHostBuffer>(bytes); }
+        else { pinned_ = std::make_unique<PinnedHostBuffer>(bytes); }
+    }
+    [[nodiscard]] void* data() const noexcept { return mapped_ ? mapped_->data() : pinned_->data(); }
+    [[nodiscard]] std::size_t size() const noexcept { return mapped_ ? mapped_->size() : pinned_->size(); }
+    void to_device(void* destination, std::size_t bytes, cudaStream_t stream) const {
+        if (mapped_) { mapped_->copy_to_device(destination, bytes, stream); }
+        else { CUDA_CHECK(cudaMemcpyAsync(destination, pinned_->data(), bytes, cudaMemcpyHostToDevice, stream)); }
+    }
+
+private:
+    std::unique_ptr<PinnedHostBuffer> pinned_;
+    std::unique_ptr<MappedHostBuffer> mapped_;
+};
+
 HybridExpertOptions validated(HybridExpertOptions options) {
     const float share = options.dma_share.value_or(1.0F);
     if (!std::isfinite(share) || share < 0 || share > 1 || options.cpu_threads > 256) {
@@ -155,7 +179,8 @@ struct HybridExperts::Impl {
     std::vector<Worker> workers;
     ReadPool pool;
     std::function<void()> before_cpu;
-    std::unique_ptr<PinnedHostBuffer> routes, activations, route_weights, selection, entries, sum;
+    std::unique_ptr<PinnedHostBuffer> routes, activations, route_weights;
+    std::unique_ptr<ExchangeOperand> selection, entries, sum;
     // Two staging blocks alternate; waiting before reuse keeps pageable Windows weights out of
     // large pinned allocations and lets CPU packing overlap the previous block's DMA.
     std::array<std::unique_ptr<PinnedHostBuffer>, 2> staging;
@@ -182,7 +207,8 @@ struct HybridExperts::Impl {
     }
 
     Impl(DeviceContext& d, std::vector<HybridExpertLayer> inputs, std::uint32_t tokens,
-         std::uint64_t requested_cache, HybridExpertOptions o, std::function<void()> hook)
+         std::uint64_t requested_cache, HybridExpertOptions o, std::function<void()> hook,
+         bool mapped_exchange)
         : device(d), options(validated(o)), capacity(tokens), ranks(d.size()),
           workers(options.cpu_threads ? options.cpu_threads :
                       std::clamp(std::thread::hardware_concurrency(), 1U, 16U)),
@@ -706,9 +732,11 @@ struct HybridExperts::Impl {
 
 HybridExperts::HybridExperts(DeviceContext& d, std::vector<HybridExpertLayer> layers,
                              std::uint32_t tokens, std::uint64_t cache_bytes,
-                             HybridExpertOptions options, std::function<void()> before_cpu)
+                             HybridExpertOptions options, std::function<void()> before_cpu,
+                             std::optional<bool> mapped_exchange)
     : impl_(std::make_unique<Impl>(d, std::move(layers), tokens, cache_bytes, options,
-                                   std::move(before_cpu))) {}
+                                   std::move(before_cpu),
+                                   mapped_exchange.value_or(serialized_copy_queue()))) {}
 HybridExperts::~HybridExperts() = default;
 void HybridExperts::run(std::size_t layer, const Tensor& x, const Tensor& ids, const Tensor& weights,
                          const Tensor& shared, ops::NativeMoeWeights banks, bool cpu_allowed,
