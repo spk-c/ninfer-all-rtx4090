@@ -1585,6 +1585,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 // Prompt transitions are canonical immediately. If this was the first write after
                 // an immutable source, close the Fork before potentially freezing a new rewrite.
                 settle_state_fork(sequence);
+                if (result.tapped) {
+                    for (std::size_t i = 0; i < in_pass_count; ++i) {
+                        hybrid_in_pass_keep(sequence, in_pass[i]);
+                    }
+                    in_pass_count = 0;
+                } else {
+                    release_in_pass();
+                }
                 diagnostic::cache_state_trace("chunk-"+std::to_string(staged.cursor), *state_images, state_store->physical_slot(sequence.state.write), text_kv_view(sequence), decoder->text_kv.layers(), staged.cursor, device.stream);
                 if (hybrid_lane != nullptr && !result.finalized) {
                     // A branched read's frontier is a tap position too (its branches follow it).
