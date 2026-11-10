@@ -190,8 +190,9 @@ The small Q4_K `N=128, K=5120` matrix now has a separate route key,
 `gguf_matrix/q4_k/128x5120`. Its built-in 4090 profile selects the existing
 compiled kernel, while the generic `gguf_matrix/q4_k` key continues to use
 `async` on larger matrices. This is a targeted **measured-route rollback**,
-not a new faster kernel. It does not alter Q4_K MoE routes. Profile catalog
-identity changes; any previously calibrated file may need recalibration.
+not a new faster kernel. It does not alter Q4_K MoE routes. The calibration catalog is unchanged, so existing saved route catalog digests remain
+valid. The shape-specific override is a built-in or manually configured profile
+band, not a new automatic calibration candidate.
 
 The report at `profiles/bench/rtx4090-q4k-20261110/REPORT.md` qualifies
 only commit `07f38482`, not this follow-up. The ambiguous

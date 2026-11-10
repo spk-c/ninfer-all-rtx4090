@@ -366,6 +366,15 @@ void test_rtx4090_q4k_narrow_override() {
     expect(generic != profile->routes.end() &&
                same_bands(generic->second, {{4096, "async"}}),
            "the larger RTX 4090 shapes keep the measured generic async route");
+    // This auxiliary profile key must not alter the calibration catalog digest:
+    // existing user-calibrated profiles remain valid and keep their layer precedence.
+    const auto& catalog = ninfer::calibration::calibration_route_catalog(
+        ninfer::ops::DeviceTier::Ampere);
+    const bool auto_calibrated = std::any_of(
+        catalog.begin(), catalog.end(),
+        [](const auto& item) { return item.key == "gguf_matrix/q4_k/128x5120"; });
+    expect(!auto_calibrated, "shape override is not an unmeasured calibration sweep");
+
     const auto rtx3090 = ninfer::runtime::compiled_device_route_profile(
         "nvidia-geforce-rtx-3090-sm86", 82);
     expect(rtx3090.has_value() &&
