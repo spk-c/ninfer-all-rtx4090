@@ -1191,7 +1191,7 @@ int main(int argc, char** argv) {
                            [&] { return failure_control(device, path, false); });
 
         if (argc != 1 && !(argc == 3 && std::string(argv[1]) == "--case")) {
-            std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME]\\n");
+            std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME]\n");
             return 2;
         }
         int failures = 0;
@@ -1199,12 +1199,14 @@ int main(int argc, char** argv) {
         for (const auto& [name, execute] : cases) {
             if (argc == 3 && name != argv[2]) { continue; }
             selected = true;
-            std::printf("START expert-delivery case %s\\n", name.c_str());
-            failures += execute();
-            std::printf("DONE expert-delivery case %s\\n", name.c_str());
+            std::printf("START expert-delivery case %s\n", name.c_str());
+            const int result = execute();
+            failures += result;
+            std::printf("%s expert-delivery case %s (exit %d)\n",
+                        result == 0 ? "PASS" : "FAIL", name.c_str(), result);
         }
         if (!selected) {
-            std::fprintf(stderr, "Unknown expert-delivery case: %s\\n", argv[2]);
+            std::fprintf(stderr, "Unknown expert-delivery case: %s\n", argv[2]);
             return 2;
         }
         return failures ? 1 : 0;
