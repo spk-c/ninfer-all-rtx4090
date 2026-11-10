@@ -35,7 +35,7 @@ __host__ __device__ unsigned char signature(int layer, int expert, int blob, std
 // Layer l's down blobs are `step` bytes shorter than layer l - 1's (Fixture).
 __global__ void inspect(const void* const* table, const std::int32_t* ids, int pairs, int layer,
                         unsigned long long* failures, unsigned long long* visited,
-                        std::uint64_t step = 256) {
+                        std::uint64_t step = 256, int inspect_stride = 1) {
     const int p = blockIdx.x;
     if (p >= pairs || ids[p] < 0) { return; }
     const int expert = ids[p];
@@ -45,7 +45,13 @@ __global__ void inspect(const void* const* table, const std::int32_t* ids, int p
         if (!data) { if (!threadIdx.x) { atomicAdd(failures, 1ull); } continue; }
         const auto bytes = b ? kDown - std::uint64_t(layer) * step : kGu;
         // Every represented byte, its last byte, and every tail byte.
-        for (std::uint64_t at = threadIdx.x; at < bytes; at += blockDim.x) {
+        // Full verification scans every byte. Compute Sanitizer can hang while instrumenting
+        // the test's captured GPU/host handshake. A separate eager sanitizer case uses
+        // a rotating byte sample (including the exact last byte) and the full tail.
+        const std::uint64_t stride = static_cast<std::uint64_t>(inspect_stride);
+        const std::uint64_t offset = (std::uint64_t(p) + layer * kExperts + expert) % stride;
+        for (std::uint64_t at = offset + std::uint64_t(threadIdx.x) * stride;
+             at < bytes; at += std::uint64_t(blockDim.x) * stride) {
             if (data[at] != signature(layer, expert, b, at)) { atomicAdd(failures, 1ull); }
         }
         if (data[bytes - 1] != signature(layer, expert, b, bytes - 1)) { atomicAdd(failures, 1ull); }
@@ -152,46 +158,49 @@ struct Fixture {
 };
 
 int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesystem::path& path,
-        bool shifting = false) {
+        bool shifting = false, int pair_count = kPairs, int inspect_stride = 1,
+        bool sanitizer_eager = false) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
-    options.pair_capacity = kPairs;
+    options.pair_capacity = pair_count;
     options.cache_bytes = cache;
     options.staging_bytes = 4096; // exercise repeated DMA half reuse inside one blob
     options.suspendable = true;
     ExpertDelivery delivery(device.rank(0), fixture.paths, std::move(fixture.layers), options);
-    DeviceBuffer ids(kPairs * 4), failures(8), visited(8);
+    DeviceBuffer ids(pair_count * 4), failures(8), visited(8);
     failures.fill();
     visited.fill();
     const auto pass = [&] {
         for (int l = 0; l < kLayers; ++l) {
-            const auto call = delivery.begin(l, static_cast<const std::int32_t*>(ids.p), kPairs, device.stream);
-            inspect<<<kPairs, 32, 0, device.stream>>>(delivery.tables(l), call.cached_ids, kPairs, l,
-                static_cast<unsigned long long*>(failures.p), static_cast<unsigned long long*>(visited.p));
-            listed<<<1, 256, 0, device.stream>>>(call.cached_ids, kPairs, call.cached_experts,
+            const auto call = delivery.begin(l, static_cast<const std::int32_t*>(ids.p), pair_count, device.stream);
+            inspect<<<pair_count, 32, 0, device.stream>>>(delivery.tables(l), call.cached_ids, pair_count, l,
+                static_cast<unsigned long long*>(failures.p), static_cast<unsigned long long*>(visited.p), 256, inspect_stride);
+            listed<<<1, 256, 0, device.stream>>>(call.cached_ids, pair_count, call.cached_experts,
                                                  static_cast<unsigned long long*>(failures.p));
             delivery.await(device.stream);
-            inspect<<<kPairs, 32, 0, device.stream>>>(delivery.tables(l), call.missing_ids, kPairs, l,
-                static_cast<unsigned long long*>(failures.p), static_cast<unsigned long long*>(visited.p));
-            listed<<<1, 256, 0, device.stream>>>(call.missing_ids, kPairs, call.missing_experts,
+            inspect<<<pair_count, 32, 0, device.stream>>>(delivery.tables(l), call.missing_ids, pair_count, l,
+                static_cast<unsigned long long*>(failures.p), static_cast<unsigned long long*>(visited.p), 256, inspect_stride);
+            listed<<<1, 256, 0, device.stream>>>(call.missing_ids, pair_count, call.missing_experts,
                                                  static_cast<unsigned long long*>(failures.p));
             CUDA_CHECK(cudaGetLastError());
         }
     };
-    std::vector<std::int32_t> routes(kPairs);
-    for (int i = 0; i < kPairs; ++i) { routes[i] = i % 5; }
+    std::vector<std::int32_t> routes(pair_count);
+    for (int i = 0; i < pair_count; ++i) { routes[i] = i % 5; }
     ids.copy_from_host(routes.data(), ids.bytes);
     pass(); // load all kernels before a captured GPU wait can run
     delivery.drain();
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t executable = nullptr;
-    CUDA_CHECK(cudaStreamBeginCapture(device.stream, cudaStreamCaptureModeThreadLocal));
-    pass();
-    CUDA_CHECK(cudaStreamEndCapture(device.stream, &graph));
-    CUDA_CHECK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    if (!sanitizer_eager) {
+        CUDA_CHECK(cudaStreamBeginCapture(device.stream, cudaStreamCaptureModeThreadLocal));
+        pass();
+        CUDA_CHECK(cudaStreamEndCapture(device.stream, &graph));
+        CUDA_CHECK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    }
     constexpr int repeats = 12;
     for (int iteration = 0; iteration < repeats; ++iteration) {
-        for (int p = 0; p < kPairs; ++p) {
+        for (int p = 0; p < pair_count; ++p) {
             if (shifting) {
                 // Narrow calls whose five experts move by three every replay, and a wide call every
                 // fourth: once the cache is full, admissions and the tier's rounds evict experts of
@@ -202,7 +211,15 @@ int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesy
             }
         }
         ids.copy_from_host(routes.data(), ids.bytes);
-        CUDA_CHECK(cudaGraphLaunch(executable, device.stream));
+        if (sanitizer_eager) {
+            // Memcheck instrumentation may block the captured device-side mailbox
+            // poll while the host worker needs a separate CUDA copy stream. Eager
+            // await() uses the host-prepared signal and still executes the same
+            // router, DMA, cache transitions and byte validation.
+            pass();
+        } else {
+            CUDA_CHECK(cudaGraphLaunch(executable, device.stream));
+        }
         delivery.drain();
         if (iteration == 5) {
             const auto* addresses = delivery.tables(0);
@@ -215,8 +232,10 @@ int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesy
             }
         }
     }
-    CUDA_CHECK(cudaGraphExecDestroy(executable));
-    CUDA_CHECK(cudaGraphDestroy(graph));
+    if (!sanitizer_eager) {
+        CUDA_CHECK(cudaGraphExecDestroy(executable));
+        CUDA_CHECK(cudaGraphDestroy(graph));
+    }
     unsigned long long bad = 0, count = 0;
     failures.copy_to_host(&bad, 8);
     visited.copy_to_host(&count, 8);
@@ -224,7 +243,7 @@ int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesy
     const auto memory = delivery.memory();
     // Two of three replays route all sixteen experts of every layer (wide calls): without a cache
     // the next layer's bank is prefetched and reused; with one, wide calls promote by device copies.
-    const bool ok = !bad && count == std::uint64_t(repeats + 1) * kLayers * kPairs &&
+    const bool ok = !bad && count == std::uint64_t(repeats + 1) * kLayers * pair_count &&
                     stats.routes == stats.hits + stats.misses && stats.misses &&
                     (cache ? stats.hits != 0 : stats.hits == 0) &&
                     (disk ? stats.read_bytes == stats.copied_bytes : stats.read_bytes == 0) &&
@@ -1156,6 +1175,21 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string(argv[1]) == "--no-ready-wait") {
             return failure_control(device, path, true);
         }
+        // The unmodified no-argument path verifies every byte through a captured graph.
+        // Compute Sanitizer can instrument the same Expert Delivery and DMA kernels
+        // without the captured device-side polling handshake via --sanitizer.
+        // That mode deliberately reduces routing pairs and uses a rotating sample;
+        // it is not a substitute for normal full-byte/graph validation.
+        const bool sanitizer_case =
+            argc == 4 && std::string(argv[1]) == "--case" &&
+            std::string(argv[3]) == "--sanitizer";
+        const int scan_pairs = sanitizer_case ? 256 : kPairs;
+        const int scan_stride = sanitizer_case ? 32 : 1;
+        if (sanitizer_case) {
+            std::printf("SANITIZER MODE: pairs=%d stride=%d, eager host handshake "
+                        "(no CUDA Graph replay); default graph test stays exhaustive\n",
+                        scan_pairs, scan_stride);
+        }
         // Keep the default comprehensive test unchanged, but allow each scenario to run
         // in a fresh process under Compute Sanitizer. A single monolithic instrumented run
         // exceeded the 120-second CUDA watchdog on WDDM: subdividing isolates that failure
@@ -1170,10 +1204,10 @@ int main(int argc, char** argv) {
             const std::string mode = disk ? "disk" : "ram";
             for (const auto cache : {0ULL, 6ULL << 20, 64ULL << 20}) {
                 cases.emplace_back(mode + "-cache-" + std::to_string(cache >> 20) + "m",
-                                   [&, disk, cache] { return run(device, disk, cache, path); });
+                                   [&, disk, cache] { return run(device, disk, cache, path, false, scan_pairs, scan_stride, sanitizer_case); });
             }
             cases.emplace_back(mode + "-alternate",
-                               [&, disk] { return run(device, disk, 6ULL << 20, path, true); });
+                               [&, disk] { return run(device, disk, 6ULL << 20, path, true, scan_pairs, scan_stride, sanitizer_case); });
             cases.emplace_back(mode + "-cpu-half",
                                [&, disk] { return cpu_share(device, disk, 0.5, path); });
             cases.emplace_back(mode + "-cpu-full",
@@ -1190,14 +1224,14 @@ int main(int argc, char** argv) {
         cases.emplace_back("failure-control",
                            [&] { return failure_control(device, path, false); });
 
-        if (argc != 1 && !(argc == 3 && std::string(argv[1]) == "--case")) {
-            std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME]\n");
+        if (argc != 1 && !(argc == 3 && std::string(argv[1]) == "--case") && !sanitizer_case) {
+            std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME [--sanitizer]]\n");
             return 2;
         }
         int failures = 0;
         bool selected = false;
         for (const auto& [name, execute] : cases) {
-            if (argc == 3 && name != argv[2]) { continue; }
+            if (argc >= 3 && name != argv[2]) { continue; }
             selected = true;
             std::printf("START expert-delivery case %s\n", name.c_str());
             const int result = execute();
