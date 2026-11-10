@@ -1493,9 +1493,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     (!split_frontier || *rewrite_split < *split_frontier)) {
                     split_frontier = *rewrite_split;
                 }
-                if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
-                    split_frontier = *hybrid_split;
-                }
+                // Hybrid taps inside the chunk are captured in-pass below; only an
+                // unhandled tap must limit the chunk, after the in-pass reservations.
                 diagnostic::cache_trace_split(staged.cursor, split_frontier);
                 if (staged.drafter_frontier && *staged.drafter_frontier > staged.cursor &&
                     *staged.drafter_frontier < staged.prompt_tokens &&
