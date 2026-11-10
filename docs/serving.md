@@ -623,7 +623,11 @@ After startup, a worker out-of-memory failure (and, with `--recover-invariant-fa
 internal invariant) fails only the requests that were running or being admitted, waits for the
 device, releases and if necessary rebuilds the context cache, and keeps serving the queue. A
 Flash-Next model file read that fails (disk experts or n-gram rows) likewise fails only the running
-requests, with `unavailable`. Each
+requests, with `unavailable`. Non-finite logits (a token the sampler cannot name) end only the
+request whose row produced them, with an HTTP 500 `numerical_failure` error or an error event on a
+started stream, and the other requests continue; when they appear at the end of a prompt, a
+Qwen3.5-core model takes the out-of-memory recovery (nothing vouches for what that pass cached), and
+the other families drop the stored prefixes of that prompt. Each
 recovery is counted as a top-level `engine_recoveries` counter on the request log's `throughput`
 event and as `ninfer:engine_recoveries_total` on [Metrics](#metrics). `GET /health` turns `503` for
 good after any other worker failure, when a recovery cannot complete, or after eight recoveries in
@@ -1155,16 +1159,18 @@ because every pass varies a little.
   end on a `</think>` still waiting for its next byte, the guard tests three signs of a loop.
   First, the last 2,048 characters of the thinking repeat one period of at most 64 characters, as a
   loop written without spaces does. Second, they do so once every run of digits is read as one
-  number, the period holds a number, and one of its numbers moves by the same nonzero step through
-  at least eight periods, as a loop that counts (`'time1','time2',...`) does; numbers of the tail's
-  first and last runs, which its ends may cut, are not read. Third, the thinking is split into
+  number, the period holds a number, and through at least eight periods every number of the period
+  moves by a step of its own, one of them nonzero, as a loop that counts (`'time1','time2',...` or
+  `item 1 of 50, item 2 of 50, ...`) does. A counter beside a number that changes otherwise
+  (`step 7 checks value 4821`) is an enumeration of worked values and does not fire. Numbers of the
+  tail's first and last runs, which its ends may cut, are not read. Third, the thinking is split into
   words (a run of letters, digits and `_`, ASCII case folded) and every other non-space character,
   each a word of its own, and at least 25 % of the last 2,000 words lie inside a 12-word passage
   that occurs at least three times in the last 30,000 words. A passage repeated twice (a recap) does
   not count. The word measure and its thresholds are those of Strata's `reasoning_loop_recovery` and
   its periodic-tail check (measured on other models; NInfer has not re-tuned them). The counting
-  check fired on none of 2,126 s1K-1.1 and 14,866 Bespoke-Stratos-17k reasoning texts of 4,096
-  characters or more, checked every 2,000 bytes.
+  check fired on none of 1,950 s1K-1.1 thinking trajectories and 14,822 Bespoke-Stratos-17k
+  assistant replies of 4,096 characters or more, checked every 2,000 bytes.
 - **`stop`** ends the reply there with `finish_reason` `length` (Anthropic `max_tokens`).
 - **`conclude`** commits the same control span a reached thinking budget does (Qwen's early-close
   guidance plus `</think>`), so the model answers from the thinking it has; no prompt is read again.
@@ -2055,7 +2061,10 @@ restores the reasoning from it, so the prompt (and its prefix-cache identity) is
 `summarized` display would give; non-empty `thinking` text takes precedence, any other signature
 stays non-semantic metadata, and a malformed NInfer signature fails with
 `invalid_thinking_signature`. The signature is not encrypted or authenticated: this is a local
-trusted server, and the value is the same reasoning text `summarized` display shows. Count Tokens
+trusted server, and the value is the same reasoning text `summarized` display shows.
+`thinking.display:"updates"` is served as `omitted`: the Anthropic API returns under it only the
+progress notes a Claude model writes between tool calls, which these models' templates do not
+write, so each Thinking block comes back empty with the reasoning in its signature. Count Tokens
 ignores `display`. `preserve_thinking` remains a NInfer extension for closed-turn reasoning
 history, `graft` selects a [prompt graft](#prompt-grafts), and llama.cpp's `lora` field sets the
 request's [LoRA adapter scales](#lora-adapters-and-control-vectors). `output_config.effort` passes its
