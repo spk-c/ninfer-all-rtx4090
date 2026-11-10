@@ -112,7 +112,7 @@ survives a second interleaved measurement, and its output matches the compiled r
 | `attn_parallel_tiles` | single-row chunked small-T attention over an INT8-family cache as parallel query tiles (one batched append, one split-KV launch over every tile, one reduce) instead of serial fused chunks; widths without an exact 2-8 column tile divisor stay serial; `NINFER_ATTN_PARALLEL_TILES=0\|1` overrides | 16 and 32 verify columns at 32K and 131K |
 | `q4_linear_add/5120x<k>` | the small-T Q4 residual projections (`small_t_c8`, `small_t_c16`, `small_t_c32`) for the attention or GDN output (k = 6144) and the MLP down (k = 17408) of a Q4-output artifact | widths 1 to 32 |
 | `gguf_vector/q4_k`, `gguf_vector/q6_k` | scalar or cooperative vector loads in the public GGUF Linear Op and SwiGLU, measured on both 17,408x5,120 and 5,120x17,408 plain projections and the 34,816x5,120 gate/up projection | widths 1 to 8; calibration requires both plain and fused sweeps to win. The RTX 3090 profile takes cooperative Q6_K at widths 1 to 8, and Q4_K at width 1, where the fused form alone does not win but whole-model decode does |
-| `gguf_matrix/q4_k` | `async`: the Q4_K integer matrix kernel at J = 128 staging both tiles through `cp.async` (92.5 KiB of shared memory, three barriers an iteration) against the compiled loop, over the 17,408x5,120 and 5,120x17,408 projections in BF16; listed on sm_80, 86, 89 and 120a builds, taken only where the row count is a whole number of 128-row tiles and the shared memory fits | widths 65 to 4,096 (65, 128, 129, 256, 512, 768, 1,024, 1,280, 1,536, 2,048, 3,072, 4,096); calibration keeps `async` on a 3% win that holds at 1.5% on a recheck. Past the last band the compiled route runs. The RTX 3090, RTX 4090 and RTX 5060 Ti profiles take `async` from 65 columns. Calibration takes 7 seconds on an RTX 3090 |
+| `gguf_matrix/q4_k`, `gguf_matrix/q4_k/128x5120` | `async`: the Q4_K integer matrix kernel at J = 128 staging both tiles through `cp.async` (92.5 KiB of shared memory, three barriers an iteration) against the compiled loop, over the 17,408x5,120 and 5,120x17,408 projections in BF16; listed on sm_80, 86, 89 and 120a builds, taken only where the row count is a whole number of 128-row tiles and the shared memory fits | widths 65 to 4,096 (65, 128, 129, 256, 512, 768, 1,024, 1,280, 1,536, 2,048, 3,072, 4,096); calibration keeps `async` on a 3% win that holds at 1.5% on a recheck. Past the last band the compiled route runs. The RTX 3090, RTX 4090 and RTX 5060 Ti generic profiles take `async` from 65 columns. A shape-specific `128x5120` override on the RTX 4090 keeps the compiled route through 4,096 columns because the 10 November 2026 paired benchmarks showed +1.8% to +6.25% async regressions on that small-row shape; other shapes and GPUs retain their routes. A named shape entry takes precedence over the generic key when the actual K matches; custom profile bands may explicitly opt into `async` for that shape. Calibration takes 7 seconds on an RTX 3090 |
 | `gguf_moe_matrix/q4_k` | the same staging in the routed MoE matrix kernel, over 64 experts of 640x2,560 rows at 65 to 1,024 pairs per expert (pairs divided by the expert count, which sets the tile width); taken only for Q4_K banks whose expert pointers and row stride are 16-byte aligned (`MoeTable::aligned16`, which Gemma 4, Flint and Qwen3.8-Flash-Next set for their device banks and for the banks, slots and slot pools that bring host or disk experts to the device) | pairs per expert, 65 to 1,024; the RTX 3090, RTX 4090 and RTX 5060 Ti profiles take `async` at every width. Calibration takes 1.2 seconds on an RTX 3090 |
 | `gguf_moe_vector/q4_k`, `gguf_moe_vector/q6_k`, `gguf_moe_up/q4_k`, `gguf_moe_up/q6_k` | scalar or cooperative GGUF MoE vector loads, measured with three experts and reordered slots; generic products test separate plain and fused SwiGLU forms on 640x2,560 rows at chunks 1, 2, 4, 8, and decode-up uses 640x2,560 rows at chunks 1, 2, 4 | per-type, per-chunk calibration; the RTX 3090 profile takes cooperative Q6_K products at chunks 1 to 4 and Q6_K decode-up at chunk 4 |
 | `q6_head/248320x5120` | the Q6 vocabulary head's per-row GEMV (`gemv`, widths 1 and 2) or small-T MMA (`small_t`, widths up to 32) | widths 1 to 32 |
@@ -183,3 +183,29 @@ The built-in profiles use two of them. The V100-SXM2-32GB takes Small-T up to T=
 T=1024 (the default prompt chunk): whole generation ran 0.5% faster with identical outputs.
 `ninfer_sparse_moe_bench --candidate` and `ninfer_sparse_moe_test --candidates-only` compare and
 qualify the candidates a profile may name.
+
+## RTX 4090 Q4_K follow-up gate (10 November 2026)
+
+The small Q4_K `N=128, K=5120` matrix now has a separate route key,
+`gguf_matrix/q4_k/128x5120`. Its built-in 4090 profile selects the existing
+compiled kernel, while the generic `gguf_matrix/q4_k` key continues to use
+`async` on larger matrices. This is a targeted **measured-route rollback**,
+not a new faster kernel. It does not alter Q4_K MoE routes. Profile catalog
+identity changes; any previously calibrated file may need recalibration.
+
+The report at `profiles/bench/rtx4090-q4k-20261110/REPORT.md` qualifies
+only commit `07f38482`, not this follow-up. The ambiguous
+`N=5120,K=17408,T=65` pair remains unchanged until more measurements.
+
+The full expert-delivery test previously hit the Windows CUDA watchdog
+under full memcheck. To localize this, the test executable now accepts
+`--case NAME` so the same complete set of scenarios can run in separate
+Compute Sanitizer processes (e.g. `--case alignment`,
+`--case disk-cache-6m`, `--case ram-lent-banks`). The default no-argument
+invocation still runs the full suite. A PASS for one section never clears
+a timeout or skipped section elsewhere. Run the complete case matrix with
+memcheck, racecheck and synccheck on the physical RTX 4090, with a separate
+exit code, sanitizer summary, and elapsed time for **every** section. Then
+repeat Q4_K shape A/B, plain/DFlash2 engine measurements and representative
+model token-ID regression at the **new exact commit**. No new GPU sign-off is
+claimed while that card is offline.

@@ -121,6 +121,7 @@
         "gdn_two_stage/h32": [[2147483647, "on"]],
         "gdn_two_stage/h48": [[2147483647, "on"]],
         "gguf_matrix/q4_k": [[4096, "async"]],
+        "gguf_matrix/q4_k/128x5120": [[4096, "compiled"]],
         "gguf_moe_matrix/q4_k": [[1024, "async"]],
         "q4_linear_swiglu/34816x17408x5120": [[32, ""], [40, "split_half_pair_c48"], [64, ""]],
         "q4_q5_attn_input/5120x6144x1024": [[32, ""], [64, "pair_r32_c64_s3"]],

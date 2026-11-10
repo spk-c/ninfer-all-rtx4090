@@ -31,6 +31,9 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
     add("gguf_moe_up/q6_k", {"scalar", "cooperative"});
     if (!volta && !turing_shapes) {
         add("gguf_matrix/q4_k", {"async"});
+        // Measured narrow-shape exceptions override the generic width-band route. The
+        // compiled candidate is the pre-async MMQ kernel, not a new implementation.
+        add("gguf_matrix/q4_k/128x5120", {"async", "compiled"});
         add("gguf_moe_matrix/q4_k", {"async"});
     }
 

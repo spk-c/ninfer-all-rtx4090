@@ -352,6 +352,27 @@ void test_schema_versions_on_disk() {
     std::filesystem::remove(path);
 }
 
+// Keep the known RTX 4090 narrow-Q4_K regression out of the generic async route.
+void test_rtx4090_q4k_narrow_override() {
+    const auto profile = ninfer::runtime::compiled_device_route_profile(
+        "nvidia-geforce-rtx-4090-sm89", 128);
+    expect(profile.has_value(), "the RTX 4090 built-in profile exists");
+    if (!profile) { return; }
+    const auto narrow = profile->routes.find("gguf_matrix/q4_k/128x5120");
+    const auto generic = profile->routes.find("gguf_matrix/q4_k");
+    expect(narrow != profile->routes.end() &&
+               same_bands(narrow->second, {{4096, "compiled"}}),
+           "the measured 128x5120 shape falls back to compiled MMQ through T=4096");
+    expect(generic != profile->routes.end() &&
+               same_bands(generic->second, {{4096, "async"}}),
+           "the larger RTX 4090 shapes keep the measured generic async route");
+    const auto rtx3090 = ninfer::runtime::compiled_device_route_profile(
+        "nvidia-geforce-rtx-3090-sm86", 82);
+    expect(rtx3090.has_value() &&
+               rtx3090->routes.count("gguf_matrix/q4_k/128x5120") == 0,
+           "the unmeasured RTX 3090 narrow shape is not re-routed");
+}
+
 void test_bands_and_force() {
     using ninfer::ops::device_route_schedule;
     ninfer::ops::install_device_route_profile(
@@ -438,6 +459,7 @@ int main() {
     test_file_lookup();
     test_file_layers_over_builtin();
     test_schema_versions_on_disk();
+    test_rtx4090_q4k_narrow_override();
     test_bands_and_force();
     test_wide_tables();
     if (failures != 0) {
