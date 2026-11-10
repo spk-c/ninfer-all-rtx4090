@@ -63,6 +63,7 @@ carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits ea
 
 <!-- Novelties only: a new model, family, artifact, platform, option, endpoint, format or mode, or a measured speedup of a path that worked. No fixes of any kind (crashes, wrong output, failed starts, missed cases, regressions and the speedups that win them back, the options and defaults they bring), no guards, diagnostics, internal, CI, build, test or documentation changes, and no chronicle: a date without a novelty gets no line. One line per date, a few words per item, each linked to the document with its details; no descriptions, mechanisms, measurements or hardware. Full rule: CONTRIBUTING.md, "Documentation describes the current state". -->
 
+- **2026-11-10:** [DFlash2 drafting for Qwen3.6-35B-A3B](docs/cli.md#speculative-decoding), Flash-Next artifacts of [Unsloth's Dynamic v3.1 GGUFs](docs/qwen3-8-flash-next.md#convert), Flash-Next prompts past 8,192 tokens [prefilling 1.1-1.4 times as fast](docs/qwen3-8-flash-next.md#expert-placements) with host or disk experts, Qwen3.5-core prompts that the hybrid cache taps [prefilling in one pass](docs/maintainer/hybrid-prefix-cache-spec.md#72-in-pass-exact-taps) (a 213-token first prompt 11% sooner), the hybrid cache over pipeline stages and tensor parallelism with [`--use-alt-prefix-caching`](docs/serving.md#server-options), DeepSeek-V4.1 [attention caches in the release's FP8/FP4 codes](docs/deepseek-v41.md#what-runs), DSpark drafting with host or disk experts [keeping 64 drafter experts a block on the GPU](docs/deepseek-v41.md#the-drafters-experts), 1.12 times as fast on an RTX 4090 (`--draft-experts`), Flash-Next with device experts [decoding 1.10 times as fast](docs/qwen3-8-flash-next.md#execution) (1.12 with MTP), and context lookup that [keeps the occurrence it copies](docs/flint.md#measurements), 1.06-1.40 times as fast on answers that copy one of two versions of a file (`--lookup-ngram`), and [`--kv-dtype bf16p`](docs/cli.md#context-and-memory), BF16's KV bits in 23% fewer bytes.
 - **2026-11-07:** Flash-Next [media prompts in the context cache](docs/qwen3-8-flash-next.md#media-conversations-on-one-rtx-4090) and [MTP drafts for media requests](docs/qwen3-8-flash-next.md#mtp-speculative-decoding).
 - **2026-11-06:** Faster Q4_K [prompts](docs/device-profiles.md#what-is-calibrated) for dense layers and routed experts.
 - **2026-11-05:** Faster DeepSeek-V4.1 [prefill tail](docs/deepseek-v41.md#the-prefill-tail), [IQ1_M expert prompts](docs/deepseek-v41.md#iq1_m-experts-in-prompt-chunks) and [Engram reads](docs/deepseek-v41.md#the-engram-table).
@@ -226,10 +227,12 @@ that only this engine reads.
 | [Qwen3.8-27B, abliterated](https://huggingface.co/WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | ✓ | ✓ | ✓ | the official recipe |
 | [Qwen3.8-27B Uncensored, HauhauCS Aggressive](https://huggingface.co/WaveCut/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-DFlash2-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | ✓ | ✓ | ✓ | the tune's MTP head |
 | [Qwen3.8-27B MXFP8-CRACK](https://huggingface.co/WaveCut/Qwen3.8-27B-MXFP8-CRACK-NInfer-v3) | 16.96 | groupwise-int | ✓ | ✓ | — | ✓ |  |
-| [Qwen3.6-35B-A3B NVFP4](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 20.39 | NVFP4 experts, Q8 projections | ✓ | ✓ | — | ✓ | RedHatAI's NVFP4 experts code for code; `sm_120a` GPUs only |
+| [Qwen3.6-35B-A3B NVFP4](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 21.04 | NVFP4 experts, Q8 projections | ✓ | ✓ | ✓ | ✓ | RedHatAI's NVFP4 experts code for code, incoai's DFlash2 drafter; `sm_120a` GPUs only |
 | [Qwen3.8-Flash-Next GSQ-RCO Q2_0](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) | 38.23 | GGUF blocks, 2.4 bits | ✓ | ✓ | ✓ | — | shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; reads the n-gram table |
 | [Qwen3.8-Flash-Next GSQ-RCO IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) | 54.24 | GGUF blocks, 3.5 bits | ✓ | ✓ | ✓ | — | shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; reads the n-gram table |
 | [Qwen3.8-Flash-Next Coder GSQ-RCO IQ1_M](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) | 30.76 | GGUF blocks | ✓ | ✓ | ✓ | — | expert-pruned coding build, 256 experts per layer; shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; reads the n-gram table |
+| [Qwen3.8-Flash-Next Unsloth UD-IQ2_XS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ2_XS-NInfer-v3) | 47.43 | GGUF blocks | ✓ | ✓ | ✓ | — | Unsloth Dynamic v3.1; shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; reads the n-gram table |
+| [Qwen3.8-Flash-Next Unsloth UD-IQ3_XXS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ3_XXS-NInfer-v3) | 54.66 | GGUF blocks | ✓ | ✓ | ✓ | — | Unsloth Dynamic v3.1; shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; reads the n-gram table |
 | [Gemma 4 26B-A4B it QAT](https://huggingface.co/WaveCut/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-NInfer-v3) | 14.75 | GGUF Q4_0 blocks | ✓ | ✓ | — | — | Google's QAT GGUF byte for byte; the MTP column is Google's QAT assistant |
 | [Flint UD-Q4_K_XL](https://huggingface.co/WaveCut/Flint-UD-Q4_K_XL-NInfer-v3) | 23.38 | GGUF blocks, Q8_0 to IQ3_S | — | — | — | — | Unsloth's UD-Q4_K_XL GGUF byte for byte; drafts by context lookup |
 | [DeepSeek-V4.1-Flash-1017 GSQ-RCO IQ1_M](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-NInfer-v3) | 117.18 | GGUF blocks, IQ1_S to IQ2_S experts | ✓ | — | — | — | ISTA-DASLab's GGUF byte for byte; experts in host memory or on disk; reads the Engram table; the release's vision tower (images); the release's DSpark drafter in beamster's STQ encoding (`--spec dspark`), or context lookup |
@@ -323,10 +326,11 @@ Prefill of a 4,463-token prompt, in tok/s:
   host had PCIe 5.0 x16, the RTX PRO 6000 and RTX 4090 hosts PCIe 4.0 x16, and the RTX 3090 host
   PCIe 3.0 x16 and two sockets (the test ran pinned to the GPU's node). The host, disk and cold
   columns of the three GeForce cards were measured on October 26, the rest on October 5 and 6.
-- **Prompt spans.** With host or disk experts a prompt prefills in spans of up to eight chunks, so
-  each layer's missing experts cross the bus once per span. From the CLI with Q2_0 disk experts in
-  the page cache, a 7,680-token prompt prefilled at 1,830 tok/s on the RTX 5090 and the answer
-  decoded at 115 tok/s, against 450 and 32 chunk by chunk
+- **Prompt spans.** With host or disk experts a prompt prefills in spans of up to eight chunks
+  (sixteen for one request at a time), so each layer's missing experts cross the bus once per
+  span. From the CLI with Q2_0 disk experts in the page cache, a 7,680-token prompt prefilled at
+  1,830 tok/s on the RTX 5090 and the answer decoded at 115 tok/s, against 450 and 32 chunk by
+  chunk
   ([three cards](docs/qwen3-8-flash-next.md#expert-placements)).
 - **Other releases and cards.** IQ3_S, the Coder IQ1_M build and the 8 and 12 GB cards are in the
   [expert placements](docs/performance.md#expert-placements). Six reasoning requests at once on two
@@ -373,7 +377,7 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
 <summary><b>Models and weight formats</b> — Qwen3.5 family, GGUF block formats, Ternary Bonsai 2, Flash-Next, Gemma 4, Flint, DeepSeek-V4.1-Flash</summary>
 
 - **Qwen3.5 family.** Dense and MoE (`Qwen3_5ForCausalLM`, `Qwen3_5MoeForCausalLM`) with MTP,
-  DFlash (35B-A3B) and DFlash2 (Qwen3.8-27B) drafters, Vision for images and video, and
+  DFlash (35B-A3B) and DFlash2 (Qwen3.8-27B, 35B-A3B) drafters, Vision for images and video, and
   `groupwise-int`, FP8, NVFP4 and ternary weights. Native MoE routed experts can stay in pinned
   host memory or the artifact's files, brought into whole-layer GPU banks with an optional device
   cache ([expert residency](docs/maintainer/qwen3_5-model.md#routed-expert-residency)). NVFP4
@@ -454,8 +458,9 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   RTX PRO 6000; on an RTX 4090, whose expert cache it shrinks, it decodes code and reasoning 1.19
   and 1.21 times as fast and other requests 0.85 to 1.02 times.
 - Flint, which has no drafter, and DeepSeek-V4.1-Flash without `--spec` draft by context lookup
-  (`--lookup-ngram N`, 1 to 7 drafts): what followed the last N tokens' earlier occurrence, verified
-  in one pass of decode rows.
+  (`--lookup-ngram N`, 1 to 7 drafts): what followed the last N tokens' earlier occurrence (the one
+  the sequence was already copying while it still matches, else the newest), verified in one pass of
+  decode rows.
 - `--adaptive-mtp` picks each round's width from measured draft survival and round cost.
 - N-gram copy drafting beside the neural drafter (on with `--spec`) verifies up to 15 tokens copied
   from earlier prompt, tool-result or output text ([ngram copy proposals](docs/ngram.md)).
@@ -463,10 +468,11 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
 </details>
 
 <details>
-<summary><b>Context and memory</b> — nine KV formats, up to 1,048,576 tokens, a context cache with a disk tier</summary>
+<summary><b>Context and memory</b> — ten KV formats, up to 1,048,576 tokens, a context cache with a disk tier</summary>
 
-- Nine KV formats, from `bf16` to `rk2v4-e8` at 216 bytes per token and KV head; `rk8v4` is the
-  all-round choice and `rk4v4` holds the native 262,144-token window of Qwen3.8-27B on a 24 GB card
+- Ten KV formats, from `bf16` to `rk2v4-e8` at 216 bytes per token and KV head; `rk8v4` is the
+  all-round choice, `rk4v4` holds the native 262,144-token window of Qwen3.8-27B on a 24 GB card,
+  and `bf16p` keeps BF16's bits in 784 bytes instead of 1,024
   ([context and memory](docs/cli.md#context-and-memory)).
 - Up to 1,048,576 tokens of context, four times the native window, with plain RoPE or YaRN
   (`--rope-yarn`, for Qwen3.5, Qwen3.8-Flash-Next and Gemma 4; Flint's full-attention blocks carry

@@ -48,7 +48,8 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
 - **Sampling defaults.** The release's: temperature 1.0, top-p 0.95, top-k 20.
 - **Speculative decoding by context lookup.** Recursive publishes no draft model. `--lookup-ngram
   N` proposes what followed the last N tokens' earlier occurrence in the sequence (up to
-  `--draft-tokens`, 3 by default, at most 7), and the target verifies the proposal in one pass of
+  `--draft-tokens`, 3 by default, at most 7): the occurrence the sequence was already copying while
+  it still matches, else the newest, and the target verifies the proposal in one pass of
   decode rows; the output is the one plain decoding gives.
 - **Expert residency.** The routed experts stay on the GPU, in pinned host memory or in the
   artifact's files, with a device cache and a CPU share of decode misses
@@ -131,9 +132,21 @@ keeps instead of prefilling those tokens again:
   time than computing its tokens again (about 50 tokens on). A disposable request (a decision read)
   leaves no image of its end.
 
-A sliding-window state cannot be cut back: the rings at a position hold the window before it, and
-each block's window reaches further back through the blocks below. A prompt therefore resumes only
-where a state was kept, not at an arbitrary common prefix.
+A sliding-window state cannot be cut back at will: the rings at a position hold the window before
+it, and each block's window reaches further back through the blocks below. A prompt therefore
+resumes only where a state was kept, not at an arbitrary common prefix.
+
+A turn that a stop string ends is the exception. Its state has read the tokens the cut removed, so
+the sequence goes back to where the stop string's match began, the state its visible text
+continues. The rings hold 768 positions for a window of 513, so that position's window is still in
+them while the sequence has written at most 255 positions past it, less a round's drafts; the
+full-attention rows are kept by position, and no state is copied. The next prompt resumes there
+when it repeats the reply's tokens, as a client that sends token ids does: on an RTX 4090 with host
+experts, after a reply of 184 tokens that a stop string cut at its 179th, the next request reused
+199 of its 207 tokens, as after a reply that its output limit ended there, with and without
+`--lookup-ngram`. A chat request renders the reply anew: with thinking off the generation prompt
+ends in an empty reasoning block that the history does not carry, so the next prompt resumes from
+the checkpoint at the last user turn whatever ended the reply.
 
 ## Measurements
 
@@ -171,6 +184,12 @@ repetitions, the first having spread ±22%.
   of a six-function Python module with type hints and docstrings (1,024 tokens, reasoning first):
   335.0 → 377.7 tok/s (1.13x), 164 of 255 proposed tokens accepted. The output equals plain
   decoding's.
+- **A lookup keeps its copy.** RTX PRO 6000 Blackwell Server, ninfer-serve, `--lookup-ngram 4`,
+  greedy, 400 tokens, two server starts each, November 10, 2026: six prompts that show a source
+  file as two versions (three identifiers renamed, small numbers changed) and ask for the first
+  again decoded at 573.5-657.4 tok/s when the newest occurrence was always proposed and at
+  648.5-701.2 tok/s keeping the occurrence being copied (1.055-1.156x); a code and a prose request
+  decoded within 0.1%. The answers were the same bytes.
 - **Typed decisions.** On an NVIDIA A40 (48 GB, `sm_86`, 300 W), `scripts/pods/decision_bench.py`
   (four sequences): about a 340-token state, 1, 4 and 16 questions answer in 118, 135 and 236 ms
   cold and 59, 95 and 203 ms once the state is kept; about an 11,660-token state in 2.20, 2.22 and

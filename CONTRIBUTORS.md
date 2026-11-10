@@ -33,7 +33,7 @@ their source commit, so `git log` is the complete record; this page keeps the cr
 | [IMGillusion/ninfer-disk-kv](https://github.com/IMGillusion/ninfer-disk-kv) | the disk KV tier and `--context-cache-policy rolling` |
 | [kido5217/frinfer](https://github.com/kido5217/frinfer) (Fedor Suchkov) | token log probabilities on Chat Completions and Responses |
 | [MirkoCovizzi/ninfer-rtx5090-mobile](https://github.com/MirkoCovizzi/ninfer-rtx5090-mobile) | adaptive MTP |
-| [Wallawalla47/ninfer-custom](https://github.com/Wallawalla47/ninfer-custom) and its successor [Infernix](https://github.com/wallawalla47/infernix) (Ian Ranson, Duncan Betts, Fedor Suchkov) | the fast INT8 and NVFP4 prompt-attention kernels, the hybrid prefix cache, n-gram copy drafting (with remesis), recency eviction, Device KV lease growth, the Host cache budget, automatic long anchors, `--assistant-prefill`, grouped `--help`, levelled logs, programmatic dependent launches, split-KV attention for short prefill steps, ModelOpt and Quasar NVFP4/FP8 conversion, a native Windows build, the reasoning-loop guard, FP32 head logits |
+| [Wallawalla47/ninfer-custom](https://github.com/Wallawalla47/ninfer-custom) and its successor [Infernix](https://github.com/wallawalla47/infernix) (Ian Ranson, Duncan Betts, Fedor Suchkov) | the fast INT8 and NVFP4 prompt-attention kernels, the hybrid prefix cache, n-gram copy drafting (with remesis), recency eviction, Device KV lease growth, the Host cache budget, automatic long anchors, `--assistant-prefill`, grouped `--help`, levelled logs, programmatic dependent launches, split-KV attention for short prefill steps, ModelOpt and Quasar NVFP4/FP8 conversion, a native Windows build, the reasoning-loop guard, FP32 head logits, the lossless `bf16p` KV form |
 | [gzenz/ninfer](https://github.com/gzenz/ninfer) (Gideon Zenz, David Oelfke) | thorough admission search, value-aware demotion, concurrent prefill, worker out-of-memory recovery, the MTP attention window, post-thinking sampling, `GET /stats` and the `tools/monitor` dashboard, request-log rotation, derived session keys, CPU Vision, RoPE position interpolation, branch anchors, PackGQA |
 | [tmark00/ninfer](https://github.com/tmark00/ninfer) | table-decoded E8 roots, the SM-count RMSNorm cutoff, the WebUI MCP proxy |
 | [quardex/ninfer-all](https://github.com/quardex/ninfer-all) (A. Ugryumov) | the Turing (`sm_75`) build: its MMA forms, BF16-cache attention on FP16 tensor cores, every KV coding in 64 KiB of shared memory, the Turing path of the Q8 K-split contraction and the TITAN RTX profile |
@@ -86,7 +86,9 @@ two-stage GDN prefill, parallel query tiles, MX FP8 MMA and Minnnn's column-band
 - The DeepSeek-V4.1-Flash artifacts import ISTA-DASLab's GSQ-RCO IQ1_M GGUF and its Engram table
   GGUF, under the model's MIT license. Its support follows DeepSeek's release code
   (`inference/model.py`, `kernel.py` and `encoding/encoding.py`) and was measured against Strata's
-  `strata-dsv41`.
+  `strata-dsv41`. The order in which `--draft-experts` keeps the DSpark drafter's experts is
+  [Basalt](https://github.com/jesdga95/basalt)'s profile `deepseek41-40x384-dspark.prof` (MIT,
+  copyright 2026 Jesús Gulfo).
 - The SiLU shared by the GPU's GGUF expert kernels and the CPU's expert products evaluates e^x with
   the single-precision polynomial of Stephen L. Moshier's Cephes Math Library.
 - llama.cpp's GGUF block kernels are vendored in `third_party/ggml-quants` under their MIT license;

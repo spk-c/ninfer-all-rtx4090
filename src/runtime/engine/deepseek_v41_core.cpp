@@ -145,8 +145,8 @@ ConstructedDeepSeekV41 construct_deepseek_v41(const EngineOptions& options, Devi
                                     "head");
     }
     if (options.kv_cache != KvCacheStorage::BFloat16) {
-        throw std::invalid_argument("DeepSeek-V4.1 keeps its attention latents in BF16 (no "
-                                    "--kv-dtype formats)");
+        throw std::invalid_argument("DeepSeek-V4.1 keeps its attention caches in the release's "
+                                    "FP8/FP4 forms (--kv-dtype bf16 only)");
     }
     const auto& hybrid = options.hybrid_experts;
     if (hybrid.mapped_misses || hybrid.tail_skip_rank != 0 || hybrid.prefill_buffers != 0 ||
@@ -224,6 +224,7 @@ ConstructedDeepSeekV41 construct_deepseek_v41(const EngineOptions& options, Devi
         {.artifact = options.artifact_path,
          .experts  = options.expert_residency,
          .dspark   = dspark,
+         .draft_experts = speculative.draft_experts,
          .vision   = vision},
         device, &options.startup_observer);
     // An image's span takes the release's 1024 prompt positions at most, fewer with
@@ -374,8 +375,8 @@ ConstructedDeepSeekV41 construct_deepseek_v41(const EngineOptions& options, Devi
         }
     }
     publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
-                       "DeepSeek-V4.1: %u sequence(s), prompt chunks of %u tokens%s, BF16 latent "
-                       "caches %.0f MiB%s, workspace %.0f MiB",
+                       "DeepSeek-V4.1: %u sequence(s), prompt chunks of %u tokens%s, FP8/FP4 "
+                       "latent caches %.0f MiB%s, workspace %.0f MiB",
                        executor.sequences, chunk_tokens, spans.c_str(),
                        double(memory.kv_bytes) / 1048576.0,
                        memory.kv_grows
@@ -481,12 +482,21 @@ ConstructedDeepSeekV41 construct_deepseek_v41(const EngineOptions& options, Devi
                            speculative.lookup_ngram, lookup_drafts);
     }
     if (dspark) {
+        const auto& kept = model->dspark_kept();
+        const std::string experts =
+            kept.empty() ? std::string("every expert on the GPU")
+                         : std::to_string(kept.front().size()) + " of " +
+                               std::to_string(model->dspark_config()->experts) +
+                               " experts a block on the GPU (" +
+                               std::to_string(instance->executor->memory().drafter_expert_bytes >> 20) +
+                               " MiB), the rest in pinned memory";
         publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
                            "DeepSeek-V4.1: DSpark speculative decoding, up to %u drafts a round "
                            "while their confidence is at least %.2f, one decoding request at a "
-                           "time",
+                           "time, %s",
                            drafts,
-                           double(speculative.draft_confidence.value_or(kDSparkConfidenceFloor)));
+                           double(speculative.draft_confidence.value_or(kDSparkConfidenceFloor)),
+                           experts.c_str());
     }
     ConstructedDeepSeekV41 out;
     const auto& stats         = model->storage_stats();
@@ -627,6 +637,14 @@ struct DeepSeekV41Core::Request {
     bool post_thinking         = false;
     std::uint32_t position     = 0;
     std::vector<TokenId> feed;
+    // A stop string's match began at the token the next step feeds: the step first keeps the
+    // sequence's state (Slot::hold). In a speculative round the match began after `hold_after` of
+    // the round's verified tokens (the anchor, then the accepted ones): the round's commit keeps
+    // the state there. And the turn ended at a stop string inside a speculative round: the
+    // sequence goes back to the kept state after the round commits.
+    bool hold_wanted = false;
+    bool stop_rewind = false;
+    std::optional<std::uint32_t> hold_after;
     std::vector<TokenId> generated;
     std::optional<GenerationBudget> budget;
     Clock::time_point admitted, prefill_start, prefill_end, first_token, last_token;
@@ -638,9 +656,16 @@ struct DeepSeekV41Core::Impl {
         std::shared_ptr<Request> request;
         std::vector<TokenId> fed;
         std::vector<TokenId> anchor;
+        // runtime::lookup_draft's copy source, as its distance from the end of `fed`.
+        std::size_t lookup_lag = 0;
         // The pictures among fed and anchor (an image token does not tell one from another).
         std::vector<MediaMark> media, anchor_media;
         models::deepseek_v41::SequenceSnapshot snapshot;
+        // The sequence's state after its first hold_tokens tokens, where a stop string's match
+        // began in the request it serves (0: none): the visible text of a turn the stop string
+        // ends continues that state, not the live one, which has read the tokens the cut removed.
+        models::deepseek_v41::SequenceSnapshot hold;
+        std::uint32_t hold_tokens = 0;
         std::uint64_t last_used = 0;
         bool disposable         = false; // its last request's
     };
@@ -1361,9 +1386,10 @@ struct DeepSeekV41Core::Impl {
             slot.media.clear();
             slot.anchor_media.clear();
         }
-        slot.request    = request;
-        slot.last_used  = ++use_clock;
-        slot.disposable = r.disposable;
+        slot.request     = request;
+        slot.hold_tokens = 0;
+        slot.last_used   = ++use_clock;
+        slot.disposable  = r.disposable;
         r.reused = r.prefilled = reused;
         if (drafts > 0) {
             r.speculative.enabled      = true;
@@ -2054,8 +2080,33 @@ struct DeepSeekV41Core::Impl {
         if (token < 0) { throw_numerical_failure(*request); }
         (void)accept(request, std::span<const TokenId>(&token, 1),
                      logprob != nullptr ? std::span<const runtime::RawTokenLogprob>(logprob, 1)
-                                        : std::span<const runtime::RawTokenLogprob>{});
+                                        : std::span<const runtime::RawTokenLogprob>{},
+                     true);
         check_capacity(request);
+    }
+
+    // Keeps the state of a request whose next step feeds the token that begins a stop string's
+    // match: the sequence has read everything before it.
+    void keep_hold(Request& r) {
+        r.hold_wanted = false;
+        Slot& slot    = slots[r.slot];
+        if (!reuse_prefixes || !r.decoding || r.feed.empty()) { return; }
+        // A match that begins without a state kept leaves none of an earlier one either.
+        slot.hold_tokens = instance.executor->hold(r.slot, slot.hold)
+                               ? static_cast<std::uint32_t>(slot.fed.size())
+                               : 0;
+    }
+
+    // A turn that ended at a stop string whose match began before its last token: the sequence
+    // goes back to the state kept where the match began, which the visible text continues.
+    // Without one it keeps its live state, which no later prompt continues.
+    void rewind_to_hold(Request& r) {
+        r.stop_rewind = false;
+        Slot& slot    = slots[r.slot];
+        if (slot.hold_tokens == 0 || slot.hold_tokens > slot.fed.size()) { return; }
+        instance.executor->restore_hold(r.slot, slot.hold);
+        slot.fed.resize(slot.hold_tokens);
+        slot.hold_tokens = 0;
     }
 
     // A request whose next feed would pass the context finishes.
@@ -2069,8 +2120,10 @@ struct DeepSeekV41Core::Impl {
     // capacity check, which the caller makes once the round's position is known: returns how many
     // of them the policy accepted. The next step feeds the last accepted one (the first when none
     // was, as a single sampled token is fed whatever the policy decides).
+    // `committed`: the sequence already holds the state the tokens leave; a speculative round
+    // commits after the policy has decided.
     std::uint32_t accept(const std::shared_ptr<Request>& request, std::span<const TokenId> tokens,
-                         std::span<const runtime::RawTokenLogprob> logprobs) {
+                         std::span<const runtime::RawTokenLogprob> logprobs, bool committed) {
         Request& r                    = *request;
         const OutputDecision decision = r.output.preview_model(tokens, r.budget->remaining(),
                                                                r.budget->limit_reason(), logprobs);
@@ -2098,10 +2151,29 @@ struct DeepSeekV41Core::Impl {
             std::lock_guard lock(stats_mutex);
             stats.committed_decode_tokens += accepted;
         }
+        // The match of a stop string began at accepted token `hold`. A sampled token is not read
+        // yet, so the next step keeps the state before it feeds it. A speculative round has
+        // verified the anchor and the accepted tokens but the last: its commit keeps the state
+        // after those before the match (Executor::commit), where the visible text may end.
+        const std::optional<std::uint32_t> hold =
+            accepted > 0 && decision.stop_hold_after && *decision.stop_hold_after < accepted
+                ? decision.stop_hold_after
+                : std::nullopt;
+        if (hold && !committed) { r.hold_after = *hold + 1; }
         if (decision.finished()) {
+            // A sampled token that begins and ends the match is not read: the live state is the
+            // one the text continues. Any other cut returns to the kept state.
+            if (decision.stop_cut && !(committed && hold)) {
+                if (committed) {
+                    rewind_to_hold(r);
+                } else {
+                    r.stop_rewind = true;
+                }
+            }
             finish(request, decision.finish_reason);
             return accepted;
         }
+        r.hold_wanted = committed && hold.has_value();
         r.feed.assign(1, tokens[accepted > 0 ? accepted - 1 : 0]);
         if (decision.continuation == ContinuationAction::ApplyTargetControl) {
             // A reached thinking budget, or the loop guard's conclusion, closes the reasoning: the
@@ -2151,7 +2223,7 @@ struct DeepSeekV41Core::Impl {
     std::uint32_t lookup(const Request& r, std::uint32_t steps, TokenId* out) {
         std::vector<TokenId>& ledger = slots[r.slot].fed;
         ledger.push_back(r.feed.front());
-        const std::uint32_t found = runtime::lookup_draft(ledger, lookup_ngram, steps, out);
+        const std::uint32_t found = runtime::lookup_draft(ledger, lookup_ngram, steps, out, slots[r.slot].lookup_lag);
         ledger.pop_back();
         return found;
     }
@@ -2184,6 +2256,9 @@ struct DeepSeekV41Core::Impl {
             if (slot.request && slot.request->decoding) { ++decoding; }
         }
         const std::uint32_t steps = round_drafts(decoding);
+        for (const Slot& slot : slots) {
+            if (slot.request && slot.request->hold_wanted) { keep_hold(*slot.request); }
+        }
         std::vector<std::shared_ptr<Request>> deferred;
         for (const Slot& slot : slots) {
             // A copy: finishing or failing the request clears its slot.
@@ -2597,7 +2672,7 @@ struct DeepSeekV41Core::Impl {
                 failed[j] = 1;
             } else {
                 try {
-                    taken = accept(request, run_tokens, records);
+                    taken = accept(request, run_tokens, records, false);
                 } catch (...) {
                     fail(request, std::current_exception());
                     failed[j] = 1;
@@ -2620,15 +2695,32 @@ struct DeepSeekV41Core::Impl {
                 ops::increment_token_counts(ids, row_counts, stream);
             }
         }
-        executor.commit(sequences, kept);
+        // A row whose stop string's match began inside its run also keeps the state after the
+        // tokens before the match.
+        std::vector<std::uint32_t> hold_after(b, 0);
+        std::vector<models::deepseek_v41::SequenceSnapshot*> holds(b, nullptr);
+        for (std::size_t j = 0; j < b; ++j) {
+            const auto after = std::exchange(batch[j]->hold_after, std::nullopt);
+            if (!after || failed[j] || !reuse_prefixes) { continue; }
+            hold_after[j] = std::min(*after, kept[j]);
+            holds[j]      = &slots[batch[j]->slot].hold;
+        }
+        const std::uint32_t held = executor.commit(sequences, kept, hold_after, holds);
         for (std::size_t j = 0; j < b; ++j) {
             Request& r = *batch[j];
             if (failed[j]) { continue; }
             Slot& slot = slots[r.slot];
+            if (hold_after[j] != 0) {
+                // A match that began without a state kept leaves none of an earlier one either.
+                slot.hold_tokens = (held >> j & 1U) != 0
+                                       ? static_cast<std::uint32_t>(slot.fed.size()) + hold_after[j]
+                                       : 0;
+            }
             // The verification fed the anchor and the drafts; the sequence keeps the first ones.
             slot.fed.insert(slot.fed.end(), tokens.begin() + starts[j],
                             tokens.begin() + starts[j] + std::ptrdiff_t(kept[j]));
             r.position += kept[j];
+            if (r.stop_rewind) { rewind_to_hold(r); }
             try {
                 check_capacity(batch[j]);
             } catch (...) { fail(batch[j], std::current_exception()); }
