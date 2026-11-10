@@ -27,7 +27,7 @@ struct MatrixLaunch {
 };
 
 template <ggml_type type>
-MatrixLaunch select_matrix_launch(int rows, int columns) {
+MatrixLaunch select_matrix_launch(int rows, int columns, int k = 0) {
     if (rows <= 0 || columns <= 0) {
         throw std::invalid_argument("gguf matrix product: nonpositive geometry");
     }
@@ -53,8 +53,18 @@ MatrixLaunch select_matrix_launch(int rows, int columns) {
     }
     if (best.J == 0) { throw std::invalid_argument("gguf matrix product: no tile fits this device"); }
     if constexpr (type == GGML_TYPE_Q4_K) {
+        // The 4090 qualification measured a repeatable async regression for 128x5120,
+        // despite improvements on larger matrices at the same token width. A measured,
+        // shape-specific profile entry overrides the generic width-only choice. Only the
+        // product knows K; workspace/fixup sizing (which calls this with k=0) is unchanged
+        // because both kernels use the same row/column tiles and stream-k layout.
+        constexpr std::string_view narrow_key = "gguf_matrix/q4_k/128x5120";
+        const std::string_view schedule =
+            rows == 128 && k == 5120 && device_route_measured(narrow_key, columns)
+                ? device_route_schedule(narrow_key, columns)
+                : device_route_schedule("gguf_matrix/q4_k", columns);
         if (best.J == 128 && rows % best.I == 0 && ggml_cuda_mmq_async_tiles_available(device.cc) &&
-            device_route_schedule("gguf_matrix/q4_k", columns) == "async") {
+            schedule == "async") {
             const std::size_t async_shared = mmq_get_nbytes_shared(
                 ggml_cuda_mmq_get_config(type, best.J, false, device.cc), device.cc, true);
             if (async_shared <= device.shared_per_block_optin) {
@@ -165,7 +175,7 @@ void matrix_product_impl(const void* weight, std::int64_t row_bytes, int rows, i
         row_bytes < std::int64_t(k / qk) * block_bytes) {
         throw std::invalid_argument("gguf matrix product: unsupported geometry");
     }
-    const MatrixLaunch launch = select_matrix_launch<type>(rows, columns);
+    const MatrixLaunch launch = select_matrix_launch<type>(rows, columns, k);
     const auto* x             = static_cast<const char*>(weight);
     const auto* y             = static_cast<const int*>(activation);
     auto* f                   = static_cast<float*>(fixup);

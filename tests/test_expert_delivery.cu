@@ -12,10 +12,12 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ninfer;
@@ -1154,22 +1156,59 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string(argv[1]) == "--no-ready-wait") {
             return failure_control(device, path, true);
         }
-        int failures = admission_boundaries(device);
-        failures += tier_policy(device);
-        failures += slot_pools(device);
-        failures += alignment(device);
-        for (bool disk : {false, true}) {
-            for (auto cache : {0ULL, 6ULL << 20, 64ULL << 20}) {
-                failures += run(device, disk, cache, path);
+        // Keep the default comprehensive test unchanged, but allow each scenario to run
+        // in a fresh process under Compute Sanitizer. A single monolithic instrumented run
+        // exceeded the 120-second CUDA watchdog on WDDM: subdividing isolates that failure
+        // without treating a timed-out or missing section as PASS.
+        using Case = std::pair<std::string, std::function<int()>>;
+        std::vector<Case> cases;
+        cases.emplace_back("admission", [&] { return admission_boundaries(device); });
+        cases.emplace_back("tier-policy", [&] { return tier_policy(device); });
+        cases.emplace_back("slot-pools", [&] { return slot_pools(device); });
+        cases.emplace_back("alignment", [&] { return alignment(device); });
+        for (const bool disk : {false, true}) {
+            const std::string mode = disk ? "disk" : "ram";
+            for (const auto cache : {0ULL, 6ULL << 20, 64ULL << 20}) {
+                cases.emplace_back(mode + "-cache-" + std::to_string(cache >> 20) + "m",
+                                   [&, disk, cache] { return run(device, disk, cache, path); });
             }
-            failures += run(device, disk, 6ULL << 20, path, true);
-            for (const double share : {0.5, 1.0}) { failures += cpu_share(device, disk, share, path); }
-            failures += elastic_cache(device, disk, path);
-            failures += lent_banks(device, disk, path);
-            failures += span_prefetch(device, disk, path);
-            failures += lent_landing(device, disk, path);
+            cases.emplace_back(mode + "-alternate",
+                               [&, disk] { return run(device, disk, 6ULL << 20, path, true); });
+            cases.emplace_back(mode + "-cpu-half",
+                               [&, disk] { return cpu_share(device, disk, 0.5, path); });
+            cases.emplace_back(mode + "-cpu-full",
+                               [&, disk] { return cpu_share(device, disk, 1.0, path); });
+            cases.emplace_back(mode + "-elastic",
+                               [&, disk] { return elastic_cache(device, disk, path); });
+            cases.emplace_back(mode + "-lent-banks",
+                               [&, disk] { return lent_banks(device, disk, path); });
+            cases.emplace_back(mode + "-span-prefetch",
+                               [&, disk] { return span_prefetch(device, disk, path); });
+            cases.emplace_back(mode + "-lent-landing",
+                               [&, disk] { return lent_landing(device, disk, path); });
         }
-        failures += failure_control(device, path, false);
+        cases.emplace_back("failure-control",
+                           [&] { return failure_control(device, path, false); });
+
+        if (argc != 1 && !(argc == 3 && std::string(argv[1]) == "--case")) {
+            std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME]\n");
+            return 2;
+        }
+        int failures = 0;
+        bool selected = false;
+        for (const auto& [name, execute] : cases) {
+            if (argc == 3 && name != argv[2]) { continue; }
+            selected = true;
+            std::printf("START expert-delivery case %s\n", name.c_str());
+            const int result = execute();
+            failures += result;
+            std::printf("%s expert-delivery case %s (exit %d)\n",
+                        result == 0 ? "PASS" : "FAIL", name.c_str(), result);
+        }
+        if (!selected) {
+            std::fprintf(stderr, "Unknown expert-delivery case: %s\n", argv[2]);
+            return 2;
+        }
         return failures ? 1 : 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL %s\n", error.what());
