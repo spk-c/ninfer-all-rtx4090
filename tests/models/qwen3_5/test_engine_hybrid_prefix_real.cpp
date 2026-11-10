@@ -1152,7 +1152,9 @@ int main() {
     }
     const char* selected            = std::getenv("NINFER_HYBRID_REAL_SCENARIO");
     const std::string_view scenario = selected != nullptr && *selected != '\0' ? selected : "all";
-    constexpr std::array<std::string_view, 17> kScenarios{"all",
+    constexpr std::array<std::string_view, 19> kScenarios{"all",
+                                                           "stop-string",
+                                                           "stop-string-mtp",
                                                           "restore-exact",
                                                           "restore-exact-mtp",
                                                           "restore-exact-dflash2",
@@ -1200,6 +1202,12 @@ int main() {
         if (all || scenario == "turns") { failures += exercise_turns(artifact, 1ULL << 30); }
         if (all || scenario == "turns-device-only") { failures += exercise_turns(artifact, 0); }
         if (all || scenario == "vision") { failures += exercise_vision(artifact); }
+        if (all || scenario == "stop-string") {
+            failures += exercise_stop_string(artifact, ninfer::SpeculativeBackend::None);
+        }
+        if (all || scenario == "stop-string-mtp") {
+            failures += exercise_stop_string(artifact, ninfer::SpeculativeBackend::Mtp);
+        }
         if (all || scenario == "persist") {
             failures += exercise_persist(artifact, ninfer::SpeculativeBackend::None);
         }
