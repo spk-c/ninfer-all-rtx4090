@@ -1395,8 +1395,15 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
     temporary_input_bytes_.clear();
   }
 
+  // A token whose first bytes finish a literal before a token-level free-text region (e.g. "\n\n"
+  // then any_tokens, fed "\n\n\n") is taken whole by the region from there.
+  int32_t mid_token_row = 0;
+  if (!byte_path_success && !atomic_success && !has_char_budget_rules_) {
+    mid_token_row = FindMidTokenExcludeEdgeRow(pos, token_id);
+  }
+
   // Phase 3: Combine results (no priority — merge with deduplication)
-  if (!byte_path_success && !atomic_success) {
+  if (!byte_path_success && !atomic_success && mid_token_row == 0) {
     if (debug_print) {
       XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
                          << "> rejected at position " << pos;
@@ -1408,7 +1415,16 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
     return false;
   }
 
-  if (atomic_success && !byte_path_success) {
+  if (mid_token_row > 0) {
+    PopLastStates(pos - mid_token_row);
+    bool accepted = AdvanceAtomicToken(token_id, debug_print);
+    XGRAMMAR_DCHECK(accepted);
+    token_length_history.push_back(mid_token_row + 1);
+    if (ShouldTrackAcceptedBytes()) {
+      AppendPerByteRows(token.substr(0, mid_token_row));
+      AppendAtomicRow(token.substr(mid_token_row));
+    }
+  } else if (atomic_success && !byte_path_success) {
     PopLastStates(pos);
     restore_row_before_token();
     char_budget_relaxed_ = false;
@@ -1997,7 +2013,7 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
 
     // Examine only the current one ParserState
     std::optional<Impl> atomic_trial_base;
-    if (has_char_budget_rules_ && !adaptive_token_mask.uncertain_indices.empty()) {
+    if (has_char_budget_rules_ && grammar_->has_token_edges && !adaptive_token_mask.uncertain_indices.empty()) {
       atomic_trial_base.emplace(*this);
       atomic_trial_base->capture_recording_ = false;
     }
@@ -2075,7 +2091,18 @@ void GrammarMatcher::Impl::FillBitmaskForStates(
         }
       }
 
-      if (!accepted && has_char_budget_rules_) {
+      // The first bytes may finish a literal before a token-level free-text region, which takes
+      // the whole token from there. The longer tokens under this one may be taken even when this
+      // one is excluded, so they are checked one by one instead of being skipped with it.
+      if (!accepted && !has_char_budget_rules_ &&
+          FindMidTokenExcludeEdgeRow(prev_matched_size, -1)) {
+        accepted = FindMidTokenExcludeEdgeRow(
+                       prev_matched_size, sorted_decoded_vocab[cur_token_idx].first
+                   ) > 0;
+        last_rejected_uncertain_range = cur_token_idx + 1;
+      }
+
+      if (!accepted && has_char_budget_rules_ && grammar_->has_token_edges) {
         int32_t token_char_count = 0;
         for (uint8_t byte : cur_token) {
           token_char_count += StartsUTF8Codepoint(byte);
