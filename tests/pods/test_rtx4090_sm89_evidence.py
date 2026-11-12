@@ -111,6 +111,68 @@ def test_incomplete_matrix_cannot_auto_promote():
     assert summary["autopromote"] is False
 
 
+def test_high_decode_rate_cannot_mask_different_output_lengths():
+    rows = []
+    for rep in range(1, 6):
+        rows.extend((
+            {"case": "k3", "rep": str(rep), "arm": "A", "status": "passed",
+             "decode_tok_s": "100", "prompt_tokens": "1000",
+             "generated_tokens": "100", "answer_sha256": "aaaa"},
+            {"case": "k3", "rep": str(rep), "arm": "B", "status": "passed",
+             "decode_tok_s": "200", "prompt_tokens": "1000",
+             "generated_tokens": "99", "answer_sha256": "bbbb"},
+        ))
+    meta = {"status": "COMPLETE", "plan_manifest": {
+        "repetitions": 5, "baseline_commit_sha": BASE_SHA,
+        "candidate_commit_sha": "f" * 40}}
+    case = [{"name": "k3", "family": "dflash2"}]
+    summary = summarize(rows, meta, case)
+    row = summary["cases"][0]
+    assert not summary["complete"]
+    assert not row["nominal_performance_win"]
+    assert row["pairs"] == 0
+    assert row["pair_disqualifications"]["different_generated_tokens"] == 5
+
+    for r in rows:
+        if r["arm"] == "B":
+            r["generated_tokens"] = "100"
+    summary = summarize(rows, meta, case)
+    assert summary["complete"]
+    assert summary["cases"][0]["pairs"] == 5
+    assert summary["cases"][0]["answer_sha_divergent_pairs"] == 5
+    assert not summary["cases"][0]["nominal_performance_win"]
+
+    for r in rows:
+        if r["arm"] == "B":
+            r["answer_sha256"] = "aaaa"
+    summary = summarize(rows, meta, case)
+    assert summary["cases"][0]["nominal_performance_win"]
+
+
+def test_prompt_mismatch_and_duplicate_rows_are_not_valid_pairs():
+    rows = []
+    for rep in range(1, 6):
+        for arm in ("A", "B"):
+            rows.append({
+                "case": "k3", "rep": str(rep), "arm": arm,
+                "status": "passed", "decode_tok_s": "100",
+                "prompt_tokens": "900" if arm == "B" and rep == 2 else "1000",
+                "generated_tokens": "100", "answer_sha256": "abc",
+            })
+    meta = {"status": "COMPLETE", "plan_manifest": {
+        "repetitions": 5, "baseline_commit_sha": BASE_SHA,
+        "candidate_commit_sha": "f" * 40}}
+    summary = summarize(rows, meta, [{"name": "k3", "family": "dflash2"}])
+    assert not summary["complete"]
+    assert summary["cases"][0]["pair_disqualifications"]["different_prompt_tokens"] == 1
+    assert summary["cases"][0]["pairs"] == 4
+    rows[3]["prompt_tokens"] = "1000"
+    rows.append(dict(rows[0]))
+    summary = summarize(rows, meta, [{"name": "k3", "family": "dflash2"}])
+    assert not summary["complete"]
+    assert summary["cases"][0]["duplicate_sample_rows"] == 1
+
+
 def test_report_generates_real_artifacts_without_simulated_speed(tmp_path):
     evidence = tmp_path / "measure"
     evidence.mkdir()
