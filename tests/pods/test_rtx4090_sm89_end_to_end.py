@@ -125,15 +125,20 @@ def test_collector_cli_matches_generator_for_all_54_cases(tmp_path):
 
 def test_all_54_cases_complete_540_measurements_and_108_warmups(tmp_path, monkeypatch):
     plan_dir, manifest, cases, master, candidate, gold = make_fake_strict_manifest(tmp_path)
-    def check_plan(*args):
-        assert args[0] == plan_dir
-        return manifest, cases, {"A": master, "B": candidate}
-    monkeypatch.setattr(collector, "validate_plan", check_plan)
+    monkeypatch.setattr(collector, "commit_sha", lambda root: (
+        BASE_SHA if root.name == "master" else "c" * 40))
+    monkeypatch.setattr(collector, "source_is_clean", lambda root: True)
+    monkeypatch.setattr(collector, "preflight", lambda a, b, allow_separate_dirs: (
+        None if a == master and b == candidate and allow_separate_dirs
+        else (_ for _ in ()).throw(AssertionError("wrong binary paths"))))
     out = tmp_path / "synthetic-execution"
     status = collector.run_campaign(
         plan_dir, out, tmp_path / "master", tmp_path / "candidate", gold,
         reps=5, max_cases=0, idle_limit=2048, timeout=3,
-        gpu_probe=lambda index: {"gpu_index": index, "used_mib": 0, "util_pct": 0},
+        gpu_probe=lambda index: {
+            "gpu_index": index, "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": "8.9", "used_mib": 0, "util_pct": 0,
+        },
         executor=fake_executor,
     )
     assert status == 0
@@ -163,10 +168,10 @@ def test_all_54_cases_complete_540_measurements_and_108_warmups(tmp_path, monkey
 
 def test_mid_campaign_mutation_is_not_labeled_partial(tmp_path, monkeypatch):
     plan_dir, manifest, cases, master, candidate, gold = make_fake_strict_manifest(tmp_path)
-    monkeypatch.setattr(
-        collector, "validate_plan",
-        lambda *args: (manifest, cases, {"A": master, "B": candidate}),
-    )
+    monkeypatch.setattr(collector, "commit_sha", lambda root: (
+        BASE_SHA if root.name == "master" else "c" * 40))
+    monkeypatch.setattr(collector, "source_is_clean", lambda root: True)
+    monkeypatch.setattr(collector, "preflight", lambda a, b, allow_separate_dirs: None)
     changed = False
     def mutate_during_measurement(argv, timeout, device):
         nonlocal changed
@@ -179,7 +184,10 @@ def test_mid_campaign_mutation_is_not_labeled_partial(tmp_path, monkeypatch):
     result = collector.run_campaign(
         plan_dir, out, tmp_path / "master", tmp_path / "candidate", gold,
         reps=5, max_cases=1, idle_limit=2048, timeout=3,
-        gpu_probe=lambda index: {"gpu_index": index, "used_mib": 0, "util_pct": 0},
+        gpu_probe=lambda index: {
+            "gpu_index": index, "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": "8.9", "used_mib": 0, "util_pct": 0,
+        },
         executor=mutate_during_measurement,
     )
     meta = json.loads((out / "metadata.json").read_text())
@@ -191,3 +199,29 @@ def test_mid_campaign_mutation_is_not_labeled_partial(tmp_path, monkeypatch):
     report = reporter.write_report(out, tmp_path / "unqualified-report")
     assert not report["complete"]
     assert not report["autopromote"]
+
+
+def test_actual_preflight_rejects_forged_case_parameters(tmp_path, monkeypatch):
+    plan_dir, manifest, cases, master, candidate, gold = make_fake_strict_manifest(tmp_path)
+    monkeypatch.setattr(collector, "commit_sha", lambda root: (
+        BASE_SHA if root.name == "master" else "c" * 40))
+    monkeypatch.setattr(collector, "source_is_clean", lambda root: True)
+    monkeypatch.setattr(collector, "preflight", lambda a, b, allow_separate_dirs: None)
+    gpu = {
+        "gpu_index": 0, "gpu_name": "NVIDIA GeForce RTX 4090",
+        "compute_cap": "8.9", "used_mib": 0, "util_pct": 0,
+    }
+    gold_map = json.loads(gold.read_text())
+    actual = collector.validate_plan(
+        plan_dir, tmp_path / "master", tmp_path / "candidate",
+        2048, gpu, gold_map)
+    assert len(actual[1]) == 54
+    assert actual[2] == {"A": master, "B": candidate}
+
+    cases[0]["max_new"] = 3
+    (plan_dir / "cases.json").write_text(json.dumps(cases))
+    import pytest
+    with pytest.raises(ValueError, match="case configuration"):
+        collector.validate_plan(
+            plan_dir, tmp_path / "master", tmp_path / "candidate",
+            2048, gpu, gold_map)
