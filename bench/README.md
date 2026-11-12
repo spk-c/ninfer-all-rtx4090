@@ -73,7 +73,11 @@ ninfer_bench --weights <artifact.ninfer>
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft|--full-draft-head]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
+          [--config <file>]...
 ```
+
+`--config` reads options from a [launch configuration file](../docs/cli.md#launch-configuration-files);
+the artifact is its `weights` entry, and the command line overrides the file.
 
 With no `-p`, `-n`, or `-pg`, the matrix is `pp512` and `tg128`.
 `--gdn-state-fp16` selects the Engine's existing FP16 recurrent state; the default

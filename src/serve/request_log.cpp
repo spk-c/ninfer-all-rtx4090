@@ -208,7 +208,8 @@ Json sampler_json(const ninfer::ResolvedSamplingParameters& sampling) {
                 {"min_p", sampling.min_p},
                 {"presence_penalty", sampling.presence_penalty},
                 {"frequency_penalty", sampling.frequency_penalty},
-                {"seed", sampling.seed}};
+                {"seed", sampling.seed},
+                {"gumbel", sampling.gumbel}};
 }
 
 Json preset_json(const ninfer::SamplingPreset& preset) {
@@ -523,6 +524,7 @@ std::string sampler_str(const ninfer::ResolvedSamplingParameters& sampling) {
     if (sampling.presence_penalty != 0.0f) { out << " pres=" << sampling.presence_penalty; }
     if (sampling.frequency_penalty != 0.0f) { out << " freq=" << sampling.frequency_penalty; }
     out << " seed=" << sampling.seed;
+    if (sampling.gumbel) { out << " gumbel"; }
     return out.str();
 }
 
@@ -931,6 +933,8 @@ std::string format_server_start_json(
              {"cuda_runtime_version", environment.cuda_runtime_version},
              {"cuda_driver_version", environment.cuda_driver_version}};
     record["argv"] = options.startup_argv;
+    // The options the server runs with: its --config files merged under the command line.
+    record["arguments"] = options.effective_arguments;
     return record.dump();
 }
 

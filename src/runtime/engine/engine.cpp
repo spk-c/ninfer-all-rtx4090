@@ -80,6 +80,17 @@ EngineOptions with_family_steering(EngineOptions options) {
     return options;
 }
 
+// A drive mirror and the direct path change how disk experts are read.
+EngineOptions with_expert_disk_reads(EngineOptions options) {
+    const auto& hybrid = options.hybrid_experts;
+    if ((!hybrid.mirror.empty() || hybrid.direct == ExpertDirect::On) &&
+        options.expert_residency != ExpertResidency::Disk) {
+        throw std::invalid_argument(
+            "--expert-mirror and --expert-direct on require --expert-residency disk");
+    }
+    return options;
+}
+
 // Position-split and invariant attention are Qwen3.5 Program schedules over its paged cache. The
 // partial-sum exchange is the Qwen3.5 Program's and Flash-Next's; the other families divide only
 // their routed experts and sum them their own way.
@@ -214,8 +225,10 @@ struct HeldEngine {
     std::shared_ptr<void> clock_floor;
 };
 
+// `gumbel`: EngineOptions::gumbel_sampling.
 runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefaults& defaults,
-                                                        SamplingMode mode, RequestOptions options) {
+                                                        SamplingMode mode, RequestOptions options,
+                                                        bool gumbel) {
     if (options.execution.thinking.budget && *options.execution.thinking.budget == 0) {
         throw std::invalid_argument("thinking budget must be positive");
     }
@@ -233,11 +246,13 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     runtime::ResolvedRequestOptions resolved;
     resolved.execution.sampling =
         runtime::resolve_sampling(defaults, mode, options.execution.sampling);
+    resolved.execution.sampling.gumbel = gumbel;
     if (mode == SamplingMode::Thinking && options.execution.post_thinking_sampling) {
         SamplingOverrides post_thinking = *options.execution.post_thinking_sampling;
         if (!post_thinking.seed) { post_thinking.seed = resolved.execution.sampling.seed; }
         resolved.execution.post_thinking_sampling =
             runtime::resolve_sampling(defaults.post_thinking, post_thinking);
+        resolved.execution.post_thinking_sampling->gumbel = gumbel;
     }
     resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
@@ -439,9 +454,9 @@ public:
                               std::unique_ptr<FlintCore>, std::unique_ptr<DeepSeekV41Core>>;
 
     explicit Impl(EngineOptions engine_options)
-        : options(runtime::normalize_engine_options(
-              with_family_speculation(with_family_context_cache(with_family_attention(
-                  with_family_steering(with_family_embedding(std::move(engine_options)))))))),
+        : options(runtime::normalize_engine_options(with_family_speculation(
+              with_family_context_cache(with_family_attention(with_family_steering(
+                  with_family_embedding(with_expert_disk_reads(std::move(engine_options))))))))),
           device(initialize_device(options)),
           clock_floor(device.device_ids(), options.gpu_clock_floor_mhz) {
         report_gpu_clock_floor(options, clock_floor);
@@ -973,7 +988,8 @@ std::vector<GenerationHandle> Engine::submit_group(std::vector<GenerationSubmiss
         }
         Resolved entry{.options = resolve_request_options(impl_->sampling_defaults,
                                                           submission.prompt.impl_->sampling_mode,
-                                                          std::move(submission.options))};
+                                                          std::move(submission.options),
+                                                          impl_->options.gumbel_sampling)};
         entry.sampling        = entry.options.execution.sampling;
         entry.summary         = submission.prompt.impl_->summary;
         entry.prepare_seconds = submission.prompt.impl_->prepare.seconds;
@@ -1108,7 +1124,8 @@ GenerationHandle Engine::submit_branches(std::vector<GenerationBranch> branches,
     }
     options.execution.speculative_drafting = false;
     runtime::ResolvedRequestOptions resolved =
-        resolve_request_options(impl_->sampling_defaults, mode, std::move(options));
+        resolve_request_options(impl_->sampling_defaults, mode, std::move(options),
+                                impl_->options.gumbel_sampling);
     const ResolvedSamplingParameters sampling = resolved.execution.sampling;
     if (sampling.temperature > 0.0F || sampling.presence_penalty != 0.0F ||
         sampling.frequency_penalty != 0.0F) {

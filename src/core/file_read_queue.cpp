@@ -97,10 +97,10 @@ struct FileReadQueue::Impl {
 #ifdef _WIN32
         positions.resize(slots.size());
         files.reserve(paths.size());
-        // A batch has one caller, but priming and service may use different threads. IOCP keeps
-        // a prior dequeuer associated while it remains runnable (including a handshake spin),
-        // so a concurrency limit of one can prevent the new caller from draining its reads.
-        // The caller already owns batch serialization; the port must not throttle former callers.
+        // No concurrency limit: the owner serializes batches, but a batch may run on another thread
+        // than the one before it (startup priming, then the service worker). A thread that took a
+        // completion stays associated with the port while it runs, a spin on a handshake included,
+        // and with a limit of one it would keep the port from releasing the new caller's reads.
         port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0,
                                       static_cast<DWORD>(std::numeric_limits<LONG>::max()));
         if (port == nullptr) { throw std::runtime_error("file read queue: cannot create IOCP"); }

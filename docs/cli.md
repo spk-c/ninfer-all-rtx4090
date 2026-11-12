@@ -236,6 +236,28 @@ What can still separate a speculative answer from a plain one with the same seed
 floating-point effect of the verification width, as for greedy decoding. DFlash2 verifies its
 retained proposal distribution by rejection sampling.
 
+`--gumbel-sampling` draws each sampled token by Gumbel-max instead: the token whose logit plus
+keyed Gumbel noise (keyed by the seed, the position and the token) is largest. The tokens follow the
+same distribution, but a seed gives other tokens than the default draw, so the option is off by
+default. Drafts from an MTP block (Qwen3.5-core models, Qwen3.8-Flash-Next) and from Gemma 4's
+assistant then are the drafter's own draws under the same noise, which the target's draw keeps more
+often than a greedy draft. DSpark and lookup drafts stay greedy, and DFlash2 keeps its rejection
+sampling for the tokens it verifies. Greedy requests do not change. On an A40 (one request, three prompts, seeds 1 to 3, 256
+tokens a response, 2026-11-11):
+
+| Model and drafter | Temperature | Acceptance, default | Acceptance, `--gumbel-sampling` | tok/s, default | tok/s, `--gumbel-sampling` |
+|---|---|---|---|---|---|
+| Qwen3.8-27B IQ3_S, MTP | 0.7 | 0.396 | 0.424 | 66.8 | 69.0 |
+| Qwen3.8-27B IQ3_S, MTP | 1.0 | 0.396 | 0.407 | 66.6 | 67.4 |
+| Gemma 4 26B-A4B, assistant | 0.7 | 0.460 | 0.472 | 204.3 | 205.1 |
+| Gemma 4 26B-A4B, assistant | 1.0 | 0.443 | 0.485 | 200.0 | 207.5 |
+| Qwen3.8-Flash-Next Q2_0, MTP | 0.7 | 0.404 | 0.418 | 93.6 | 95.5 |
+| Qwen3.8-Flash-Next Q2_0, MTP | 1.0 | 0.362 | 0.403 | 88.8 | 93.7 |
+
+With the option, Gemma 4's and Flash-Next's speculative answers were the bytes of their plain answers
+with the same seed (21 of 21 each); Qwen3.8-27B's differed as its greedy ones do, by the
+verification width's floating-point effect.
+
 ### Choosing a draft count
 
 The draft count is a trade on what the output looks like. Each round verifies K+1 columns and runs
@@ -295,6 +317,8 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--expert-cache-adaptive` | Qwen3.8-Flash-Next only: replace cold cached experts between calls; changes the CPU/GPU arithmetic partition | off |
 | `--expert-profile PATH` | host or disk experts: fill the expert cache from counts recorded for the same artifact and bank geometry | the model family's built-in profile, where the build has one |
 | `--expert-profile-out PATH` | host or disk experts: record expert counts for this artifact after requests | none |
+| `--expert-mirror DIR` | disk experts: `DIR` on a second drive holds copies of the artifact's files under the same names; reads alternate between the two drives by 1 MiB stripe of the file offset, and results do not change ([disk expert reads](expert-disk-reads.md)) | none |
+| `--expert-direct auto\|on\|off` | disk experts on Linux: the NVMe drive writes the experts straight into device memory through NInfer's kernel modules (`kernel/ninfer-direct`); `auto` uses that when the modules are loaded and a self-test read passes, `on` fails startup otherwise; results do not change. Not yet run on hardware ([disk expert reads](expert-disk-reads.md)) | `auto` |
 | `--ngram-table PATH` | Qwen3.8-Flash-Next: the n-gram table artifact of a model published without its table; DeepSeek-V4.1: its Engram table artifact | the model's own table |
 | `--ngram-residency disk\|ram\|ram-hot` | Qwen3.8-Flash-Next: where the n-gram rows come from: the table's file, 16 rows per token; all of the table in RAM; or the rows a hot-row profile ranks first in RAM and the rest from the file (see [the n-gram rows](qwen3-8-flash-next.md#the-n-gram-rows)); DeepSeek-V4.1 reads its Engram rows from the file (24 per token in each of its two Engram blocks) or holds the table in RAM, and has no `ram-hot` ([the Engram table](deepseek-v41.md#the-engram-table)) | `disk` |
 | `--ngram-io buffered\|direct\|mmap` | Qwen3.8-Flash-Next: how rows are read from the file: through the OS page cache, past it, or out of a mapping | `buffered` |
@@ -351,6 +375,7 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--presence-penalty F` | presence-penalty override | registered model/mode default |
 | `--frequency-penalty F` | frequency-penalty override | registered model/mode default (`0`) |
 | `--seed N` | sampling seed | `0` |
+| `--gumbel-sampling` | draw sampled tokens by Gumbel-max over keyed noise, and MTP-style drafts as the drafter's own draws under that noise ([coupled draws](#speculative-decoding)); a seed gives other tokens than the default draw | off |
 | `--lora FNAME[,...]`, `--lora-scaled FNAME:SCALE[,...]` | llama.cpp LoRA adapters that remove a residual direction, at scale 1 or the given scale ([adapters and control vectors](serving.md#lora-adapters-and-control-vectors)) | none |
 | `--lora-init-without-apply` | load the adapters at scale 0 | off |
 | `--control-vector FNAME[,...]`, `--control-vector-scaled FNAME:SCALE[,...]` | llama.cpp control vectors added to the residual, at scale 1 or the given scale | none |
@@ -381,6 +406,76 @@ Repeat `--stop-token-id`, `--stop`, or `--reasoning-stop` to add stop conditions
 generated token IDs in diagnostics.
 
 Run `./build/apps/ninfer --help` for the exact option contract.
+
+## Launch configuration files
+
+`--config FILE` reads a run's options from a file. `ninfer`, `ninfer-serve`, `ninfer-perplexity`,
+`ninfer_bench`, `ninfer-calibrate` and `ninfer-ngram-profile` take it, and the repository's
+`configs/` directory holds a file for each [launch recipe](recipes.md).
+
+```ini
+; Ternary Bonsai 2 27B on a 24 GB card
+model          = models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
+model-id       = bonsai2-27b
+max-context    = 262144
+kv-capacity    = 262144
+kv-dtype       = rk8v4
+gdn-state-fp16 = true
+spec           = dflash2
+draft-tokens   = 5
+```
+
+```bash
+ninfer-serve --config configs/bonsai2-27b-dflash2.ini
+ninfer-serve --config configs/bonsai2-27b-dflash2.ini --max-context 131072 --port 9000
+```
+
+The format is llama.cpp's preset format, which [`--models-preset`](serving.md#several-models-router)
+also reads:
+
+- Each line is `key = value`. The key is the option without its leading dashes, in any case. The
+  value is the text after the first `=`; matching quotes around it are removed.
+- `true` is the switch itself (`gdn-state-fp16 = true` is `--gdn-state-fp16`), and `false` is its
+  `--no-` form. Every other value, `off`, `0` and `auto` included, is the option's value.
+- A repeatable option (`stop`, `lora`, `control-vector`) takes one line per value.
+- Blank lines and lines that start with `;` or `#` are comments.
+- `model` (or `artifact`) names the artifact; an artifact path on the command line wins.
+  `cuda-backend` selects the portable package's CUDA backend. `version` is ignored.
+- A file has no `[section]` and no `config` key. `ninfer_bench` names its artifact with `weights`.
+- Relative paths start in the directory the program runs in, not in the file's directory.
+
+`--config` can repeat. The files apply in the order given and the command line applies last, at any
+position of `--config` on the command line. A later layer overrides an earlier one by these rules:
+
+- An option replaces every earlier option of the same setting: a value, a repeatable option's whole
+  list (one `--stop` on the command line drops every `stop` line of a file), a switch in either
+  form, and the other spellings of the setting (`--device` replaces a file's `devices`,
+  `--full-draft-head` its `lm-head-draft`).
+- An option that contradicts an earlier layer's option drops that option: `--spec none` also drops
+  a file's `draft-tokens` and `adaptive-mtp`, `--no-thinking` drops `thinking-budget`, and
+  `--no-vision` drops `vision-residency`. The same contradiction inside one layer is an error.
+- Two choices stay errors across layers: `--device` with `--devices` inside one layer, and in
+  `ninfer-serve` a hybrid prefix cache option (`--device-snapshot-slots`, `--cache-taps-per-request`,
+  `--cache-tap-ladder`, `--cache-tap-min-gap`, `--prefix-cache-file`) together with an option that
+  selects the checkpoint catalog (`--use-original-prefix-caching`, `--no-prefix-reuse`, `--devices`
+  with several devices, `--graft`).
+
+Every switch of every program also takes a `--no-` form, so the command line can turn off a switch
+that a file turns on. `ninfer-serve` records the merged options, with the API key redacted, as
+`arguments` in the request log's `server_start` record. In router mode the router's files and
+command line are layers above each model's preset sections.
+
+The container image keeps the files in `/opt/ninfer/configs`. Its working directory is `/models`;
+`-w /` makes a file's `models/` paths reach the mounted `/models`:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -w / \
+  -v "$PWD/models:/models" -v ninfer-cache:/cache \
+  ghcr.io/iamwavecut/ninfer-all:cuda13.4 serve --config /opt/ninfer/configs/bonsai2-27b-dflash2.ini
+```
+
+The container's address (`NINFER_HOST`, `NINFER_PORT`) is the first layer, so a file's or the command
+line's `host` and `port` override it.
 
 ## CUDA synchronization
 

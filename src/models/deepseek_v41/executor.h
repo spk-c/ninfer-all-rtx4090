@@ -31,6 +31,7 @@
 
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/expert_disk.h"
 #include "core/tensor.h"
 #include "models/deepseek_v41/engram.h"
 #include "models/deepseek_v41/model.h"
@@ -87,6 +88,8 @@ struct ExecutorOptions {
     // bus times. CPU threads: 0 for one per physical core.
     std::optional<float> expert_dma_share;
     std::uint32_t expert_cpu_threads = 0;
+    // Disk experts: a drive mirror and the direct path (core/expert_disk.h).
+    ExpertDiskReads expert_disk{};
     // The Engram table's rows and how they are read; none runs the model without its Engram (a
     // non-standard mode that degrades the output).
     std::optional<qwen4_exp::NgramTableLayout> engram_table;
@@ -187,7 +190,8 @@ public:
     // layer by layer so that each block's missing experts cross the bus once for all of them.
     [[nodiscard]] std::uint32_t prompt_step() const noexcept;
     // Runs up to prompt_step() tokens at the sequence's next positions and leaves the logits of
-    // the last `logit_rows` (at most kMaxLogitRows; 0: none) in logits(). `images` (in row order,
+    // the last `logit_rows` (at most kMaxLogitRows; 0: none, and the last block of a chunk without
+    // logit rows only keeps its window latents) in logits(). `images` (in row order,
     // apart) replace their rows' embeddings. `state_at` (0: the call's end) is the position of the
     // next state the caller keeps or resumes from (an anchor, a stored prefix, the prompt's end),
     // at or past the call's end; every prompt call up to it passes the same one. Under a prefill

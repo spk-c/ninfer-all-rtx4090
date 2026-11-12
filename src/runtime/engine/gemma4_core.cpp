@@ -16,6 +16,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/speculative_round.h"
 #include "ninfer/ops/target_logprobs.h"
+#include "runtime/contract/draft_sampling.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/grammar_masks.h"
 #include "runtime/contract/lookup_draft.h"
@@ -208,6 +209,8 @@ ConstructedGemma4 construct_gemma4(const EngineOptions& options, DeviceContext& 
     executor.expert_cache_bytes = options.expert_cache_bytes;
     executor.expert_dma_share   = hybrid.dma_share;
     executor.expert_cpu_threads = hybrid.cpu_threads;
+    executor.expert_disk        = {hybrid.mirror, hybrid.direct};
+    executor.sampled_drafts     = options.gumbel_sampling;
     // The rotation past the native window, as every family resolves it (rope_scaling.h): YaRN
     // for the full-attention blocks, the assistant's included; linear position interpolation is
     // refused. Google publishes no extension of this model's 262,144-token window, so YaRN here is
@@ -1420,6 +1423,8 @@ struct Gemma4Core::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -1640,7 +1645,9 @@ struct Gemma4Core::Impl {
         const auto chunk = std::span<const TokenId>(r.prompt_tokens).subspan(r.prefilled, n);
         std::vector<std::vector<std::uint16_t>> host_embeddings;
         const auto media = chunk_media(r, r.prefilled, r.prefilled + n, host_embeddings);
-        executor.forward(r.slot, chunk, 1, media);
+        // A chunk before the prompt's end leaves no logits: its last block only writes its keys
+        // and values.
+        executor.forward(r.slot, chunk, r.prefilled + n < prompt_n ? 0U : 1U, media);
         if (!media.empty() && !instance.cpu_vision) {
             r.vision_seconds += executor.last_media_seconds();
         }
@@ -1725,7 +1732,7 @@ struct Gemma4Core::Impl {
         }
         const std::uint32_t n = prefill_step_tokens(r);
         const auto chunk      = std::span<const TokenId>(branch.tokens).subspan(r.branch_fed, n);
-        executor.forward(r.slot, chunk, 1);
+        executor.forward(r.slot, chunk, r.branch_fed + n < branch.tokens.size() ? 0U : 1U);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
         r.branch_fed += n;
         r.progress = Clock::now();
@@ -2174,13 +2181,19 @@ struct Gemma4Core::Impl {
         if (lookups < b) {
             std::vector<std::uint32_t> mtp_sequences;
             std::vector<TokenId> mtp_anchors;
+            // Each row's assistant draws its drafts with the keys its verification columns draw
+            // the target's tokens with (runtime::draft_sampling).
+            std::vector<ops::SamplingConfig> mtp_configs;
+            std::vector<std::int32_t> mtp_lengths;
             for (std::size_t j = 0; j < b; ++j) {
                 if (looked_up[j]) { continue; }
                 mtp_sequences.push_back(sequences[j]);
                 mtp_anchors.push_back(anchors[j]);
+                mtp_configs.push_back(runtime::draft_sampling(*sample_row(*batch[j]).params));
+                mtp_lengths.push_back(static_cast<std::int32_t>(batch[j]->position));
             }
             std::vector<TokenId> mtp_drafts(mtp_sequences.size() * steps);
-            executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, steps);
+            executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, steps, mtp_configs, mtp_lengths);
             for (std::size_t j = 0, m = 0; j < b; ++j) {
                 if (looked_up[j]) { continue; }
                 std::copy_n(mtp_drafts.begin() + std::ptrdiff_t(m * steps), steps,
@@ -2262,6 +2275,8 @@ struct Gemma4Core::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -2504,7 +2519,9 @@ struct Gemma4Core::Impl {
         out.reserve(n - first_target);
         for (std::uint32_t at = 0; at + 1 < n; at += chunk) {
             const std::uint32_t count = std::min(chunk, n - 1 - at);
-            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count), count);
+            // A chunk before the first target only extends the context.
+            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count),
+                             first_target > at + count ? 0U : count);
             const std::uint32_t first_row = first_target > at + 1 ? first_target - at - 1 : 0;
             if (first_row >= count) { continue; }
             const std::uint32_t rows = count - first_row;

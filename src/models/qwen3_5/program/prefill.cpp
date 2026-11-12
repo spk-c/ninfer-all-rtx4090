@@ -52,9 +52,11 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
 } // namespace
 
 void configure_text_card(TextContext& card, const ExecutionCore& execution,
-                         const ops::SamplingConfig* sampling, std::int32_t state_source_slot,
+                         const ops::SamplingConfig* sampling,
+                         const ops::SamplingConfig* draft_sampling, std::int32_t state_source_slot,
                          std::int32_t state_destination_slot, std::uint32_t mtp_proposal_extent) {
     card.set_sampling(sampling);
+    card.set_proposal_sampling(draft_sampling);
     card.set_linear_state_slots(state_source_slot, state_destination_slot);
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
     card.set_mtp_proposal_extent(mtp_proposal_extent);
@@ -103,13 +105,15 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_steering(state.execution.steering);
     card.set_rope_yarn(state.execution.rope_yarn);
     card.set_mtp_attention_window(state.execution.mtp_attention_window);
-    configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
-                        state.state_destination_slot, state.mtp_proposal_extent);
+    configure_text_card(card, state.execution, state.sampling, state.draft_sampling,
+                        state.state_source_slot, state.state_destination_slot,
+                        state.mtp_proposal_extent);
     card.set_readout(state.readout_count);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     card.set_gdn_taps(state.gdn_taps);
+    card.set_last_layer_kv_only(state.last_layer_kv_only);
     if (state.take_layer_ready) { card.set_layer_ready(state.take_layer_ready()); }
     if (state.first_token) { card.set_first_token_hook(state.first_token); }
     const std::span<const int> prompt(ids.data(), ids.size());
@@ -137,12 +141,14 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_steering(state.execution.steering);
     card.set_rope_yarn(state.execution.rope_yarn);
     card.set_mtp_attention_window(state.execution.mtp_attention_window);
-    configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
-                        state.state_destination_slot, state.mtp_proposal_extent);
+    configure_text_card(card, state.execution, state.sampling, state.draft_sampling,
+                        state.state_source_slot, state.state_destination_slot,
+                        state.mtp_proposal_extent);
     card.set_readout(state.readout_count);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
+    card.set_last_layer_kv_only(state.last_layer_kv_only);
     if (state.take_layer_ready) { card.set_layer_ready(state.take_layer_ready()); }
     if (state.dflash != nullptr && state.drafter) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
@@ -1375,6 +1381,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.destination,
             staged.initial_mtp_extent,
             0};
+        if (draft_sampling_config.data != nullptr) {
+            schedule_state.draft_sampling = static_cast<const ops::SamplingConfig*>(
+                draft_sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1).data);
+        }
         // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
         // The chunk function takes the events itself: they are a view into the landing batch, and
         // the KV commits between chunks (the MTP bridge's among them) poll the cache, which frees
@@ -1384,6 +1394,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         };
         arm_logprobs(request.logprobs);
         schedule_state.readout_count = arm_readout(request.readout_tokens);
+        // This path reads prefill_hidden only after the chunk that finalizes the prompt.
+        schedule_state.last_layer_kv_only = true;
         // The first token leaves the device as soon as it is sampled. The drafter's work on the
         // prompt's end (its MTP pass or bridge and the initial proposals) finishes behind it, and
         // the initial drafts are taken when the lane's first round needs them. A Vision prompt's

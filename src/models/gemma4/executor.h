@@ -13,11 +13,13 @@
 
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/expert_disk.h"
 #include "core/tensor.h"
 #include "models/expert_profile.h"
 #include "models/gemma4/kv_format.h"
 #include "models/gemma4/model.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/ops/sampling.h"
 
 #include <cuda_runtime.h>
 
@@ -61,6 +63,10 @@ struct ExecutorOptions {
     // bus times. CPU threads: 0 for one per physical core.
     std::optional<float> expert_dma_share;
     std::uint32_t expert_cpu_threads = 0;
+    // Disk experts: a drive mirror and the direct path (core/expert_disk.h).
+    ExpertDiskReads expert_disk{};
+    // --gumbel-sampling: draft() may take samplers, whose rows' assistant then draws its drafts.
+    bool sampled_drafts = false;
     // YaRN past the model's native window (a factor above one) for the full-attention blocks'
     // rotation, the assistant's included: their proportional schedule takes YaRN's frequencies,
     // and the queries the square of its attention factor. The sliding-window blocks never see a
@@ -136,10 +142,12 @@ public:
     // The CPU's share of missing experts: its threads and backend, or empty without one.
     [[nodiscard]] std::string expert_cpu_description() const;
     // Runs up to prefill_chunk tokens at the sequence's next positions and leaves the logits of the
-    // last `logit_rows` (at most kMaxLogitRows) in logits(). The soft tokens of `media` take the
-    // place of their rows' placeholder embeddings, and with the vision config's bidirectional
-    // attention a unit's soft tokens see each other in the sliding-window blocks; a unit must lie
-    // whole in one chunk.
+    // last `logit_rows` (at most kMaxLogitRows) in logits(). With no logit rows (a chunk whose
+    // output nothing reads), a full-attention last block only writes the chunk's keys and values,
+    // the bytes the whole block writes, and the assistant drafts after the next chunk. The soft
+    // tokens of `media` take the place of their rows' placeholder embeddings, and with the vision
+    // config's bidirectional attention a unit's soft tokens see each other in the sliding-window
+    // blocks; a unit must lie whole in one chunk.
     void forward(std::uint32_t sequence, std::span<const std::int32_t> tokens,
                  std::uint32_t logit_rows, std::span<const ChunkMedia> media = {});
     // Branches of a text prompt in one pass, each continuing the sequence from its position:
@@ -163,10 +171,16 @@ public:
     // a commit has left the target's hidden state after its last fed token.
     [[nodiscard]] std::uint32_t draft_tokens() const noexcept;
     [[nodiscard]] bool can_draft(std::uint32_t sequence) const;
-    // `steps` (1..draft_tokens) greedy drafts after each sequence's anchor, the token its next
-    // position takes: drafts[j * steps + i] is sequence j's i-th draft.
+    // `steps` (1..draft_tokens) drafts after each sequence's anchor, the token its next position
+    // takes: drafts[j * steps + i] is sequence j's i-th draft, the assistant's argmax. With
+    // `configs` (one per sequence; penalties, masks and counts unused) and `lengths`, draft i of
+    // sequence j is drawn from the assistant's distribution under configs[j] with the key
+    // (configs[j].seed, lengths[j] + i + 1, kSamplePurposeDecode), the key of the verification
+    // column that draws the target's token at its place; a row at temperature 0 takes the argmax.
     void draft(std::span<const std::uint32_t> sequences, std::span<const std::int32_t> anchors,
-               std::span<std::int32_t> drafts, std::uint32_t steps);
+               std::span<std::int32_t> drafts, std::uint32_t steps,
+               std::span<const ops::SamplingConfig> configs = {},
+               std::span<const std::int32_t> lengths    = {});
     // widths[j] tokens of sequence j (its anchor, then its drafts; without widths, tokens.size() /
     // sequences.size() each) at its next positions, as decode rows: logits one column each,
     // sequence by sequence. The positions advance only with commit().

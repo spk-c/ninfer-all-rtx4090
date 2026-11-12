@@ -1,6 +1,9 @@
 // moe_route against an FP64 oracle: the 512- and 256-expert softmax top-10 with renormalised
 // weights and the shared-expert sigmoid gate, from FP32 and BF16 block inputs, including tied
-// logits.
+// logits. A token whose input is NaN (an overflowed hidden state) still selects ten distinct
+// experts in range, and the other tokens keep their oracle selection. Every case runs twice more
+// with a completion counter (the selection in the GEMV's last CTA for up to eight tokens): ids,
+// weights and shared equal the first call's bit for bit, and the counter is zero after each call.
 #include "core/device.h"
 #include "ninfer/ops/moe_route.h"
 #include "ops/op_tester.h"
@@ -21,7 +24,8 @@ namespace {
 constexpr int kHidden = 2560, kTop = 10;
 
 // `kExperts` experts: 512, or the 256 an expert-pruned release keeps.
-int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts = 512) {
+int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts = 512,
+        int nan_token = -1) {
     std::vector<float> m(static_cast<std::size_t>(kHidden) * tokens), router(static_cast<std::size_t>(kExperts) * kHidden),
         gate(kHidden);
     fill_uniform(m, seed, -3.0f, 3.0f);
@@ -39,6 +43,11 @@ int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts
                 router[static_cast<std::size_t>(e) * kHidden + d] = v;
         }
         round_to_bf16(router);
+    }
+    if (nan_token >= 0) {
+        for (int d = 0; d < kHidden; ++d) {
+            m[static_cast<std::size_t>(nan_token) * kHidden + d] = std::nanf("");
+        }
     }
     const auto encode = [](const std::vector<float>& values) {
         std::vector<std::uint16_t> bits(values.size());
@@ -71,10 +80,22 @@ int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts
     const auto shared  = from_device<float>(d_shared.data(), tokens);
     const std::string label = "moe_route T=" + std::to_string(tokens) +
                               (fp32_input ? " fp32" : " bf16") + (ties ? " ties" : "") +
-                              " E=" + std::to_string(kExperts);
+                              " E=" + std::to_string(kExperts) +
+                              (nan_token >= 0 ? " NaN token " + std::to_string(nan_token) : "");
     int failures = 0;
     std::vector<double> expected_weights, got_weights, expected_shared, got_shared;
     for (int t = 0; t < tokens; ++t) {
+        if (t == nan_token) {
+            std::vector<int> chosen(ids.begin() + static_cast<std::ptrdiff_t>(t) * kTop,
+                                    ids.begin() + static_cast<std::ptrdiff_t>(t + 1) * kTop);
+            std::sort(chosen.begin(), chosen.end());
+            if (chosen.front() < 0 || chosen.back() >= kExperts ||
+                std::adjacent_find(chosen.begin(), chosen.end()) != chosen.end()) {
+                std::cerr << label << ": the NaN token selected experts out of range or twice\n";
+                ++failures;
+            }
+            continue;
+        }
         std::vector<double> logits(kExperts);
         for (int e = 0; e < kExperts; ++e) {
             double dot = 0;
@@ -106,7 +127,38 @@ int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts
     }
     failures += verify_pointwise(label + " weights", got_weights, expected_weights, {1e-6, 2e-5});
     failures += verify_pointwise(label + " shared gate", got_shared, expected_shared, {1e-6, 2e-5});
-    for (auto* buffer : {&d_m, &d_router, &d_gate, &d_ids, &d_weights, &d_shared}) failures += buffer->verify_guards(label.c_str());
+    // The counter form: twice over one counter, which each call must leave at zero.
+    GuardedDeviceBuffer d_done(4), c_ids(d_ids.bytes()), c_weights(d_weights.bytes()),
+        c_shared(d_shared.bytes());
+    d_done.fill(0);
+    Tensor u_ids(c_ids.data(), DType::I32, {kTop, tokens});
+    Tensor u_weights(c_weights.data(), DType::FP32, {kTop, tokens});
+    Tensor u_shared(c_shared.data(), DType::FP32, {tokens});
+    for (int call = 0; call < 2; ++call) {
+        c_ids.fill(0xff);
+        c_weights.fill(0xff);
+        c_shared.fill(0xff);
+        ops::moe_route(t_m, t_router, t_gate, workspace, u_ids, u_weights, u_shared, nullptr,
+                       static_cast<std::uint32_t*>(d_done.data()));
+        cuda_synchronize();
+        const auto counter = from_device<std::uint32_t>(d_done.data(), 1);
+        const auto same    = [&](const GuardedDeviceBuffer& a, const GuardedDeviceBuffer& b) {
+            const auto x = from_device<std::uint8_t>(a.data(), a.bytes());
+            const auto y = from_device<std::uint8_t>(b.data(), b.bytes());
+            return x == y;
+        };
+        if (counter[0] != 0 || !same(c_ids, d_ids) || !same(c_weights, d_weights) ||
+            !same(c_shared, d_shared)) {
+            std::cerr << label << ": the counter form, call " << call
+                      << ", differs from the two-launch form or leaves the counter at "
+                      << counter[0] << '\n';
+            ++failures;
+        }
+    }
+    for (auto* buffer : {&d_m, &d_router, &d_gate, &d_ids, &d_weights, &d_shared, &d_done, &c_ids,
+                         &c_weights, &c_shared}) {
+        failures += buffer->verify_guards(label.c_str());
+    }
     return failures;
 }
 
@@ -127,6 +179,8 @@ int main() {
     failures += run(3, true, true, 9203u);
     failures += run(5, true, false, 9204u, 256);
     failures += run(2, false, true, 9205u, 256);
+    failures += run(3, true, false, 9209u, 512, 1);
+    failures += run(2, true, false, 9210u, 256, 0);
     std::cout << (failures == 0 ? "PASS" : "FAIL") << " moe_route\n";
     return failures == 0 ? 0 : 1;
 }

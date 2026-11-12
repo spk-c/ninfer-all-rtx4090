@@ -18,6 +18,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/speculative_round.h"
 #include "ninfer/ops/target_logprobs.h"
+#include "runtime/contract/draft_sampling.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/grammar_masks.h"
 #include "runtime/contract/lookup_draft.h"
@@ -330,6 +331,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     executor.expert_cache_bytes =
         options.expert_cache_bytes.value_or(models::qwen4_exp::ExecutorOptions::kAutoExpertCache);
     executor.cuda_graphs = options.use_cuda_graph;
+    executor.sampled_drafts = options.gumbel_sampling;
     executor.hybrid_experts = options.hybrid_experts;
     executor.vision_max_merged_tokens = options.vision_max_merged_tokens;
     executor.kv_cache                 = options.kv_cache;
@@ -1902,6 +1904,8 @@ struct Qwen4ExpCore::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts =
                 row.counts ? static_cast<std::int32_t*>(token_counts.p) + std::size_t(row.slot) * domain
                            : nullptr;
@@ -2221,7 +2225,9 @@ struct Qwen4ExpCore::Impl {
             slot.anchor_media.clear();
             cut = {.tokens = step.cut - r.prefilled, .state = &slot.snapshot};
         }
-        executor.forward(r.slot, prompt.subspan(r.prefilled, n), 1, next, cut);
+        // Only the prompt's last step leaves logits (end_prefill samples them).
+        executor.forward(r.slot, prompt.subspan(r.prefilled, n), r.prefilled + n < prompt_n ? 0 : 1,
+                         next, cut);
         end_prefill(request, n, 0, 1, step.cut);
     }
 
@@ -2304,7 +2310,8 @@ struct Qwen4ExpCore::Impl {
             pieces.push_back(
                 {.sequence = p.request->slot,
                  .tokens   = std::span<const TokenId>(p.request->prompt_tokens)
-                               .subspan(p.request->prefilled, p.tokens)});
+                                 .subspan(p.request->prefilled, p.tokens),
+                 .logits   = p.request->prefilled + p.tokens >= p.request->prompt_tokens.size()});
         }
         // The last piece's next step's table rows are read while this one runs.
         const Request& last  = *packed.back().request;
@@ -2368,7 +2375,8 @@ struct Qwen4ExpCore::Impl {
         }
         const std::uint32_t n = prompt_step(r, false).tokens;
         const auto chunk      = std::span<const TokenId>(branch.tokens).subspan(r.branch_fed, n);
-        executor.forward(r.slot, chunk, 1);
+        // Only the branch's last step leaves logits, which its first token reads.
+        executor.forward(r.slot, chunk, r.branch_fed + n < branch.tokens.size() ? 0 : 1);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
         r.branch_fed += n;
         r.progress = Clock::now();
@@ -2990,14 +2998,21 @@ struct Qwen4ExpCore::Impl {
         if (lookups < b) {
             std::vector<std::uint32_t> mtp_sequences;
             std::vector<TokenId> mtp_anchors;
+            // Each row's MTP block draws its drafts with the keys its verification columns draw
+            // the target's tokens with (runtime::draft_sampling).
+            std::vector<ops::SamplingConfig> mtp_configs;
+            std::vector<std::int32_t> mtp_lengths;
             for (std::size_t j = 0; j < b; ++j) {
                 if (looked_up[j]) { continue; }
                 mtp_sequences.push_back(sequences[j]);
                 mtp_anchors.push_back(anchors[j]);
+                mtp_configs.push_back(runtime::draft_sampling(*sample_row(*batch[j]).params));
+                mtp_lengths.push_back(static_cast<std::int32_t>(batch[j]->position));
             }
             std::vector<TokenId> mtp_drafts(mtp_sequences.size() * drafts);
             std::vector<std::uint32_t> mtp_extents(mtp_sequences.size(), steps);
-            mtp_steps = executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, mtp_extents, steps);
+            mtp_steps = executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, mtp_extents, steps,
+                                       mtp_configs, mtp_lengths);
             for (std::size_t j = 0, m = 0; j < b; ++j) {
                 if (looked_up[j]) { continue; }
                 std::copy_n(mtp_drafts.begin() + std::ptrdiff_t(m * drafts), drafts,
@@ -3080,6 +3095,8 @@ struct Qwen4ExpCore::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -3324,7 +3341,9 @@ struct Qwen4ExpCore::Impl {
         RankBinding bind(device, executor.head_rank());
         for (std::uint32_t at = 0; at + 1 < n; at += chunk) {
             const std::uint32_t count = std::min(chunk, n - 1 - at);
-            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count), count);
+            // A chunk before the first target only extends the context.
+            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count),
+                             first_target > at + count ? 0 : count);
             // Rows predicting targets [at + 1, at + count].
             const std::uint32_t first_row = first_target > at + 1 ? first_target - at - 1 : 0;
             if (first_row >= count) { continue; }

@@ -231,7 +231,9 @@ relationship. Router loss coefficients and training-only outputs add no inferenc
 
 `--expert-residency device` retains the fused resident SparseMoe path. `host` retains the native
 routed banks in pinned memory. `disk` leaves them in the artifact and records file extents for
-each expert plane. Both offload modes use the common `core/expert_delivery` byte transport.
+each expert plane. Both offload modes use the common `core/expert_delivery` byte transport; disk
+reads may stripe over a drive mirror or land in device memory directly
+([disk expert reads](../expert-disk-reads.md)).
 Shared experts and router weights remain resident and keep the same gated SwiGLU mathematics.
 Dense Qwen models reject host/disk expert residency.
 
@@ -365,6 +367,15 @@ logits hold them, so the sampler, argmax, draft acceptance, logprobs and scoring
 proposal heads keep their own choice (`fp32_proposal_logits`). Ordinary decode repeats this
 schedule for one new token. CUDA Graph replay uses the same selected model implementation.
 
+A prompt chunk whose rows produce no logits (each chunk before the prompt's last, and a scoring
+call's chunks before its first scored position) runs its last layer only up to the key/value
+append: that layer's attention output, output projection and FFN feed only the head. A short chunk
+whose attention takes the small-T route, which appends inside its kernels, still runs that
+attention. A chunk runs whole when MTP follows the prompt (the MTP layer takes each row's final
+hidden state for its own KV) and when a DFlash feature, a prefix-cache tap or a checkpoint reads
+its final hidden state. The appended rows come from the same projections and kernels, so caches,
+states and logits keep their bits.
+
 MTP is a one-layer predictor conditioned on a final-normalized target hidden state h_t and the
 following token x_(t+1):
 
@@ -379,7 +390,10 @@ draft_logits = target_output_head(draft_hidden)
 
 The stem concatenates embedding first, hidden second. MTP has private stem, block, final norm and
 KV state. Its attention and Dense/MoE geometry come from Text. It can recursively propose several
-tokens using the previous MTP hidden output.
+tokens using the previous MTP hidden output. A proposal is the argmax of draft_logits; under
+`--gumbel-sampling` a sampled row's proposal is its Gumbel-max draw under the keys the target's
+verification uses for that position (a proposal head over a vocabulary subset first spreads its
+logits over the full vocabulary, with negative infinity elsewhere).
 
 For prompt tokens x_0 through x_n and the target's first generated token x_(n+1), MTP prefill uses:
 
@@ -450,10 +464,32 @@ The official tokenizer has 248,077 addressable IDs within 248,320 matrix rows. R
 rows are not assumed zero and do not become public tokens.
 
 Token spelling, special-token roles and EOS are derived from loaded resources. The frontend checks
-the tokenizer's supported BPE/normalization semantics and token-domain agreement. Template bytes
-select a compiled Qwen template; arbitrary Jinja execution is not implemented. Mode sampling
-presets are architecture-owned, with explicit application/request overrides. Resource loading
-does not infer execution identity from tokenizer filenames, release names or sampling values.
+the tokenizer's supported BPE/normalization semantics and token-domain agreement. The chat
+template runs in NInfer's Jinja engine (`third_party/llama-jinja`), compiled once when the model
+loads. Mode sampling presets are architecture-owned, with explicit application/request overrides.
+Resource loading does not infer execution identity from tokenizer filenames, release names or
+sampling values.
+
+### Request preparation
+
+Preparation renders the chat template over the request's messages and tokenizes the result. An
+agent client sends its whole conversation again with every request, and every family's frontend
+reuses the work of earlier requests:
+
+- The tokenizer keeps the tokens of each run of 64 bytes or more between added tokens, up to
+  64 MiB, and drops the least recently used first. A run with the same bytes as a kept one takes
+  its tokens without encoding, unless a requested boundary falls inside it or its tokens would
+  reach the request's token limit. A byte-level run that starts with the text of one of the 8 most
+  recently used kept runs of 4,096 normalized bytes or more takes that run's words up to a word end
+  that both texts decide alike, and encodes only the rest.
+- The template renders the conversation three times: the prompt, the history without the
+  generation prompt (where that prompt starts) and, when an assistant message follows the query,
+  the history before a new user turn (whether a next turn keeps it). The two probes run on their
+  own threads beside the prompt's render, under the request's deadline. A probe that cannot get a
+  thread renders after the prompt.
+- A template loop that scans the rest of the conversation from each message (Gemma 4's template
+  has two) costs time quadratic in the message count. The Jinja engine builds a loop's per-item
+  scope only for a filter test, and its loop object only when the body names `loop`.
 
 ## State and numerical boundaries
 

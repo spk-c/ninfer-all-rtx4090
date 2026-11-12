@@ -95,12 +95,13 @@ memory, since MSVC cannot pass them by value, and WDDM charges pinned host memor
 card's memory. Every Windows build offers `--wddm-evictable-budget`, which sizes the KV cache against
 the card's memory less the weights and a 512 MiB desktop floor instead of what is free at startup,
 and commits the device arenas at startup. Another process that later takes memory makes WDDM page
-some of this process's memory out, which slows generation until it comes back. WDDM also queues a
+some of this process's memory out, which slows generation until it comes back. WDDM may queue a
 device's copies behind one another whatever their streams; the one place that put a host-to-device
-copy behind a device-side wait for the host, the exchange of Flash-Next native host experts, uses
-mapped host memory and a copy kernel on Windows and under WSL2
-([native host banks](qwen3-8-flash-next.md#the-expert-cache)). This repository has no Windows or
-WSL2 host: `ninfer_qwen4_exp_hybrid_experts_test` runs both exchanges on Linux. A process started
+copy behind a device-side wait for the host, the exchange of Flash-Next native host experts, hung
+under WSL2 with queued copies; it uses mapped host memory and a copy kernel on Windows and under
+WSL2 ([native host banks](qwen3-8-flash-next.md#the-expert-cache)). This repository has no Windows or
+WSL2 host: `ninfer_qwen4_exp_hybrid_experts_test` runs both exchanges on Linux and only the mapped
+one under WDDM, where it has not run yet. A process started
 by a low-priority parent (a Task Scheduler task at its default priority, a service, some IDE
 terminals) inherits I/O priority Low, and Windows throttles its reads; the Engine raises such a
 priority to normal before it reads the artifact and logs that it did, or warns when Windows refuses
@@ -130,12 +131,14 @@ benchmark reports, use the [RTX 4090 development workflow](rtx4090.md).
 its size and SHA-256 (`qwen36-27b` and `qwen36-35b-a3b` work the same way), and
 `scripts\run.bat qwen38-27b` serves it with the measured profile; the profiles and their overrides
 are in [launcher profiles](maintainer/launcher-profiles.md). Any other artifact starts with
-`ninfer-serve.exe` and the flags the [launch recipes](recipes.md) give for it, for example:
+`ninfer-serve.exe` and the flags the [launch recipes](recipes.md) give for it, on the command line
+or from their file in `configs\`, for example:
 
 ```powershell
 .\build-ninja\apps\ninfer-serve.exe models\qwen3_8_27b.ninfer --model-id qwen3.8-27b `
   --max-context 131072 --kv-capacity 131072 --kv-dtype rk8v4 --gdn-state-fp16 `
   --spec mtp --draft-tokens 3
+.\build-ninja\apps\ninfer-serve.exe --config configs\qwen3.8-27b-dflash2.ini
 ```
 
 `--kv-capacity auto` sizes the KV pool from the memory left after startup but keeps 1 GiB free;

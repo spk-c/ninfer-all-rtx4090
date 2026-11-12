@@ -10,10 +10,10 @@ spelling and defaults.
 |---|---|
 | [Linux build](build-linux.md) | the container image, native Ubuntu builds for every target (`70`, `75`, `80`, `86`, `89`, `120a`), build options and the Bash launchers |
 | [Windows build](build-windows.md) | native Windows builds, their toolchain constraints and the launcher scripts |
-| [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, speculative decoding, and the runtime options |
+| [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, speculative decoding, the runtime options, and launch configuration files (`--config`) |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, llama.cpp endpoints, rerank and typed decisions, the router, model suspend, state, streaming, token counting, authentication, tool calls, and the server options |
 | [Ngram copy proposals](ngram.md) | copy acceleration alongside MTP, DFlash or DFlash2, on by default with a drafter |
-| [Launch recipes](recipes.md) | the `ninfer-serve` commands for every model and memory size, from an 8 GB card to the largest context, and the flags they use |
+| [Launch recipes](recipes.md) | the `ninfer-serve` configuration files in `configs/` for every model and memory size, from an 8 GB card to the largest context, and the flags they use |
 | [Supported GPUs](gpus.md) | architectures and their builds, every card of 8 GB and more with what has run on it, and what fits in a given amount of GPU memory |
 | [Performance](performance.md) | every measured result card by card: largest context, decode and prompt rates by model, KV format, depth and drafter, several requests at once, Flash-Next's expert placements, quality; the measurement pages and users' field reports |
 | [Weight conversion](weight-conversion.md) | official recipes, custom formats and sources, conversion methods, optional components and artifact output |
@@ -22,6 +22,7 @@ spelling and defaults.
 | [Gemma 4 26B-A4B](gemma4.md) | converting Google's QAT GGUF release with its MTP assistant and vision tower, what runs, speculative decoding, images and video, the defaults, measurements against llama.cpp and the numerical checks |
 | [Flint](flint.md) | converting a GGUF of Recursive's Flint, what runs, reasoning and GLM-4.7 tool calls, expert residency, measurements against llama.cpp and the numerical checks |
 | [DeepSeek-V4.1-Flash](deepseek-v41.md) | converting the GSQ-RCO IQ1_M and Coder GGUFs and their Engram table, what runs, reasoning and DSML tool calls, host and disk experts, the Engram table's residency, measurements and the numerical checks |
+| [Disk expert reads](expert-disk-reads.md) | disk experts striped over a second drive (`--expert-mirror`) and written by the drive straight into device memory (`--expert-direct`, NInfer's kernel modules) |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
 | [Device profiles](device-profiles.md) | per-GPU route profiles: the built-in RTX 3090/4090/5090/PRO 6000/TITAN RTX/Tesla V100 table, calibration at first start, `ninfer-calibrate` |
 | [Configuration calculator](config-calculator.html) | which context, KV format and speculation fit an RTX 3090 with Qwen3.8-27B or Qwen3.6-35B-A3B, from measurements |

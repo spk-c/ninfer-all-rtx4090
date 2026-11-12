@@ -177,6 +177,7 @@ ConstructedFlint construct_flint(const EngineOptions& options, DeviceContext& de
     executor.expert_cache_bytes = options.expert_cache_bytes;
     executor.expert_dma_share   = hybrid.dma_share;
     executor.expert_cpu_threads = hybrid.cpu_threads;
+    executor.expert_disk        = {hybrid.mirror, hybrid.direct};
     // The full-attention blocks carry no rotation and the sliding ones never rotate a distance past
     // their window, so no position takes scaling.
     if (options.rope_yarn || options.rope_yarn_factor > 1.0F || options.rope_scaling_factor > 1.0F) {
@@ -1225,6 +1226,8 @@ struct FlintCore::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -1449,7 +1452,9 @@ struct FlintCore::Impl {
             next_branches(r, executor.options().prefill_chunk - n, branch_tokens, lengths);
         }
         if (lengths.empty()) {
-            executor.forward(r.slot, chunk, 1);
+            // A chunk before the prompt's end leaves no logits: its last block only writes its
+            // keys and values.
+            executor.forward(r.slot, chunk, r.prefilled + n < prompt_n ? 0U : 1U);
         } else {
             executor.forward_prompt_branches(r.slot, chunk, branch_tokens, lengths);
         }
@@ -1529,7 +1534,7 @@ struct FlintCore::Impl {
         }
         const std::uint32_t n = prefill_step_tokens(r);
         const auto chunk      = std::span<const TokenId>(branch.tokens).subspan(r.branch_fed, n);
-        executor.forward(r.slot, chunk, 1);
+        executor.forward(r.slot, chunk, r.branch_fed + n < branch.tokens.size() ? 0U : 1U);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
         r.branch_fed += n;
         r.progress = Clock::now();
@@ -2031,6 +2036,8 @@ struct FlintCore::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -2250,7 +2257,9 @@ struct FlintCore::Impl {
         out.reserve(n - first_target);
         for (std::uint32_t at = 0; at + 1 < n; at += chunk) {
             const std::uint32_t count = std::min(chunk, n - 1 - at);
-            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count), count);
+            // A chunk before the first target only extends the context.
+            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count),
+                             first_target > at + count ? 0U : count);
             const std::uint32_t first_row = first_target > at + 1 ? first_target - at - 1 : 0;
             if (first_row >= count) { continue; }
             const std::uint32_t rows = count - first_row;

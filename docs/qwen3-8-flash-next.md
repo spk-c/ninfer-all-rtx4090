@@ -262,6 +262,8 @@ the same options, and the Docker image's `serve` command takes them with the fil
 | `--expert-cache-adaptive` | replace cold cached native experts between calls; off by default because it changes the CPU/GPU arithmetic partition |
 | `--expert-profile PATH` | fill the expert cache at startup from counts recorded for the same artifact (`--expert-profile-out`); default: the built-in profile of the model family and its bank widths, where the build has one. Without the MTP block (no drafts, DFlash2, perplexity) the text layers' counts of a profile recorded with it |
 | `--expert-profile-out PATH` | record every layer's expert routes after requests, for a later `--expert-profile` |
+| `--expert-mirror DIR` | disk experts: copies of the artifact's files on a second drive; reads alternate between the drives by 1 MiB stripe of the file offset ([disk expert reads](expert-disk-reads.md)) |
+| `--expert-direct auto\|on\|off` | disk experts on Linux: the NVMe drive writes the experts straight into device memory through NInfer's kernel modules; `auto` (default) when they are loaded and a self-test read passes, `on` fails startup otherwise ([disk expert reads](expert-disk-reads.md)) |
 | `--ngram-table PATH` | the table artifact to read the n-gram rows from; required for a model stored without its table, and it must hold the table the model names (same SHA-256 and row format) |
 | `--ngram-residency disk\|ram\|ram-hot` | where the n-gram rows come from: the table's file, 16 rows a token (default); the whole 28.8 GB table in RAM; or the rows a hot-row profile ranks first in RAM and the rest from the file ([the n-gram rows](#the-n-gram-rows)) |
 | `--ngram-io buffered\|direct\|mmap` | how rows are read from the file: positioned reads through the OS page cache (default), reads past it (`O_DIRECT`, `FILE_FLAG_NO_BUFFERING`), or copies out of a mapping |
@@ -339,7 +341,7 @@ logits stay within top-1 but are not numerically qualified (maximum relative L2 
 resident experts). A GGUF bank, including a GGUF MTP companion beside native text weights, keeps
 its GPU route. Linux registers native weight objects separately; Windows uses pageable weights and
 bounded pinned staging. Use `--max-concurrency 1` for native host execution. Under WDDM (Windows,
-and WSL2, recognised by `/dev/dxg`) a device's copies queue behind one another whatever their
+and WSL2, recognised by `/dev/dxg`) a device's copies may queue behind one another whatever their
 streams, so the tables, the CPU/GPU partition and the CPU's sum that a decode graph takes after it
 waited for the host reach the device through mapped host memory and a copy kernel; a queued copy
 there would hold back the expert copies that end the wait. The bytes are the same either way.
@@ -662,7 +664,9 @@ on one device ([DFlash2](#dflash2-speculative-decoding)); with disk experts it d
 drafts ([below](#mtp-with-several-requests)), and `--spec none` decodes without drafts. Decoding
 requests then run rounds: the MTP block (one more sparse-attention layer with its own 512-expert
 MoE, its own final mixer and the model's head) drafts N tokens from the stack the model left at the
-request's last position (the head's argmax at each step), the model verifies the last sampled token
+request's last position (the head's argmax at each step; with `--gumbel-sampling` a sampled
+request's draw under the target's keyed noise, [coupled draws](cli.md#speculative-decoding)), the
+model verifies the last sampled token
 and the N drafts in one pass, and the acceptance keeps the drafts while they equal the model's own
 draw at each position, then commits the model's draw at the first difference (or after the last
 draft). The acceptance samples as the request does (greedy, temperature and top-k/top-p/min-p,
@@ -810,6 +814,11 @@ not.
   attention below 2,051 positions).
 - The PLE layer reads its 16 n-gram rows per token from the table's file (IQ4_NL rows decoded on
   the GPU).
+- A layer's projections of one input run together: the GGUF ones quantize the input to q8_1 once,
+  and the BF16 ones that a call of up to eight tokens runs as vector products (a Gated DeltaNet
+  layer's `a` and `b`) share one launch. The router's top-10 selection for up to eight tokens runs
+  in its logits launch, in the CTA that finishes last. Each product and selection keeps the bits of
+  its own launch.
 - The 512-expert MoE groups each layer's (token, expert) pairs by expert on the GPU and runs one
   pass over each selected expert's rows for all of its tokens, through device tables of expert base
   pointers: an expert is read wherever the table points, in device memory, a cache slot or the
@@ -853,6 +862,12 @@ not.
   memory the device has free at startup: in a prompt past eight chunks each layer's uncached experts
   then cross the bus half as often ([Expert placements](#expert-placements)). Weighted expert
   outputs are summed in fixed point, so the result does not depend on the order experts finish in.
+- A prompt chunk whose rows produce no logits (each chunk before the prompt's last, and a scoring
+  call's chunks before its first scored position) runs the last layer, a sparse attention layer,
+  only up to its key/value and indexer-key appends. In a span, the last layer's expert calls run
+  only where one of their chunks produces logits, so those experts cross the bus less often. With
+  MTP every chunk runs whole, since the MTP block reads each position's final stack. The appended
+  rows come from the same projections and kernels, so caches, states and logits keep their bits.
 - Decode steps, verifications of up to 64 tokens and prompt chunks of up to 64 tokens (eight with
   `--expert-tail-skip`; every verification and prompt chunk where half the free memory cannot hold a
   slot pool) of GGUF host experts run in two stages. A kernel splits the call's routes into the

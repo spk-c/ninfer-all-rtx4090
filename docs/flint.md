@@ -36,6 +36,10 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
   (`<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...</tool_call>`) returned as
   OpenAI tool calls, each value read by its declared parameter type. A forced `tool_choice` ends
   the generation prompt with `<tool_call>NAME`, so the model continues with the arguments.
+- **Prompt chunks without logits.** A chunk before the prompt's last, or before a scoring call's
+  first scored position, runs its last block only up to the key/value store: that block's attention
+  output and experts feed only the head. The stored rows are those of the whole block, so caches and
+  logits keep their bits.
 - **Reasoning.** The release's chat template has no thinking switch: the model opens `<think>`
   itself when it decides to reason, and the reasoning arrives as `reasoning_content`.
   `enable_thinking: false` (or `reasoning_effort: "none"`) closes an empty reasoning block after
@@ -289,6 +293,9 @@ rounds and the growing KV):
   calls of 9 to 64 tokens ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); Flint does not
   have that route yet: its expert kernels take one route per call, and the shared expert delivery
   serves only narrow calls.
+- **Disk reads.** `--expert-mirror` spreads disk experts' reads over a second drive and
+  `--expert-direct` lets the drive write them into device memory
+  ([disk expert reads](expert-disk-reads.md)).
 
 On the RTX 3090 of the measurements above, with the cache NInfer sizes itself (`ninfer_bench`, one
 sequence, three repetitions; three CPU threads take a share of the decode misses). Disk experts read

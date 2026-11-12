@@ -282,6 +282,7 @@ ConstructedDeepSeekV41 construct_deepseek_v41(const EngineOptions& options, Devi
     executor.expert_cache_bytes = options.expert_cache_bytes;
     executor.expert_dma_share   = hybrid.dma_share;
     executor.expert_cpu_threads = hybrid.cpu_threads;
+    executor.expert_disk        = {hybrid.mirror, hybrid.direct};
     // Expert parallelism: every device serves a share of the routed experts from host memory or
     // the files over its own bus; without --tensor-split the executor sizes the shares by each
     // device's room for its expert cache and its bus speed.
@@ -1561,6 +1562,8 @@ struct DeepSeekV41Core::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -2510,6 +2513,8 @@ struct DeepSeekV41Core::Impl {
             config.presence_penalty  = row.params->presence_penalty;
             config.frequency_penalty = row.params->frequency_penalty;
             config.seed              = row.params->seed;
+            config.draw              = row.params->gumbel ? ops::kSampleDrawGumbel
+                                                          : ops::kSampleDrawInverseCdf;
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
@@ -2755,7 +2760,13 @@ struct DeepSeekV41Core::Impl {
         out.reserve(n - first_target);
         for (std::uint32_t at = 0; at + 1 < n; at += chunk) {
             const std::uint32_t count = std::min(chunk, n - 1 - at);
-            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count), count);
+            // A chunk before the first target needs no logits, so its last block keeps only its
+            // window latents, unless a prefill tail shorter than the chunk would then leave rows
+            // out: scoring runs every row.
+            const std::uint32_t tail = executor.prefill_tail_rows();
+            const bool context       = first_target > at + count && (tail == 0 || tail >= count);
+            executor.forward(0, std::span<const TokenId>(tokens).subspan(at, count),
+                             context ? 0U : count);
             const std::uint32_t first_row = first_target > at + 1 ? first_target - at - 1 : 0;
             if (first_row >= count) { continue; }
             const std::uint32_t rows = count - first_row;

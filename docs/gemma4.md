@@ -33,7 +33,9 @@ frontend for tokenization, chat templates, output parsing and the serving protoc
   publishes beside the model (`Gemma4AssistantForCausalLM`, four blocks of width 1024 that read the
   target's own KV cache) drafts up to seven tokens a round (`--spec mtp --draft-tokens N`); the
   target verifies them in one pass and every token it keeps is its own sample, so the output is
-  what plain decoding produces. See [below](#speculative-decoding-with-the-assistant).
+  what plain decoding produces. See [below](#speculative-decoding-with-the-assistant). With
+  `--gumbel-sampling` a sampled request drafts the assistant's own draws
+  ([coupled draws](cli.md#speculative-decoding)).
 - **Images and video.** The release's vision tower (27 blocks of width 1152) turns each picture or
   video frame into soft tokens in the prompt, on the GPU, streamed from pinned host memory, or on
   CPU threads (`--vision-residency`); see [below](#images-and-video).
@@ -46,6 +48,10 @@ frontend for tokenization, chat templates, output parsing and the serving protoc
   the model continues with the arguments; see [forced selection](serving.md#function-tools)),
   streaming, reasoning in its own channel when thinking is on, and causal scoring
   (`ninfer-perplexity`).
+- **Prompt chunks without logits.** A chunk before the prompt's last, or before a scoring call's
+  first scored position, runs its last block only up to the key/value store: that block's attention
+  output, MLP and experts feed only the head. The stored rows are those of the whole block, so
+  caches and logits keep their bits.
 - **Thinking.** Off unless asked for, as the release's chat template has it: a request turns it on
   with `chat_template_kwargs: {"enable_thinking": true}`, and the reasoning arrives as
   `reasoning_content`. Gemma has no early-close control, so thinking budgets do not apply and the
@@ -557,6 +563,9 @@ weights instead of 13.7 GiB.
 ninfer /models/gemma4.ninfer --expert-residency host
 ninfer /models/gemma4.ninfer --expert-residency disk --expert-cache-mib 0
 ```
+
+With disk experts, `--expert-mirror` spreads the reads over a second drive and `--expert-direct`
+lets the drive write the experts into device memory ([disk expert reads](expert-disk-reads.md)).
 
 Experts reach the GPU through the shared transport (`core/expert_delivery`):
 

@@ -155,6 +155,21 @@ public:
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
 
+    // Proposals drawn from the drafter's own distribution instead of its argmax: `configs` holds a
+    // device SamplingConfig per proposal column (runtime::draft_sampling; a greedy row keeps the
+    // argmax). Null keeps every proposal an argmax.
+    void set_proposal_sampling(const ops::SamplingConfig* configs) noexcept {
+        proposal_configs_ = configs;
+    }
+
+    // The next proposals' keys: column b draws with (seed, positions[b] + offset,
+    // kSamplePurposeDecode), the key of the target's own draw for the position it proposes, so the
+    // two draws agree wherever the distributions do. `positions` is a device I32 [columns].
+    void set_proposal_key(const Tensor& positions, std::int32_t offset) noexcept {
+        proposal_key_positions_ = positions;
+        proposal_key_offset_    = offset;
+    }
+
     // The typed readout a finalizing chunk performs on its sampled token's logits: the first
     // `count` ids of io.readout_ids, read into io.readout_values; zero reads nothing.
     void set_readout(std::int32_t count) noexcept { readout_count_ = count; }
@@ -187,6 +202,14 @@ public:
     void set_rewrite_checkpoint_hidden_output(Tensor* output) noexcept {
         rewrite_checkpoint_hidden_output_ = output;
     }
+
+    // Lets a prompt chunk run the model's last layer as K/V only when nothing reads the chunk's
+    // final hidden state: it samples no token, ends before the prompt does, and feeds no MTP
+    // prompt, in-pass tap hidden, checkpoint hidden or drafter feature of that layer. The layer
+    // then appends its K/V rows and skips its attention, output projection and FFN; every cache
+    // byte stays as the whole layer writes it. A caller that reads prefill_hidden after such a
+    // chunk (causal scoring, forced tokens) leaves it off.
+    void set_last_layer_kv_only(bool allowed) noexcept { last_layer_kv_only_allowed_ = allowed; }
 
     // Exact prefix-cache taps inside the next chunk, in frontier order, without splitting the
     // pass: each Gated DeltaNet layer runs its convolution and recurrence up to each frontier into
@@ -280,7 +303,9 @@ private:
         return mtp_kv_.valid() || batch_mtp_kv_ != nullptr;
     }
 
-    void attn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
+    // `kv_only` appends the layer's K/V rows and returns before its attention output.
+    void attn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase,
+                  bool kv_only = false);
     // Position-split attention's second half on a rank: the merge of every rank's partial for its
     // query heads, gated by the gates attn_mix kept, and its share of the output projection.
     void attn_merge_output(const BlockParameters& weights, Tensor& x,
@@ -455,6 +480,9 @@ private:
     const GdnReplayRecords* replay_records_   = nullptr;
     std::int64_t prefill_split_frontier_      = -1;
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
+    bool last_layer_kv_only_allowed_          = false;
+    // The running prefill pass runs the model's last layer as K/V only.
+    bool kv_only_pass_ = false;
     std::array<GdnTap, kMaximumGdnTaps> gdn_taps_{};
     std::size_t gdn_tap_count_ = 0;
     // The running chunk's tap columns; gdn_live_taps_ == 0 runs none.
@@ -471,6 +499,9 @@ private:
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
+    const ops::SamplingConfig* proposal_configs_ = nullptr;
+    Tensor proposal_key_positions_;
+    std::int32_t proposal_key_offset_           = 0;
     std::int32_t readout_count_                 = 0;
     std::function<void()> first_token_hook_;
     ops::RopeYarn rope_yarn_;

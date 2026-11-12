@@ -11,6 +11,7 @@
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
+#include "runtime/contract/draft_sampling.h"
 
 #include <algorithm>
 #include <array>
@@ -166,6 +167,7 @@ void ProgramImpl::update_sampling(SequenceHandle handle,
     host.min_p                = sampling.min_p;
     host.presence_penalty     = sampling.presence_penalty;
     host.frequency_penalty    = sampling.frequency_penalty;
+    host.draw = sampling.gumbel ? ops::kSampleDrawGumbel : ops::kSampleDrawInverseCdf;
     // Penalties that start now count only the tokens sampled from here on.
     if ((host.presence_penalty != 0.0F || host.frequency_penalty != 0.0F) &&
         host.token_counts == nullptr) {
@@ -174,9 +176,21 @@ void ProgramImpl::update_sampling(SequenceHandle handle,
         CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream));
         host.token_counts = static_cast<std::int32_t*>(counts.data);
     }
+    upload_sampling(lane, request);
+}
+
+void ProgramImpl::upload_sampling(std::uint32_t lane, RequestControl& request) {
     Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(lane), 1);
-    CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &host, sizeof(host), cudaMemcpyHostToDevice,
+    CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
+                               sizeof(request.sampling_host), cudaMemcpyHostToDevice,
                                device.stream));
+    request.draft_sampling_host = runtime::draft_sampling(request.sampling_host);
+    if (draft_sampling_config.data != nullptr) {
+        Tensor draft_lane = draft_sampling_config.slice(1, static_cast<std::int32_t>(lane), 1);
+        CUDA_CHECK(cudaMemcpyAsync(draft_lane.data, &request.draft_sampling_host,
+                                   sizeof(request.draft_sampling_host), cudaMemcpyHostToDevice,
+                                   device.stream));
+    }
 }
 
 void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
@@ -206,10 +220,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
     request.sampling_host.token_counts =
         penalties ? static_cast<std::int32_t*>(counts.data) : nullptr;
-    Tensor config_lane = sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1);
-    CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
-                               sizeof(request.sampling_host), cudaMemcpyHostToDevice,
-                               device.stream));
+    upload_sampling(sequence.lane, request);
 }
 
 void ProgramImpl::arm_logprobs(bool any) {
@@ -860,6 +871,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
             mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
             mtp_host_ingress->sampling[row]                = request.sampling_host;
+            mtp_host_ingress->draft_sampling[row]          = request.draft_sampling_host;
             logprobs = logprobs || request.logprobs;
             if (request.grammar) {
                 if (auto ready = take_next_mask(request, sequence, extent)) {
@@ -888,6 +900,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             *mtp_host_ingress,
             *mtp_host_egress,
             state_images->continuation_hidden_store()};
+        schedule_state.sampled_drafts = gumbel_sampling;
 
         mark_workspace_usage(workspace_plan.mtp_round);
         execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),

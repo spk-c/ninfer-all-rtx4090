@@ -261,6 +261,8 @@ cache and its rounds):
   reads through the OS page cache into bounded pinned transfer buffers, then copied to the device;
   NInfer maps no expert file into memory, so a miss never waits on a page fault inside a copy.
   Whatever the page cache holds is read at memory speed, the rest at the storage's.
+  `--expert-mirror` spreads these reads over a second drive and `--expert-direct` lets the drive
+  write them into device memory ([disk expert reads](expert-disk-reads.md)).
 - **Layer banks and cache.** A prompt chunk's experts missing from the cache land in a whole-layer
   bank laid out like the resident bank; two banks let the next layer arrive while the current one
   computes. `--expert-cache-mib` (default: what is free after startup) holds the experts decode
@@ -376,7 +378,12 @@ blocks leave at a position, and the logits there, depend only on their rows with
 - **A stopped prompt.** A request stopped inside its prompt leaves those blocks behind the rest of
   the sequence's state. NInfer keeps no image of that state; the next prompt on the sequence starts
   from its last checkpoint, from the host store or from the beginning.
-- **Scoring.** Causal scoring computes every position's logits, so it runs every row.
+- **The last block.** A prompt chunk that produces no logits runs block 39 only up to its window
+  latents: its attention output and experts feed only the head. The latents are those of the whole
+  block, so tokens, log probabilities and kept states keep their bits under every tail.
+- **Scoring.** Causal scoring computes every position's logits, so it runs every row. A chunk before
+  the first scored position runs block 39 only up to its window latents, unless an `N` tail shorter
+  than the chunk would then leave rows out.
 
 Prefill rates, the outputs and the cost of a stopped prompt are
 [measured below](#prefill-tail-iq1_m-experts-and-engram-reads).
@@ -664,6 +671,14 @@ keeps instead of prefilling those tokens again:
 
 A window state cannot be cut back, so a prompt resumes only where a state was kept, not at an
 arbitrary common prefix.
+
+A resumed prompt does not reproduce a cold prefill's log probabilities bit for bit, and a decode
+moves them no more than a prefill split at the same place does. On an A40 (IQ1_M, host experts),
+the first answer token of a 134-token second turn had a log probability 0.076 from the cold
+prefill's when the turn resumed from the state the first turn's decode left, and 0.18 from it when
+the turn resumed from a prefilled prefix of the same 119 tokens; greedy, both answers left the cold
+prefill's text at a near tie. On Qwen3.8-27B the same three paths put that log probability within
+0.004 of each other and gave the same text.
 
 A turn that a stop string ends returns to the state where the stop string's match began, the one
 its visible text continues: the live state has read the tokens the cut removed. Each sequence
