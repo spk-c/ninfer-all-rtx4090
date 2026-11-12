@@ -1,6 +1,6 @@
 # RTX 4090 / SM89 — fixed-master benchmark and optimization assignment
 
-> Tracking issue: [#36](../../issues/36). This is an executable **qualification plan**, not a completed benchmark or a kernel-speed claim. The planning branch must not change production kernel defaults.
+> Tracking issue: [#36](https://github.com/spk-c/ninfer-all-rtx4090/issues/36). This is an executable **qualification plan**, not a completed benchmark or a kernel-speed claim. The planning branch must not change production kernel defaults.
 
 ## 1. Immutable comparison contract
 
