@@ -313,6 +313,14 @@ def canonical_gold_answer(text: str) -> str:
     return result.casefold()
 
 
+KV_SUMMARY_DTYPE = {
+    # apps/cli/options.cpp parses the user aliases; apps/cli/main.cpp emits
+    # the internal storage name, not the user-facing CLI spelling.
+    "rk4v4": "rotated-lloyd4g64-v4g32",
+    "rk8v4": "rotated-k8g64-v4g32",
+}
+
+
 def classify(case: dict, metrics: dict, stdout: str, code: int,
              error: str, gold: dict, stderr: str = "") -> tuple[str, str, bool | None]:
     if code != 0:
@@ -333,8 +341,12 @@ def classify(case: dict, metrics: dict, stdout: str, code: int,
         return "failed", "CLI context differs from requested context", None
     flags = list(case["flags"])
     expected_kv = flags[flags.index("--kv-dtype") + 1]
-    if metrics.get("kv_dtype_reported") != expected_kv:
-        return "failed", "CLI KV dtype differs from requested configuration", None
+    expected_reported = KV_SUMMARY_DTYPE.get(expected_kv, expected_kv)
+    if metrics.get("kv_dtype_reported") != expected_reported:
+        return "failed", (
+            f"CLI KV cache dtype mismatch: --kv-dtype {expected_kv} "
+            f"should report {expected_reported}, got {metrics.get('kv_dtype_reported')!r}"
+        ), None
     if (case["family"] == "kv" and
             (tokens < case["minimum_prompt_tokens"] or
              tokens + case["max_new"] > case["max_context"])):

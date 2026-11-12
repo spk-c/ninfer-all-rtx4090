@@ -21,7 +21,7 @@ summary     generated tokens          128
 summary     prefill speed             270.50 tok/s
 summary     decode speed              84.55 tok/s
 summary     max context               32768
-summary     kv cache dtype            rk4v4
+summary     kv cache dtype            rotated-lloyd4g64-v4g32
 summary     gpu workspace peak        200 MiB / 500 MiB
 summary     dflash2 acceptance rate   71.02%
 summary     dflash2 acceptance length 2.71 tok/round
@@ -60,6 +60,7 @@ def test_actual_cli_summary_and_long_label():
     assert values["acceptance_pct"] == 71.02
     assert values["tokens_per_round"] == 2.71
     assert values["max_context_reported"] == 32768
+    assert values["kv_dtype_reported"] == "rotated-lloyd4g64-v4g32"
     assert values["workspace_peak"].startswith("200 MiB")
 
 
@@ -92,10 +93,25 @@ def test_gold_answer_and_oom_classification():
     assert classify(case, values, "wrong output", 0, "", expected)[0] == "quality_regression"
     assert classify(case, values, "Correct: C0DE-REFERENCE-123", 0, "", expected)[0] == "quality_regression"
     assert classify(case, values, "```text\nC0DE-REFERENCE-123\n```", 0, "", expected)[0] == "passed"
-    wrong_dtype = dict(values, kv_dtype_reported="rk8v4")
+    wrong_dtype = dict(values, kv_dtype_reported="rotated-k8g64-v4g32")
     assert classify(case, wrong_dtype, "C0DE-REFERENCE-123", 0, "", expected)[0] == "failed"
     assert classify(case, values, "", 1, "", expected,
                     "CUDA out of memory")[0] == "OOM"
+
+
+def test_rk8v4_uses_its_actual_cli_summary_name():
+    from dataclasses import asdict
+    kv = next(c for c in build_cases() if c.family == "kv"
+              and "rk8v4" in c.flags)
+    case = asdict(kv)
+    values = parse_metrics(CLI_LOG)
+    values["max_context_reported"] = case["max_context"]
+    values["prompt_tokens"] = case["minimum_prompt_tokens"] + 10
+    values["kv_dtype_reported"] = "rotated-k8g64-v4g32"
+    gold = {case["fixture"]: {"expected": "C0DE-REFERENCE-123"}}
+    assert classify(case, values, "C0DE-REFERENCE-123", 0, "", gold)[0] == "passed"
+    values["kv_dtype_reported"] = "rotated-k4e8g64-v4g32"
+    assert classify(case, values, "C0DE-REFERENCE-123", 0, "", gold)[0] == "failed"
 
 
 def test_order_rotates_and_commands_pin_the_seed():
