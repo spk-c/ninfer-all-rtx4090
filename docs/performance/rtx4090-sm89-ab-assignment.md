@@ -24,9 +24,56 @@ python -m tools.bench.plan_rtx4090_sm89 `
   --repetitions 5 --out '.\profiles\bench\sm89-qual-001' --strict
 ```
 
-The candidate SHA in this example is **a placeholder**, not a real revision. If the Windows build outputs to `apps\Release`, use that directory for both arms and verify independently; the existing interleaved runner checks each runtime. The planner's `--strict` option checks that all 18 input fixtures and files exist. Without it, only a **NOT_RUN** test matrix is emitted so the plan can be reviewed on a CPU-only machine. No GPU performance numbers are generated.
+The candidate SHA in this example is **a placeholder**, not a real revision. If the Windows build outputs to `apps\\Release`, use that location for both arms and verify each independently. The planner's `--strict` option verifies that the model, 18 input fixtures and gold-answer manifest exist, then freezes SHA-256 hashes of **all input files** in the plan. A plan without `--strict` is only a **NOT_RUN** matrix suitable for review, never valid GPU evidence. No GPU performance numbers are generated.
 
 Artifacts: `manifest.json`, `cases.json`, `fixture-requirements.json`, `ab-commands.json`, `nsight-commands.json`. The 54 cases comprise 12 DFlash2 tests, 12 prefill tests, and 30 KV/retrieval tests. At five repetitions with two independently built executables this is **540 process runs**, plus kernel profiling. The planner emits commands for the existing `tools/bench/run_interleaved_ab.py`; it does not execute them or capture their raw outputs. That execution and reporting are explicit follow-up work in issue #36.
+
+
+## 2A. Reproducible fixture generation
+
+Generate the requested 18 JSON chat fixtures **locally** from a clean copy of the frozen master; never commit multi-megabyte generated prompt bodies to this repository. The fixture generator only uses distinct source-code ranges; it rejects corpus tiling and records SHA-256 hashes and a 15-entry independently checkable gold-answer map.
+
+```powershell
+# Checkout source A at the exact fixed master SHA.
+git worktree add C:\\ninfer-master-snapshot f879a2db06c15133260551a104feaf03886cc620
+
+python -m tools.bench.make_rtx4090_sm89_fixtures `
+  --source-master 'C:\\ninfer-master-snapshot' `
+  --out 'C:\\ninfer-fixtures\\rtx4090-sm89' `
+  --chars-per-token 3.0
+```
+
+The estimated characters/token ratio is **not** a real tokenizer measurement. Tune it and recreate the entire fixture directory if necessary; never silently accept short inputs. The evidence runner rejects KV cases under **90%** of the selected context target or where the input plus 128 decode tokens would overrun the configured context. A 128K flag alone never qualifies a 128K result.
+
+## 2B. Execute and preserve paired evidence on a free 4090
+
+After the baseline and candidate have each been built at their own **recorded commits** under native Windows CUDA 13.4.3 / SM89, create the strict plan with a real candidate SHA (from `git rev-parse HEAD`). Then run:
+
+```powershell
+python -m tools.bench.run_rtx4090_sm89_evidence `
+  --plan-dir '.\\profiles\\bench\\sm89-qual-001' `
+  --master-source 'C:\\ninfer-master-snapshot' `
+  --candidate-source 'C:\\ninfer-candidate' `
+  --gold-answers 'C:\\ninfer-fixtures\\rtx4090-sm89\\gold-answers.json' `
+  --repetitions 5 `
+  --max-idle-vram-mib 2048 `
+  --out '.\\profiles\\bench\\sm89-evidence-001'
+```
+
+The collector verifies the **actual** master and candidate Git HEAD hashes, the model/fixture/gold SHA-256 values frozen in the plan, runtime paths, CUDA compute capability **8.9**, GPU idle state and all 54 checked-in case definitions. It alternates AB/BA per case and repetition, samples whole-card GPU memory, records the CLI's actual token counts and draft acceptance, and saves all 540 stdout/stderr logs and sample metrics to `samples.csv`. GPU-memory samples are from `nvidia-smi` and represent **total card occupancy**, not a per-process allocation profile; the CLI separately reports its workspace peak. A `--max-cases 1` smoke run is allowed but is marked **PARTIAL** and cannot qualify any release.
+
+**Caution:** the CLI's wall-clock elapsed time includes model startup and is **not server TTFT**. Use the existing `tools/bench/run_serve_ttft.py` framework for TTFT follow-up (separately matched configurations); never mislabel the CLI startup time.
+
+## 2C. Generate the paired report
+
+```powershell
+python -m tools.bench.report_rtx4090_sm89_evidence `
+  --evidence-dir '.\\profiles\\bench\\sm89-evidence-001' `
+  --out '.\\profiles\\bench\\sm89-report-001'
+```
+
+This emits `report.json` and `summary.md`: median paired B/A, seeded bootstrap 95% interval, complete-pair count, negative/zero-gain pairs, divergent answer hashes, peak **whole-card** VRAM and explicit failures/OOM. The report **never automatically promotes kernel routes**. Review coding answer correctness and attach actual Nsight profiles, precision/perplexity evidence, release CI and long-context gold accuracy before proposing an opt-in implementation. A generated plan, completed report or microbenchmark alone is not sufficient.
+
 
 ## 3. Prepare truthful prompt fixtures before measurement
 
@@ -43,7 +90,7 @@ Artifacts: `manifest.json`, `cases.json`, `fixture-requirements.json`, `ab-comma
 | Prefill | cuBLAS off/on × chunk 1024/2048/4096 × short/long coding (12) | Model, `rk4v4`, no speculation, sampler, prompt | Prefill tok/s, latency/TTFT, device workspace and VRAM, output drift, quality |
 | KV/context | `rk4v4` vs `rk8v4` × 32K/64K/128K × five gold-answer seeds (30) | Model, no speculation, chunk 1024, sampler, actual corpus and prompt length | Peak VRAM, spill/transfer, prefill/decode, gold-answer exact accuracy, perplexity/logit drift |
 
-All rows must be run once for Arm A and once for Arm B within every repeated pair. Alternate AB/BA, use ≥5 valid paired repetitions plus warmups, and report **median paired B/A** (not ratio of overall medians). The existing A/B runner prints ratios but does not itself export per-request stdout/stderr, answer digests, power/VRAM traces or confidence intervals: add a separate reporter/collector before treating the campaign as fully qualified.
+All rows must be run once for Arm A and once for Arm B within every repeated pair. Alternate AB/BA, use ≥5 valid paired repetitions plus warmups, and report **median paired B/A** (not ratio of overall medians). The dedicated SM89 collector/reporter supplies raw CLI stdout/stderr, answer digests, periodic whole-card VRAM samples and paired confidence intervals. Power/clock telemetry, HTTP TTFT, exhaustive accuracy/perplexity and Nsight qualification remain separate required measurements.
 
 ## 5. SM89 kernel profiling — three microbenchmark programs
 
