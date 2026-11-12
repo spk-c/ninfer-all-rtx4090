@@ -104,6 +104,25 @@ Run `ninfer_benches --list` first and confirm the program names and binary path 
 
 Collect `nsys` and `ncu` artifacts, export kernel-level CSV, annotate shape/kernel/route, and compare cold/warm conditions separately. Existing `scripts/measure-rtx4090-regressions.ps1`, `docs/rtx4090.md`, `bench/README.md`, and `tools/bench/rtx4090_kernel_share.py` describe related evidence. Never infer an end-to-end improvement from a microbenchmark alone.
 
+## 5A. Capturing actual Nsight evidence (opt-in only)
+
+Generate a **dry plan** first. It writes 12 commands (2 complete bench builds × 3 kernel families × 2 Nsight tools) without contacting a GPU:
+
+```powershell
+python -m tools.bench.capture_rtx4090_sm89_nsight `
+  --plan-manifest '.\profiles\bench\sm89-qual-001\manifest.json' `
+  --master-bench 'C:\ninfer-master\build-rtx4090\bench\ninfer_benches.exe' `
+  --candidate-bench 'C:\ninfer-candidate\build-rtx4090\bench\ninfer_benches.exe' `
+  --master-source 'C:\ninfer-master-snapshot' `
+  --candidate-source 'C:\ninfer-candidate' `
+  --mode both --out '.\profiles\bench\sm89-nsight-plan'
+```
+
+For the **real** GPU capture, use a **new** unused output directory and add `--execute`; dry-plan output paths cannot be reused. The runner requires the pinned source commits, clean tracked files, two independent `ninfer_benches.exe` builds, a detectable idle GeForce RTX 4090 with SM89 compute capability, both profilers installed, and all three actual programs in `ninfer_benches --list`. Nsight Systems produces `.nsys-rep` and Nsight Compute `.ncu-rep`; each report must exist and be nonempty or the case is marked missing/failed. The capture manifest includes program hashes, tool versions, report hashes, output logs and individual statuses. `CAPTURED_ALL` only means collection succeeded; **kernel speedups, SM89 occupancy and quality remain unevaluated** until the trace contents are inspected and compared to the matched baseline.
+
+Use a generous `--timeout` if Nsight Compute's full metric set is slow; do not disable the production server without a separate maintenance decision. This runner is opt-in and does not change release workflows or kernel routing.
+
+
 ## 6. Evidence and promotion gate
 
 Every compared case must retain raw stdout/stderr, actual generated tokens, exact input token count, answer hash, elapsed time, TTFT, decode/prefill rates, hardware telemetry, peak allocated/resident VRAM, code/model hashes, and a status in `{passed, failed, OOM, unsupported, not_run, quality_regression}`. Produce `samples.csv`, a case-level JSON and `summary.md` with paired median percent, distribution, ≥5 complete pairs and bootstrap confidence interval. Do not average incomplete cases with successful ones. Split results by context, concurrency and code workload.
