@@ -162,6 +162,14 @@ def create_plan(master: Path, candidate: Path, model: Path, fixtures: Path,
                    if not (fixtures / name).is_file()]
         if missing:
             raise ValueError("missing coding/retrieval fixtures: " + ", ".join(missing))
+        if not (fixtures / "gold-answers.json").is_file():
+            raise ValueError("missing independently curated gold-answers.json")
+    fixture_hashes = {
+        name: sha256_file(fixtures / name) for name in fixture_names
+        if (fixtures / name).is_file()
+    }
+    gold_path = fixtures / "gold-answers.json"
+    gold_hash = sha256_file(gold_path) if gold_path.is_file() else None
     out.mkdir(parents=True)
     model_hash = sha256_file(model) if model.is_file() else None
     manifest = {
@@ -171,6 +179,11 @@ def create_plan(master: Path, candidate: Path, model: Path, fixtures: Path,
         "master_executable": str(master), "candidate_executable": str(candidate),
         "model": str(model), "model_sha256": model_hash,
         "model_hash_verified": model_hash is not None,
+        "fixture_sha256": fixture_hashes,
+        "gold_answers_sha256": gold_hash,
+        "inputs_verified_at_plan": bool(
+            strict and model_hash is not None and gold_hash is not None
+            and len(fixture_hashes) == len(fixture_names)),
         "fixtures_dir": str(fixtures), "repetitions": repetitions,
         "gpu": "RTX 4090 / sm_89 required; NOT verified by plan",
         "toolchain": "native Windows CUDA 13.4.3 required; NOT verified by plan",
