@@ -74,7 +74,8 @@ def quote(arg: str) -> str:
 def command_tokens(case: Case, model: Path, fixtures: Path) -> list[str]:
     common = [
         "{exe}", str(model), "--messages", str(fixtures / case.fixture),
-        "--device", "0", "--greedy", "--no-thinking", "--gdn-state-fp16",
+        "--device", "0", "--seed", "4090", "--greedy", "--no-thinking",
+        "--gdn-state-fp16",
         "--ngram-draft-tokens", "0", "--max-context", str(case.max_context),
         "--max-new", str(case.max_new),
     ]

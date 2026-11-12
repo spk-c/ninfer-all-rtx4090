@@ -33,6 +33,7 @@ def test_same_weights_sampler_and_explicit_isolated_config():
         assert tokens.count("--ngram-draft-tokens") == 1
         assert tokens[tokens.index("--ngram-draft-tokens") + 1] == "0"
         assert "--greedy" in tokens and "--no-thinking" in tokens
+        assert tokens[tokens.index("--seed") + 1] == "4090"
         assert "--gdn-state-fp16" in tokens
         assert tokens[tokens.index("--max-context") + 1] == str(case.max_context)
         if case.family == "dflash2":

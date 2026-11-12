@@ -68,6 +68,10 @@ def test_gold_answer_and_oom_classification():
     expected = {kv.fixture: {"expected": "C0DE-REFERENCE-123"}}
     assert classify(case, values, "C0DE-REFERENCE-123", 0, "", expected)[0] == "passed"
     assert classify(case, values, "wrong output", 0, "", expected)[0] == "quality_regression"
+    assert classify(case, values, "Correct: C0DE-REFERENCE-123", 0, "", expected)[0] == "quality_regression"
+    assert classify(case, values, "```text\nC0DE-REFERENCE-123\n```", 0, "", expected)[0] == "passed"
+    wrong_dtype = dict(values, kv_dtype_reported="rk8v4")
+    assert classify(case, wrong_dtype, "C0DE-REFERENCE-123", 0, "", expected)[0] == "failed"
     assert classify(case, values, "", 1, "", expected,
                     "CUDA out of memory")[0] == "OOM"
 
@@ -93,7 +97,8 @@ def test_paired_statistics_use_per_rep_ratios_not_ratio_of_medians():
 def test_incomplete_matrix_cannot_auto_promote():
     row = {"case": "dflash2-coding-short-k3", "rep": "1", "arm": "A",
            "status": "passed", "decode_tok_s": "100",
-           "answer_sha256": "aaa", "gpu_peak_used_mib": "12000"}
+           "answer_sha256": "aaa", "gpu_peak_used_mib": "12000",
+           "prompt_tokens": "640", "generated_tokens": "120"}
     other = dict(row, arm="B", decode_tok_s="150", answer_sha256="bbb")
     meta = {"status": "PARTIAL", "plan_manifest": {
         "repetitions": 5, "baseline_commit_sha": BASE_SHA,

@@ -30,6 +30,7 @@ FIELDS = (
     "acceptance_pct", "tokens_per_round", "workspace_peak",
     "gpu_initial_used_mib", "gpu_peak_used_mib", "gpu_peak_util_pct",
     "gpu_peak_temp_c", "answer_sha256", "gold_answer_pass",
+    "kv_dtype_reported", "max_context_reported", "finish_reason",
 )
 
 
@@ -220,6 +221,18 @@ def call_one(argv: list[str], timeout_s: int, device: int,
     return code, stdout, stderr, elapsed, telemetry, error
 
 
+def canonical_gold_answer(text: str) -> str:
+    """Remove presentation wrappers, never permit substring-only retrieval matches."""
+    result = text.strip()
+    if result.startswith("```") and result.endswith("```"):
+        lines = result.splitlines()
+        if len(lines) >= 3:
+            result = "\n".join(lines[1:-1]).strip()
+    if len(result) >= 2 and result[0] == result[-1] and result[0] in ("\"", "'"):
+        result = result[1:-1].strip()
+    return result.casefold()
+
+
 def classify(case: dict, metrics: dict, stdout: str, code: int,
              error: str, gold: dict, stderr: str = "") -> tuple[str, str, bool | None]:
     if code != 0:
@@ -238,6 +251,10 @@ def classify(case: dict, metrics: dict, stdout: str, code: int,
         return "failed", "CLI omitted actual prompt token count", None
     if metrics.get("max_context_reported") != case["max_context"]:
         return "failed", "CLI context differs from requested context", None
+    flags = list(case["flags"])
+    expected_kv = flags[flags.index("--kv-dtype") + 1]
+    if metrics.get("kv_dtype_reported") != expected_kv:
+        return "failed", "CLI KV dtype differs from requested configuration", None
     if (case["family"] == "kv" and
             (tokens < case["minimum_prompt_tokens"] or
              tokens + case["max_new"] > case["max_context"])):
@@ -248,9 +265,9 @@ def classify(case: dict, metrics: dict, stdout: str, code: int,
         return "failed", "DFlash2 acceptance unavailable", None
     if case["family"] == "kv":
         answer = gold[case["fixture"]]["expected"]
-        ok = answer.casefold() in stdout.casefold()
+        ok = canonical_gold_answer(stdout) == answer.strip().casefold()
         return ("passed", "", True) if ok else (
-            "quality_regression", "gold answer absent from generated text", False)
+            "quality_regression", "generated answer differs from exact gold", False)
     return "passed", "", None
 
 
@@ -292,7 +309,8 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                     exe = binaries[arm]
                     argv = [str(exe), manifest["model"], "--messages",
                             str(Path(manifest["fixtures_dir"]) / case["fixture"]),
-                            "--device", "0", "--greedy", "--no-thinking",
+                            "--device", "0", "--seed", "4090",
+                            "--greedy", "--no-thinking",
                             "--gdn-state-fp16", "--ngram-draft-tokens", "0",
                             "--max-context", str(case["max_context"]),
                             "--max-new", str(case["max_new"]), *case["flags"]]
@@ -316,7 +334,8 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                     })
                     row.update({k: metrics.get(k) for k in (
                         "prompt_tokens", "generated_tokens", "prefill_tok_s", "decode_tok_s",
-                        "acceptance_pct", "tokens_per_round", "workspace_peak")})
+                        "acceptance_pct", "tokens_per_round", "workspace_peak",
+                        "kv_dtype_reported", "max_context_reported", "finish_reason")})
                     row.update({k: telemetry.get(k) for k in (
                         "gpu_initial_used_mib", "gpu_peak_used_mib",
                         "gpu_peak_util_pct", "gpu_peak_temp_c")})
