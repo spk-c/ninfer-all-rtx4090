@@ -29,7 +29,10 @@ FIELDS = (
     "prompt_tokens", "generated_tokens", "prefill_tok_s", "decode_tok_s",
     "acceptance_pct", "tokens_per_round", "workspace_peak",
     "gpu_initial_used_mib", "gpu_peak_used_mib", "gpu_peak_util_pct",
-    "gpu_peak_temp_c", "answer_sha256", "gold_answer_pass",
+    "gpu_peak_temp_c", "gpu_peak_power_w",
+    "gpu_min_sm_clock_mhz", "gpu_max_sm_clock_mhz",
+    "gpu_min_mem_clock_mhz", "gpu_max_mem_clock_mhz",
+    "answer_sha256", "gold_answer_pass",
     "kv_dtype_reported", "max_context_reported", "finish_reason",
 )
 
@@ -80,7 +83,10 @@ def parse_metrics(stderr: str) -> dict:
     }
 
 
-SMI_FIELDS = "index,name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,compute_cap"
+SMI_FIELDS = (
+    "index,name,driver_version,memory.total,memory.used,utilization.gpu,"
+    "temperature.gpu,compute_cap,power.draw,clocks.sm,clocks.mem"
+)
 
 
 def gpu_snapshot(device: int) -> dict:
@@ -94,16 +100,27 @@ def gpu_snapshot(device: int) -> dict:
         raise RuntimeError("nvidia-smi unavailable; no qualified GPU evidence") from exc
     for line in result.stdout.splitlines():
         cols = [c.strip() for c in line.split(",")]
-        if len(cols) != 8:
+        if len(cols) != 11:
             continue
         if int(cols[0]) == device:
             def number(i: int) -> float:
                 return float(cols[i])
+
+            def optional_number(i: int) -> float | None:
+                try:
+                    value = float(cols[i])
+                    return value if math.isfinite(value) else None
+                except ValueError:
+                    return None
+
             return {
                 "gpu_index": device, "gpu_name": cols[1], "driver": cols[2],
                 "total_mib": number(3), "used_mib": number(4),
                 "util_pct": number(5), "temp_c": number(6),
                 "compute_cap": cols[7],
+                "power_w": optional_number(8),
+                "sm_clock_mhz": optional_number(9),
+                "mem_clock_mhz": optional_number(10),
             }
     raise RuntimeError(f"nvidia-smi device index {device} not found")
 
@@ -242,11 +259,23 @@ def call_one(argv: list[str], timeout_s: int, device: int,
         thread.join(timeout=2)
     elapsed = round(time.monotonic() - start, 3)
     initial = snapshots[0] if snapshots else None
+
+    def aggregate(key: str, operation=max) -> float | None:
+        values = [x.get(key) for x in snapshots]
+        numeric = [v for v in values if isinstance(v, (int, float))
+                   and math.isfinite(v)]
+        return operation(numeric) if numeric else None
+
     telemetry = {
         "gpu_initial_used_mib": initial["used_mib"] if initial else None,
         "gpu_peak_used_mib": max((x["used_mib"] for x in snapshots), default=None),
         "gpu_peak_util_pct": max((x["util_pct"] for x in snapshots), default=None),
-        "gpu_peak_temp_c": max((x["temp_c"] for x in snapshots), default=None),
+        "gpu_peak_temp_c": aggregate("temp_c"),
+        "gpu_peak_power_w": aggregate("power_w"),
+        "gpu_min_sm_clock_mhz": aggregate("sm_clock_mhz", min),
+        "gpu_max_sm_clock_mhz": aggregate("sm_clock_mhz"),
+        "gpu_min_mem_clock_mhz": aggregate("mem_clock_mhz", min),
+        "gpu_max_mem_clock_mhz": aggregate("mem_clock_mhz"),
         "sampling_note": "nvidia-smi reports WHOLE GPU usage, including other processes",
     }
     return code, stdout, stderr, elapsed, telemetry, error
@@ -384,7 +413,10 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                         "kv_dtype_reported", "max_context_reported", "finish_reason")})
                     row.update({k: telemetry.get(k) for k in (
                         "gpu_initial_used_mib", "gpu_peak_used_mib",
-                        "gpu_peak_util_pct", "gpu_peak_temp_c")})
+                        "gpu_peak_util_pct", "gpu_peak_temp_c",
+                        "gpu_peak_power_w", "gpu_min_sm_clock_mhz",
+                        "gpu_max_sm_clock_mhz", "gpu_min_mem_clock_mhz",
+                        "gpu_max_mem_clock_mhz")})
                     writer.writerow(row)
                     csv_file.flush()
                     all_rows.append(row)

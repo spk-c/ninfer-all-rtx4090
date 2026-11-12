@@ -28,6 +28,27 @@ summary     dflash2 acceptance length 2.71 tok/round
 """
 
 
+def test_gpu_snapshot_reports_power_and_clocks(monkeypatch):
+    import subprocess
+    from tools.bench import run_rtx4090_sm89_evidence as runner
+
+    csv = "0, NVIDIA GeForce RTX 4090, 617.14, 24564, 550, 4, 38, 8.9, 215.5, 2505, 10501"
+    def fake(args, **kwargs):
+        assert "power.draw" in args[1]
+        return subprocess.CompletedProcess(args, 0, stdout=csv + "\n", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", fake)
+    gpu = runner.gpu_snapshot(0)
+    assert gpu["compute_cap"] == "8.9"
+    assert gpu["power_w"] == 215.5
+    assert gpu["sm_clock_mhz"] == 2505
+    assert gpu["mem_clock_mhz"] == 10501
+    def na(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout=
+            csv.replace("215.5, 2505, 10501", "N/A, N/A, N/A") + "\n", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", na)
+    assert runner.gpu_snapshot(0)["sm_clock_mhz"] is None
+
+
 def test_actual_cli_summary_and_long_label():
     fields = extract_summary(CLI_LOG)
     assert fields["prompt tokens"] == "31042"

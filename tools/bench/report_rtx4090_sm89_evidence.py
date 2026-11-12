@@ -45,6 +45,14 @@ def median_ci(ratios: list[float], trials: int = 4000) -> tuple[float, float] | 
     return samples[int(trials * 0.025)], samples[int(trials * 0.975)]
 
 
+def number_or_none(raw) -> float | None:
+    try:
+        n = float(raw)
+        return n if math.isfinite(n) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def eligible_paired_samples(rows: list[dict], repetitions: int) -> tuple[list[dict], dict]:
     """Only comparable prompt AND generated-token lengths enter rate ratios.
 
@@ -163,6 +171,18 @@ def summarize(rows: list[dict], metadata: dict, expected_cases: list[dict]) -> d
                  "status": r["status"], "reason": r.get("error", "")}
                 for r in samples if r["status"] != "passed"],
             "max_observed_whole_gpu_vram_mib": max(gpu_mib, default=None),
+            "max_observed_gpu_power_w": max(
+                (n for row in samples
+                 if (n := number_or_none(row.get("gpu_peak_power_w"))) is not None),
+                default=None),
+            "min_observed_sm_clock_mhz": min(
+                (n for row in samples
+                 if (n := number_or_none(row.get("gpu_min_sm_clock_mhz"))) is not None),
+                default=None),
+            "max_observed_sm_clock_mhz": max(
+                (n for row in samples
+                 if (n := number_or_none(row.get("gpu_max_sm_clock_mhz"))) is not None),
+                default=None),
         })
     complete = (metadata.get("status") == "COMPLETE"
                 and metadata.get("warmup_count") == 2 * len(expected_cases)
