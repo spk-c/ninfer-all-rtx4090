@@ -21,9 +21,10 @@ def number(raw):
         return None
 
 
-def median_positive(rows: list[dict], key: str) -> float | None:
+def median_positive(rows: list[dict], key: str, allow_zero: bool = False) -> float | None:
     data = [value for row in rows if row.get("status") == "passed"
-            if (value := number(row.get(key))) is not None and value > 0]
+            if (value := number(row.get(key))) is not None
+            and (value >= 0 if allow_zero else value > 0)]
     return round(statistics.median(data), 4) if data else None
 
 
@@ -40,7 +41,8 @@ def descriptive(index: dict, name: str, arm: str, family: str) -> dict:
         "arm": arm,
         "successful_runs": len(rows),
         "median_" + metric: median_positive(rows, metric),
-        "median_acceptance_pct": median_positive(rows, "acceptance_pct"),
+        "median_acceptance_pct": median_positive(
+            rows, "acceptance_pct", allow_zero=True),
         "median_tokens_per_round": median_positive(rows, "tokens_per_round"),
         "median_whole_gpu_vram_mib": median_positive(rows, "gpu_peak_used_mib"),
         "gold_answer_pass_count": sum(

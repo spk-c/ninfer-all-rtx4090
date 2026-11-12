@@ -15,6 +15,8 @@ import random
 import statistics
 from typing import Sequence
 
+from tools.bench.analyze_rtx4090_sm89_sweeps import summarize_sweeps
+
 
 def paired_ratios(rows: list[dict], metric: str) -> tuple[list[float], int]:
     by_rep = defaultdict(dict)
@@ -181,6 +183,7 @@ def summarize(rows: list[dict], metadata: dict, expected_cases: list[dict]) -> d
         "nsight_qualification": "PENDING",
         "autopromote": False,
         "regression_cases": regression,
+        "parameter_sweeps": summarize_sweeps(rows, reps),
         "cases": evidence,
     }
 
@@ -221,7 +224,50 @@ def write_report(directory: Path, output: Path) -> dict:
         status = "complete" if c["valid"] else "INCOMPLETE / FAILED"
         lines.append(f"| {c['case']} | {c['pairs']}/{c['expected_pairs']} "
                      f"| {gain} | {ci} | {status} |")
-    lines += ["", "## Promotion status",
+    lines += [
+        "",
+        "## Configuration sweeps (exploratory; NOT a promotion decision)",
+        "",
+        "Rates are descriptive per configuration. Cross-configuration B/A ratios "
+        "are only reported when actual prompt/output counts and response hashes match.",
+        "",
+        "### DFlash2 — K5 reference",
+        "",
+        "| Arm | Fixture | K | Decode median tok/s | Acceptance | K vs K5 (equal output) |",
+        "|---|---|---:|---:|---:|---:|",
+    ]
+    sweep = report["parameter_sweeps"]
+    for entry in sweep["dflash2_k"]:
+        x = entry["descriptive"]
+        ratio = entry["against_k5"]
+        gain = (ratio["median_same_output_gain_pct"] if ratio else None)
+        lines.append(
+            f"| {entry['arm']} | {entry['fixture']} | {entry['draft_tokens']} "
+            f"| {x['median_decode_tok_s'] if x['median_decode_tok_s'] is not None else '—'} "
+            f"| {x['median_acceptance_pct'] if x['median_acceptance_pct'] is not None else '—'} "
+            f"| {f'{gain:+.2f}%' if gain is not None else '—'} |"
+        )
+    lines += [
+        "",
+        "### Prefill — cuBLAS on/off by chunk",
+        "",
+        "| Arm | Fixture | Chunk | Off median tok/s | On median tok/s | On vs off (equal output) |",
+        "|---|---|---:|---:|---:|---:|",
+    ]
+    for entry in sweep["prefill_cublas"]:
+        ratio = entry["on_vs_off"]["median_same_output_gain_pct"]
+        off = entry["off"]["median_prefill_tok_s"]
+        on = entry["on"]["median_prefill_tok_s"]
+        lines.append(
+            f"| {entry['arm']} | {entry['fixture']} | {entry['chunk']} "
+            f"| {off if off is not None else '—'} | {on if on is not None else '—'} "
+            f"| {f'{ratio:+.2f}%' if ratio is not None else '—'} |"
+        )
+    lines += ["", "### KV format / 32K–128K", "",
+              "Per-seed exact-gold passes, median throughput and observed whole-GPU VRAM "
+              "for rk4v4 and rk8v4 are in report.json > parameter_sweeps > kv_dtype. "
+              "Missing or OOM contexts remain explicitly unqualified.",
+              "", "## Promotion status",
               "",
               "Not eligible: independent coding-quality, long-context retrieval, "
               "precision/perplexity and Nsight sign-off are not attached.",
