@@ -36,10 +36,17 @@ FIELDS = (
 def extract_summary(stderr: str) -> dict[str, str]:
     """NInfer prints one stderr 'summary LABEL   VALUE' line per counter."""
     summary = {}
+    labels = ("dflash2 acceptance length", "dflash2 acceptance rate",
+              "gpu workspace peak", "kv cache dtype", "max context",
+              "finish reason", "prompt tokens", "generated tokens",
+              "prefill speed", "decode speed")
     for line in ANSI.sub("", stderr).splitlines():
-        match = re.match(r"^\s*summary\s+(.+?)\s{2,}(.+?)\s*$", line)
-        if match:
-            summary[match.group(1).strip()] = match.group(2).strip()
+        for label in labels:
+            match = re.match(r"^\s*summary\s+" + re.escape(label)
+                             + r"\s+(.+?)\s*$", line)
+            if match:
+                summary[label] = match.group(1).strip()
+                break
     return summary
 
 
@@ -119,6 +126,8 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
         raise ValueError("GPU 0 must be the dedicated GeForce RTX 4090")
     if gpu["used_mib"] > max_idle_used_mib or gpu["util_pct"] > 10.0:
         raise ValueError("GPU not idle or VRAM already occupied; stop other workloads first")
+    if not isinstance(gold, dict):
+        raise ValueError("gold answers must be a JSON object")
     if len(cases) != 54 or len({c["name"] for c in cases}) != 54:
         raise ValueError("unexpected matrix; exactly 54 distinct cases required")
     if manifest.get("model_sha256") is None:
@@ -198,9 +207,13 @@ def call_one(argv: list[str], timeout_s: int, device: int,
 
 
 def classify(case: dict, metrics: dict, stdout: str, code: int,
-             error: str, gold: dict) -> tuple[str, str, bool | None]:
+             error: str, gold: dict, stderr: str = "") -> tuple[str, str, bool | None]:
     if code != 0:
-        stderr = error.lower()
+        diagnostic = (error + "\n" + stderr).lower()
+        if re.search(r"out.of.memory|cudamalloc|cudaerrormemoryallocation|insufficient memory", diagnostic):
+            return "OOM", "GPU memory allocation failure", None
+        if "unsupported" in diagnostic and "context" in diagnostic:
+            return "unsupported", "context unsupported by artifact/runtime", None
         return ("timeout" if error == "timeout" else "failed", error or f"exit {code}", None)
     metric_key = "prefill_tok_s" if case["family"] == "prefill" else "decode_tok_s"
     speed = metrics.get(metric_key)
@@ -272,7 +285,10 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                     code, stdout, stderr, elapsed, telemetry, error = executor(
                         argv, timeout, 0)
                     metrics = parse_metrics(stderr)
-                    status, reason, gold_pass = classify(case, metrics, stdout, code, error, gold)
+                    status, reason, gold_pass = classify(
+                        case, metrics, stdout, code, error, gold, stderr)
+                    if status == "passed" and telemetry["gpu_peak_used_mib"] is None:
+                        status, reason = "failed", "missing sampled GPU/VRAM evidence"
                     stem = f"{case['name']}-rep{rep:02}-{arm}"
                     (raw / (stem + ".stdout.txt")).write_text(stdout, encoding="utf-8")
                     (raw / (stem + ".stderr.txt")).write_text(stderr, encoding="utf-8")
