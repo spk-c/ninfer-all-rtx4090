@@ -149,8 +149,15 @@ def create_plan(master: Path, candidate: Path, model: Path, fixtures: Path,
                 raise ValueError(f"required model or executable missing: {path}")
         if master.resolve() == candidate.resolve():
             raise ValueError("baseline and candidate resolve to the same binary")
-        if master.parent.name.casefold() != "apps" or candidate.parent.name.casefold() != "apps":
-            raise ValueError("keep each executable in its own apps build tree")
+        def valid_apps_binary(path: Path) -> bool:
+            parent = path.resolve().parent
+            return (parent.name.casefold() == "apps"
+                    or (parent.name.casefold() in
+                        {"release", "debug", "relwithdebinfo", "minsizerel"}
+                        and parent.parent.name.casefold() == "apps"))
+
+        if not valid_apps_binary(master) or not valid_apps_binary(candidate):
+            raise ValueError("keep each executable in its own apps or apps/Release build tree")
         missing = [str(fixtures / name) for name in fixture_names
                    if not (fixtures / name).is_file()]
         if missing:
