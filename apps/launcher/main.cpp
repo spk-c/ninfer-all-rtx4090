@@ -109,6 +109,23 @@ struct DeviceChoice {
     std::vector<int> devices;
 };
 
+// Product options taking a string consume the next token even when it resembles a
+// launcher switch (for example --prompt '--cuda-backend=13').
+bool consumes_product_text(std::string_view arg) {
+    return arg == "--prompt" || arg == "--system" || arg == "--chat-template" ||
+                 arg == "--prompt-file" || arg == "--system-file" || arg == "--messages" ||
+                 arg == "--stop" || arg == "--reasoning-stop" || arg == "--model-id" ||
+                 arg == "--api-key" || arg == "--host" || arg == "--device-profile-path" ||
+                 arg == "--context-cost-presets" || arg == "--prefix-cache-file" ||
+                 arg == "--disk-kv-path" || arg == "--request-log-jsonl" ||
+                 arg == "--thinking-budget-message" || arg == "--slot-save-path" ||
+                 arg == "--models-dir" || arg == "--models-preset" || arg == "--graft" ||
+                 arg == "--default-graft" || arg == "--ngram-table" || arg == "--ngram-profile" ||
+                 arg == "--corpus" || arg == "--text" || arg == "--output" ||
+                 arg == "--weights" || arg == "-m" || arg == "-f" || arg == "--output-file" ||
+                 arg == "--out" || arg == "--evaluate" || arg == "--config";
+}
+
 DeviceChoice scan_layer(const std::vector<std::string>& arguments, Options& options) {
     DeviceChoice choice;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -132,18 +149,7 @@ DeviceChoice scan_layer(const std::vector<std::string>& arguments, Options& opti
         }
         // Quoted prompt/template strings must not become launcher options. These
         // product flags consume text even when that text starts with '--'.
-        else if (arg == "--prompt" || arg == "--system" || arg == "--chat-template" ||
-                 arg == "--prompt-file" || arg == "--system-file" || arg == "--messages" ||
-                 arg == "--stop" || arg == "--reasoning-stop" || arg == "--model-id" ||
-                 arg == "--api-key" || arg == "--host" || arg == "--device-profile-path" ||
-                 arg == "--context-cost-presets" || arg == "--prefix-cache-file" ||
-                 arg == "--disk-kv-path" || arg == "--request-log-jsonl" ||
-                 arg == "--thinking-budget-message" || arg == "--slot-save-path" ||
-                 arg == "--models-dir" || arg == "--models-preset" || arg == "--graft" ||
-                 arg == "--default-graft" || arg == "--ngram-table" || arg == "--ngram-profile" ||
-                 arg == "--corpus" || arg == "--text" || arg == "--output" ||
-                 arg == "--weights" || arg == "-m" || arg == "-f" || arg == "--output-file" ||
-                 arg == "--out" || arg == "--evaluate") {
+        else if (consumes_product_text(arg)) {
             if (i + 1 < arguments.size()) {
 #ifdef NINFER_ROUTER_LAUNCHER
                 if (arg == "--models-dir") options.models_directory = arguments[i + 1];
@@ -175,6 +181,12 @@ Options parse(int argc, char** argv) {
     options.arguments.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
+        // Preserve opaque option values verbatim before parsing launcher-only switches.
+        if (consumes_product_text(arg)) {
+            options.arguments.push_back(argv[i]);
+            if (i + 1 < argc) options.arguments.push_back(argv[++i]);
+            continue;
+        }
         if (arg == "--cuda-backend" || arg.starts_with("--cuda-backend=")) {
             if (backend_seen) throw std::runtime_error("Specify --cuda-backend once");
             backend_seen = true;
