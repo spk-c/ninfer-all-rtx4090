@@ -480,14 +480,17 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
     except (OSError, ValueError) as exc:
         binary_integrity = str(exc)
     metadata["artifact_integrity"] = binary_integrity
-    metadata["status"] = (
-        "COMPLETE" if binary_integrity == "UNCHANGED"
-        and len(selected) == len(cases)
-        and metadata["warmup_failures"] == 0
-        and metadata["warmup_count"] == len(selected) * 2 else
-        "FAILED_WARMUP" if metadata["warmup_failures"] else "PARTIAL"
-    )
     metadata["successful_samples"] = sum(r["status"] == "passed" for r in all_rows)
+    if binary_integrity != "UNCHANGED":
+        metadata["status"] = "INVALID_ARTIFACT"
+    elif metadata["warmup_failures"]:
+        metadata["status"] = "FAILED_WARMUP"
+    elif metadata["successful_samples"] != len(all_rows):
+        metadata["status"] = "FAILED_SAMPLES"
+    elif len(selected) != len(cases) or metadata["warmup_count"] != 2 * len(selected):
+        metadata["status"] = "PARTIAL"
+    else:
+        metadata["status"] = "COMPLETE"
     metadata["total_samples"] = len(all_rows)
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return 0 if metadata["status"] == "COMPLETE" and all(

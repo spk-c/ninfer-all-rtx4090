@@ -159,3 +159,35 @@ def test_all_54_cases_complete_540_measurements_and_108_warmups(tmp_path, monkey
     assert report["autopromote"] is False
     assert report["quality_signoff"] == "PENDING_INDEPENDENT_REVIEW"
     assert report["nsight_qualification"] == "PENDING"
+
+
+def test_mid_campaign_mutation_is_not_labeled_partial(tmp_path, monkeypatch):
+    plan_dir, manifest, cases, master, candidate, gold = make_fake_strict_manifest(tmp_path)
+    monkeypatch.setattr(
+        collector, "validate_plan",
+        lambda *args: (manifest, cases, {"A": master, "B": candidate}),
+    )
+    changed = False
+    def mutate_during_measurement(argv, timeout, device):
+        nonlocal changed
+        result = fake_executor(argv, timeout, device)
+        if not changed:
+            (Path(manifest["fixtures_dir"]) / "coding-short.json").write_text("tampered")
+            changed = True
+        return result
+    out = tmp_path / "tampered-execution"
+    result = collector.run_campaign(
+        plan_dir, out, tmp_path / "master", tmp_path / "candidate", gold,
+        reps=5, max_cases=1, idle_limit=2048, timeout=3,
+        gpu_probe=lambda index: {"gpu_index": index, "used_mib": 0, "util_pct": 0},
+        executor=mutate_during_measurement,
+    )
+    meta = json.loads((out / "metadata.json").read_text())
+    assert result == 2
+    assert meta["status"] == "INVALID_ARTIFACT"
+    assert "fixture changed" in meta["artifact_integrity"]
+    assert meta["total_samples"] == 10
+    assert meta["warmup_count"] == 2
+    report = reporter.write_report(out, tmp_path / "unqualified-report")
+    assert not report["complete"]
+    assert not report["autopromote"]
