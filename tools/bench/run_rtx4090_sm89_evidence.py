@@ -79,7 +79,7 @@ def parse_metrics(stderr: str) -> dict:
     }
 
 
-SMI_FIELDS = "index,name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu"
+SMI_FIELDS = "index,name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,compute_cap"
 
 
 def gpu_snapshot(device: int) -> dict:
@@ -93,7 +93,7 @@ def gpu_snapshot(device: int) -> dict:
         raise RuntimeError("nvidia-smi unavailable; no qualified GPU evidence") from exc
     for line in result.stdout.splitlines():
         cols = [c.strip() for c in line.split(",")]
-        if len(cols) != 7:
+        if len(cols) != 8:
             continue
         if int(cols[0]) == device:
             def number(i: int) -> float:
@@ -102,6 +102,7 @@ def gpu_snapshot(device: int) -> dict:
                 "gpu_index": device, "gpu_name": cols[1], "driver": cols[2],
                 "total_mib": number(3), "used_mib": number(4),
                 "util_pct": number(5), "temp_c": number(6),
+                "compute_cap": cols[7],
             }
     raise RuntimeError(f"nvidia-smi device index {device} not found")
 
@@ -124,16 +125,29 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
         raise ValueError("candidate source tree HEAD differs from plan SHA; regenerate plan")
     if not ("RTX 4090" in gpu["gpu_name"] and gpu["gpu_index"] == 0):
         raise ValueError("GPU 0 must be the dedicated GeForce RTX 4090")
+    if gpu.get("compute_cap") != "8.9":
+        raise ValueError("GPU compute capability must be Ada sm_89 (8.9)")
     if gpu["used_mib"] > max_idle_used_mib or gpu["util_pct"] > 10.0:
         raise ValueError("GPU not idle or VRAM already occupied; stop other workloads first")
     if not isinstance(gold, dict):
         raise ValueError("gold answers must be a JSON object")
     if len(cases) != 54 or len({c["name"] for c in cases}) != 54:
         raise ValueError("unexpected matrix; exactly 54 distinct cases required")
+    if not manifest.get("inputs_verified_at_plan"):
+        raise ValueError("plan must be generated with --strict and frozen artifact hashes")
     if manifest.get("model_sha256") is None:
         raise ValueError("plan lacks model SHA256; recreate with the artifact present")
     if sha256_file(Path(manifest["model"])) != manifest["model_sha256"]:
         raise ValueError("model changed after plan generation")
+    fixtures = Path(manifest["fixtures_dir"])
+    for name, digest in manifest.get("fixture_sha256", {}).items():
+        if sha256_file(fixtures / name) != digest:
+            raise ValueError("fixture was modified after plan generation: " + name)
+    if len(manifest.get("fixture_sha256", {})) != 18:
+        raise ValueError("plan has fewer than 18 immutable coding/context fixtures")
+    if (sha256_file(fixtures / "gold-answers.json") !=
+            manifest.get("gold_answers_sha256")):
+        raise ValueError("gold answers changed after plan generation")
     a, b = (Path(manifest[k]) for k in ("master_executable", "candidate_executable"))
     preflight(a, b, allow_separate_dirs=True)
     # Gold answers must be independently curated; only a verified expected token
