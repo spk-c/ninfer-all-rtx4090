@@ -7,7 +7,7 @@ import pytest
 from tools.bench.plan_rtx4090_sm89 import (
     BASE_SHA, CONTEXTS, DECODE_METRIC, DRAFT_K, KV_TYPES, PREFILL_CHUNKS,
     PREFILL_METRIC, SEEDS, ab_command, build_cases, command_tokens,
-    create_plan, nsight_commands,
+    create_plan, nsight_commands, binary_fingerprint,
 )
 
 
@@ -87,6 +87,23 @@ def test_plan_is_evidence_free_and_never_overwrites(tmp_path):
     assert len(json.loads((out / "ab-commands.json").read_text())) == 54
     with pytest.raises(ValueError, match="overwrite"):
         create_plan(*params)
+
+
+def test_binary_hash_covers_executable_and_runtime_dlls(tmp_path):
+    directory = tmp_path / "apps" / "Release"
+    directory.mkdir(parents=True)
+    exe = directory / "ninfer.exe"
+    dll = directory / "ninfer_kernels.dll"
+    exe.write_bytes(b"build-A")
+    dll.write_bytes(b"kernel-v1")
+    first = binary_fingerprint(exe)
+    assert first["exe_sha256"]
+    assert first["adjacent_runtime_sha256"]["ninfer_kernels.dll"]
+    dll.write_bytes(b"kernel-v2")
+    assert binary_fingerprint(exe) != first
+    dll.write_bytes(b"kernel-v1")
+    exe.write_bytes(b"build-B")
+    assert binary_fingerprint(exe) != first
 
 
 def test_preflight_rejects_unqualified_runs(tmp_path):

@@ -129,6 +129,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def binary_fingerprint(executable: Path) -> dict:
+    """Pin the actual executable and adjacent native runtime libraries.
+
+    This proves build *immutability* between plan and collection, not by itself
+    that an executable was compiled from the stated source commit. The caller
+    must additionally preserve the build provenance and git revision.
+    """
+    if not executable.is_file():
+        raise ValueError("binary missing for SHA-256 fingerprint: " + str(executable))
+    libraries = sorted(
+        (p for p in executable.parent.iterdir()
+         if p.is_file() and p.suffix.lower() in (".dll", ".pyd")),
+        key=lambda p: p.name.lower(),
+    )
+    return {
+        "exe_sha256": sha256_file(executable),
+        "adjacent_runtime_sha256": {p.name: sha256_file(p) for p in libraries},
+    }
+
+
 def create_plan(master: Path, candidate: Path, model: Path, fixtures: Path,
                 candidate_sha: str, repetitions: int, out: Path,
                 strict: bool = False) -> dict:
@@ -173,11 +193,15 @@ def create_plan(master: Path, candidate: Path, model: Path, fixtures: Path,
     gold_hash = sha256_file(gold_path) if gold_path.is_file() else None
     out.mkdir(parents=True)
     model_hash = sha256_file(model) if model.is_file() else None
+    binary_hashes = ({
+        "A": binary_fingerprint(master), "B": binary_fingerprint(candidate)
+    } if strict else None)
     manifest = {
-        "schema": "ninfer_rtx4090_sm89_ab_plan_v1",
+        "schema": "ninfer_rtx4090_sm89_ab_plan_v2",
         "baseline_commit_sha": BASE_SHA,
         "candidate_commit_sha": candidate_sha.lower(),
         "master_executable": str(master), "candidate_executable": str(candidate),
+        "binary_fingerprints": binary_hashes,
         "model": str(model), "model_sha256": model_hash,
         "model_hash_verified": model_hash is not None,
         "fixture_sha256": fixture_hashes,

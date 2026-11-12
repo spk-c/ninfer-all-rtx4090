@@ -18,7 +18,9 @@ import threading
 import time
 from typing import Sequence
 
-from tools.bench.plan_rtx4090_sm89 import BASE_SHA, sha256_file, build_cases
+from tools.bench.plan_rtx4090_sm89 import (
+    BASE_SHA, sha256_file, build_cases, binary_fingerprint,
+)
 from tools.bench.run_interleaved_ab import preflight
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -160,10 +162,27 @@ def command_for_case(case: dict, arm: str, manifest: dict, binaries: dict) -> li
     ]
 
 
+def verify_binary_fingerprints(manifest: dict) -> dict:
+    expected = manifest.get("binary_fingerprints")
+    if not isinstance(expected, dict) or set(expected) != {"A", "B"}:
+        raise ValueError("strict plan is missing both executable/runtime SHA-256 fingerprints")
+    paths = {"A": Path(manifest["master_executable"]),
+             "B": Path(manifest["candidate_executable"])}
+    current = {arm: binary_fingerprint(path) for arm, path in paths.items()}
+    for arm in ("A", "B"):
+        if current[arm] != expected[arm]:
+            raise ValueError(
+                f"{arm} executable or adjacent runtime DLLs changed after plan generation; "
+                "rebuild, rerun --strict plan and repeat all measurements")
+    return current
+
+
 def validate_plan(directory: Path, source_a: Path, source_b: Path,
                   max_idle_used_mib: float, gpu: dict, gold: dict) -> tuple[dict, list, dict]:
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     cases = json.loads((directory / "cases.json").read_text(encoding="utf-8"))
+    if manifest.get("schema") != "ninfer_rtx4090_sm89_ab_plan_v2":
+        raise ValueError("strict binary fingerprint schema v2 required; regenerate plan")
     if manifest.get("baseline_commit_sha") != BASE_SHA:
         raise ValueError("baseline is not the required fixed master SHA")
     if commit_sha(source_a) != BASE_SHA:
@@ -198,6 +217,7 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
             manifest.get("gold_answers_sha256")):
         raise ValueError("gold answers changed after plan generation")
     a, b = (Path(manifest[k]) for k in ("master_executable", "candidate_executable"))
+    verify_binary_fingerprints(manifest)
     preflight(a, b, allow_separate_dirs=True)
     # Gold answers must be independently curated; only a verified expected token
     # can qualify long-context retrieval. The benchmark never guesses one.
@@ -215,9 +235,9 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
     for c in cases:
         e = expected[c["name"]]
         if (c["family"], c["fixture"], c["max_context"], c["flags"],
-            c["minimum_prompt_tokens"]) != (
+            c["minimum_prompt_tokens"], c["max_new"], c["metric"]) != (
             e.family, e.fixture, e.max_context, list(e.flags),
-            e.minimum_prompt_tokens):
+            e.minimum_prompt_tokens, e.max_new, e.metric):
             raise ValueError("case configuration differs from reviewed matrix")
         fixture_path = Path(manifest["fixtures_dir"]) / c["fixture"]
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -342,6 +362,11 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
     initial = gpu_probe(0)
     manifest, cases, binaries = validate_plan(
         plan_dir, source_a, source_b, idle_limit, initial, gold)
+    canonical_gold = Path(manifest["fixtures_dir"]) / "gold-answers.json"
+    if gold_path.resolve() != canonical_gold.resolve():
+        raise ValueError("gold-answer file must be the exact hashed fixture manifest input")
+    if sha256_file(gold_path) != manifest["gold_answers_sha256"]:
+        raise ValueError("supplied gold-answer file changed after plan generation")
     if reps != manifest["repetitions"]:
         raise ValueError("repetitions must equal the plan; regenerate instead of changing runs")
     selected = cases[:max_cases] if max_cases else cases
@@ -351,6 +376,7 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
     metadata = {
         "plan_manifest": manifest, "gpu_start": initial,
         "exe_sha256": {arm: sha256_file(path) for arm, path in binaries.items()},
+        "binary_fingerprints": manifest["binary_fingerprints"],
         "gold_answers_sha256": sha256_file(gold_path),
         "status": "IN_PROGRESS", "selected_cases": len(selected),
         "warmup_count": 0, "warmup_failures": 0,
@@ -422,8 +448,17 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                     all_rows.append(row)
                     print(f"{stem}: {status}; {row['prefill_tok_s']} prefill / "
                           f"{row['decode_tok_s']} decode tok/s", flush=True)
+    # Detect replaced EXE/DLL files during a long campaign. Preserve all raw
+    # evidence but disqualify the result if the runtime's bytes changed.
+    try:
+        verify_binary_fingerprints(manifest)
+        binary_integrity = "UNCHANGED"
+    except ValueError as exc:
+        binary_integrity = str(exc)
+    metadata["binary_integrity"] = binary_integrity
     metadata["status"] = (
-        "COMPLETE" if len(selected) == len(cases)
+        "COMPLETE" if binary_integrity == "UNCHANGED"
+        and len(selected) == len(cases)
         and metadata["warmup_failures"] == 0
         and metadata["warmup_count"] == len(selected) * 2 else
         "FAILED_WARMUP" if metadata["warmup_failures"] else "PARTIAL"

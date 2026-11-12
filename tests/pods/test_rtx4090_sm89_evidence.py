@@ -8,7 +8,7 @@ import pytest
 from tools.bench.plan_rtx4090_sm89 import BASE_SHA, build_cases
 from tools.bench.run_rtx4090_sm89_evidence import (
     classify, extract_summary, parse_metrics, run_campaign, validate_plan,
-    rotate_cases, command_for_case,
+    rotate_cases, command_for_case, verify_binary_fingerprints,
 )
 from tools.bench.report_rtx4090_sm89_evidence import (
     paired_ratios, median_ci, summarize, write_report,
@@ -236,6 +236,27 @@ def test_report_generates_real_artifacts_without_simulated_speed(tmp_path):
     assert (out / "summary.md").is_file()
     with pytest.raises(ValueError, match="overwrite"):
         write_report(evidence, out)
+
+
+def test_plan_rejects_replaced_binary_and_dll(tmp_path):
+    from tools.bench.plan_rtx4090_sm89 import binary_fingerprint
+    a = tmp_path / "a" / "apps" / "Release" / "ninfer.exe"
+    b = tmp_path / "b" / "apps" / "Release" / "ninfer.exe"
+    for exe in (a, b):
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"binary")
+        (exe.parent / "ninfer_kernels.dll").write_bytes(b"v1")
+    manifest = {
+        "master_executable": str(a), "candidate_executable": str(b),
+        "binary_fingerprints": {"A": binary_fingerprint(a), "B": binary_fingerprint(b)},
+    }
+    assert verify_binary_fingerprints(manifest) == manifest["binary_fingerprints"]
+    (b.parent / "ninfer_kernels.dll").write_bytes(b"modified!")
+    with pytest.raises(ValueError, match="runtime DLLs changed"):
+        verify_binary_fingerprints(manifest)
+    manifest["binary_fingerprints"] = None
+    with pytest.raises(ValueError, match="missing both"):
+        verify_binary_fingerprints(manifest)
 
 
 def test_invalid_run_parameters_fail_before_any_hardware_call(tmp_path):
