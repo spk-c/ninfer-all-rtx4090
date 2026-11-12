@@ -13,6 +13,7 @@
 // of L2, so a warm loop measures a residency production never has.
 
 #include "core/device.h"
+#include "common/gpu_activity.cuh"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer_bench_common.h"
@@ -70,6 +71,7 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> tokens;
     int repeat = 9;
     int warmup = 3;
+    int condition_us = 0; // optional process-local GPU conditioning
     // Permute the weight into the panel layout and let the routes read it there, so the A8 column
     // measures the production kernel -- epilogue included -- on the layout the probe measured.
     bool panel = false;
@@ -89,10 +91,16 @@ int main(int argc, char** argv) {
             repeat = std::atoi(argv[++i]);
         } else if (arg == "--warmup" && i + 1 < argc) {
             warmup = std::atoi(argv[++i]);
+        } else if (arg == "--condition-us" && i + 1 < argc) {
+            condition_us = std::atoi(argv[++i]);
+            if (condition_us < 0 || condition_us > 2000000) {
+                std::fprintf(stderr, "--condition-us must be 0..2000000 microseconds\n");
+                return 2;
+            }
         } else if (arg == "--panel") {
             panel = true;
         } else {
-            std::fprintf(stderr, "usage: %s [--tokens T,...] [--repeat N] [--warmup N]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--tokens T,...] [--repeat N] [--warmup N] [--condition-us MICROSECONDS] [--panel]\n", argv[0]);
             return 2;
         }
     }
@@ -164,6 +172,13 @@ int main(int argc, char** argv) {
                     }
                 };
                 try {
+                    if (condition_us > 0) {
+                        ninfer::bench::condition_gpu(
+                            {.stream = stream,
+                             .multiprocessor_count = properties.multiProcessorCount},
+                            condition_us);
+                        CUDA_CHECK(cudaStreamSynchronize(stream));
+                    }
                     cell_us[p] =
                         ninfer::bench::measure_cold_launch(invoke, flush, stream, warmup, repeat)
                             .median_us;
