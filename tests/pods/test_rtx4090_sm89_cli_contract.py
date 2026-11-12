@@ -27,12 +27,14 @@ def test_all_planned_cli_switches_exist_in_options_parser():
         args = command_tokens(case, Path("model.ninfer"), Path("fixtures"))
         actual.update(value for value in args if value.startswith("--"))
     assert actual == known
-    # Negative boolean switches are implemented by product::switch_option
-    # rather than an explicit "--no-..." parse branch.
-    assert 'switch_option(arg, "prefill-cublas"' in OPTIONS
-    assert 'switch_option(arg, "thinking"' in OPTIONS
-    for flag in actual - {"--no-prefill-cublas", "--no-thinking"}:
-        assert f'"{flag}"' in OPTIONS
+    # Positive/negative boolean switches are implemented by
+    # product::switch_option, not literal flag comparisons in the parser.
+    boolean_names = {"prefill-cublas", "thinking", "greedy", "gdn-state-fp16"}
+    for name in boolean_names:
+        assert f'switch_option(arg, "{name}"' in OPTIONS
+    for flag in actual:
+        if flag.removeprefix("--").removeprefix("no-") not in boolean_names:
+            assert f'"{flag}"' in OPTIONS
 
 
 def test_spec_none_and_dflash2_and_rotated_kv_formatting_are_real():
