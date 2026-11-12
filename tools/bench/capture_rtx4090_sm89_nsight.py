@@ -101,9 +101,21 @@ def execute_plan(runs: list[dict], timeout: int,
             code, stdout, stderr = -1, "", str(exc)
         (prefix.parent / (name + ".stdout.log")).write_text(stdout, encoding="utf-8")
         (prefix.parent / (name + ".stderr.log")).write_text(stderr, encoding="utf-8")
+        expected_ext = ".nsys-rep" if item["tool"] == "nsys" else ".ncu-rep"
+        artifact = Path(str(prefix) + expected_ext)
+        valid_report = code == 0 and artifact.is_file() and artifact.stat().st_size > 0
         item["exit_code"] = code
-        item["status"] = "captured" if code == 0 else "FAILED"
-        item["error"] = stderr[-1000:] if code != 0 else None
+        item["status"] = (
+            "captured" if valid_report else
+            "MISSING_REPORT" if code == 0 else "FAILED"
+        )
+        item["report_path"] = str(artifact) if valid_report else None
+        item["report_sha256"] = sha256_file(artifact) if valid_report else None
+        item["error"] = (
+            stderr[-1000:] if code != 0 else
+            "Profiler returned success but no nonempty Nsight report was found"
+            if not valid_report else None
+        )
     return runs
 
 
