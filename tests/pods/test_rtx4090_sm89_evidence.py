@@ -9,6 +9,7 @@ from tools.bench.plan_rtx4090_sm89 import BASE_SHA, build_cases
 from tools.bench.run_rtx4090_sm89_evidence import (
     classify, extract_summary, parse_metrics, run_campaign, validate_plan,
     rotate_cases, command_for_case, verify_binary_fingerprints,
+    verify_input_fingerprints,
 )
 from tools.bench.report_rtx4090_sm89_evidence import (
     paired_ratios, median_ci, summarize, write_report,
@@ -20,6 +21,7 @@ summary     prompt tokens             31042
 summary     generated tokens          128
 summary     prefill speed             270.50 tok/s
 summary     decode speed              84.55 tok/s
+summary     finish reason             output-limit
 summary     max context               32768
 summary     kv cache dtype            rotated-lloyd4g64-v4g32
 summary     gpu workspace peak        200 MiB / 500 MiB
@@ -60,6 +62,7 @@ def test_actual_cli_summary_and_long_label():
     assert values["acceptance_pct"] == 71.02
     assert values["tokens_per_round"] == 2.71
     assert values["max_context_reported"] == 32768
+    assert values["finish_reason"] == "output-limit"
     assert values["kv_dtype_reported"] == "rotated-lloyd4g64-v4g32"
     assert values["workspace_peak"].startswith("200 MiB")
 
@@ -91,6 +94,7 @@ def test_gold_answer_and_oom_classification():
     expected = {kv.fixture: {"expected": "C0DE-REFERENCE-123"}}
     assert classify(case, values, "C0DE-REFERENCE-123", 0, "", expected)[0] == "passed"
     assert classify(case, values, "wrong output", 0, "", expected)[0] == "quality_regression"
+    assert classify(case, values, "c0de-reference-123", 0, "", expected)[0] == "quality_regression"
     assert classify(case, values, "Correct: C0DE-REFERENCE-123", 0, "", expected)[0] == "quality_regression"
     assert classify(case, values, "```text\nC0DE-REFERENCE-123\n```", 0, "", expected)[0] == "passed"
     wrong_dtype = dict(values, kv_dtype_reported="rotated-k8g64-v4g32")
@@ -112,6 +116,18 @@ def test_rk8v4_uses_its_actual_cli_summary_name():
     assert classify(case, values, "C0DE-REFERENCE-123", 0, "", gold)[0] == "passed"
     values["kv_dtype_reported"] = "rotated-k4e8g64-v4g32"
     assert classify(case, values, "C0DE-REFERENCE-123", 0, "", gold)[0] == "failed"
+
+
+def test_context_exhaustion_and_cancelled_generation_do_not_qualify():
+    from dataclasses import asdict
+    case = asdict(next(c for c in build_cases() if c.family == "dflash2"))
+    metrics = parse_metrics(CLI_LOG)
+    metrics["finish_reason"] = "context-capacity"
+    assert classify(case, metrics, "some answer", 0, "", {})[0] == "insufficient_context"
+    metrics["finish_reason"] = "cancelled"
+    assert classify(case, metrics, "some answer", 0, "", {})[0] == "failed"
+    metrics["finish_reason"] = None
+    assert classify(case, metrics, "some answer", 0, "", {})[0] == "failed"
 
 
 def test_order_rotates_and_commands_pin_the_seed():
@@ -273,6 +289,37 @@ def test_plan_rejects_replaced_binary_and_dll(tmp_path):
     manifest["binary_fingerprints"] = None
     with pytest.raises(ValueError, match="missing both"):
         verify_binary_fingerprints(manifest)
+
+
+def test_model_and_gold_files_cannot_change_during_campaign(tmp_path):
+    from tools.bench.plan_rtx4090_sm89 import sha256_file
+    model = tmp_path / "model.ninfer"
+    model.write_bytes(b"model1")
+    fixtures = tmp_path / "inputs"
+    fixtures.mkdir()
+    paths = [fixtures / f"kv-file-{i}.json" for i in range(18)]
+    for path in paths:
+        path.write_text("[]")
+    gold = fixtures / "gold-answers.json"
+    gold.write_text("{}")
+    manifest = {
+        "model": str(model), "model_sha256": sha256_file(model),
+        "fixtures_dir": str(fixtures),
+        "fixture_sha256": {path.name: sha256_file(path) for path in paths},
+        "gold_answers_sha256": sha256_file(gold),
+    }
+    verify_input_fingerprints(manifest)
+    model.write_bytes(b"model2")
+    with pytest.raises(ValueError, match="model artifact changed"):
+        verify_input_fingerprints(manifest)
+    model.write_bytes(b"model1")
+    paths[0].write_text("[1]")
+    with pytest.raises(ValueError, match="fixture changed"):
+        verify_input_fingerprints(manifest)
+    paths[0].write_text("[]")
+    gold.write_text('{"bad":true}')
+    with pytest.raises(ValueError, match="gold-answer fixture changed"):
+        verify_input_fingerprints(manifest)
 
 
 def test_invalid_run_parameters_fail_before_any_hardware_call(tmp_path):

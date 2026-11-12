@@ -162,7 +162,23 @@ def command_for_case(case: dict, arm: str, manifest: dict, binaries: dict) -> li
     ]
 
 
-def verify_binary_fingerprints(manifest: dict) -> dict:
+def verify_input_fingerprints(manifest: dict) -> None:
+    """Fail closed if the model, gold or any 18 fixtures changed mid-campaign."""
+    model_path = Path(manifest["model"])
+    if sha256_file(model_path) != manifest.get("model_sha256"):
+        raise ValueError("model artifact changed during the benchmark campaign")
+    fixtures = Path(manifest["fixtures_dir"])
+    hashes = manifest.get("fixture_sha256", {})
+    if len(hashes) != 18:
+        raise ValueError("strict manifest needs exactly 18 pinned fixtures")
+    for filename, expected in hashes.items():
+        if sha256_file(fixtures / filename) != expected:
+            raise ValueError("fixture changed during the benchmark campaign: " + filename)
+    if sha256_file(fixtures / "gold-answers.json") != manifest.get("gold_answers_sha256"):
+        raise ValueError("gold-answer fixture changed during the benchmark campaign")
+
+
+def verify_binary_fingerprints(manifest: dict):
     expected = manifest.get("binary_fingerprints")
     if not isinstance(expected, dict) or set(expected) != {"A", "B"}:
         raise ValueError("strict plan is missing both executable/runtime SHA-256 fingerprints")
@@ -205,17 +221,7 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
         raise ValueError("plan must be generated with --strict and frozen artifact hashes")
     if manifest.get("model_sha256") is None:
         raise ValueError("plan lacks model SHA256; recreate with the artifact present")
-    if sha256_file(Path(manifest["model"])) != manifest["model_sha256"]:
-        raise ValueError("model changed after plan generation")
-    fixtures = Path(manifest["fixtures_dir"])
-    for name, digest in manifest.get("fixture_sha256", {}).items():
-        if sha256_file(fixtures / name) != digest:
-            raise ValueError("fixture was modified after plan generation: " + name)
-    if len(manifest.get("fixture_sha256", {})) != 18:
-        raise ValueError("plan has fewer than 18 immutable coding/context fixtures")
-    if (sha256_file(fixtures / "gold-answers.json") !=
-            manifest.get("gold_answers_sha256")):
-        raise ValueError("gold answers changed after plan generation")
+    verify_input_fingerprints(manifest)
     a, b = (Path(manifest[k]) for k in ("master_executable", "candidate_executable"))
     verify_binary_fingerprints(manifest)
     preflight(a, b, allow_separate_dirs=True)
@@ -310,7 +316,7 @@ def canonical_gold_answer(text: str) -> str:
             result = "\n".join(lines[1:-1]).strip()
     if len(result) >= 2 and result[0] == result[-1] and result[0] in ("\"", "'"):
         result = result[1:-1].strip()
-    return result.casefold()
+    return result
 
 
 KV_SUMMARY_DTYPE = {
@@ -353,11 +359,16 @@ def classify(case: dict, metrics: dict, stdout: str, code: int,
         return "insufficient_context", "actual prompt is too short or lacks decode headroom", None
     if not metrics.get("generated_tokens"):
         return "failed", "zero generated output tokens", None
+    reason = metrics.get("finish_reason")
+    if reason == "context-capacity":
+        return "insufficient_context", "generation hit the context capacity ceiling", None
+    if reason not in ("output-limit", "stop-token", "stop-string"):
+        return "failed", f"unexpected or missing CLI finish reason: {reason!r}", None
     if case["family"] == "dflash2" and metrics.get("acceptance_pct") is None:
         return "failed", "DFlash2 acceptance unavailable", None
     if case["family"] == "kv":
         answer = gold[case["fixture"]]["expected"]
-        ok = canonical_gold_answer(stdout) == answer.strip().casefold()
+        ok = canonical_gold_answer(stdout) == answer.strip()
         return ("passed", "", True) if ok else (
             "quality_regression", "generated answer differs from exact gold", False)
     return "passed", "", None
@@ -464,10 +475,11 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
     # evidence but disqualify the result if the runtime's bytes changed.
     try:
         verify_binary_fingerprints(manifest)
+        verify_input_fingerprints(manifest)
         binary_integrity = "UNCHANGED"
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         binary_integrity = str(exc)
-    metadata["binary_integrity"] = binary_integrity
+    metadata["artifact_integrity"] = binary_integrity
     metadata["status"] = (
         "COMPLETE" if binary_integrity == "UNCHANGED"
         and len(selected) == len(cases)
