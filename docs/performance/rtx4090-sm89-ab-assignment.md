@@ -35,11 +35,11 @@ Generate the requested 18 JSON chat fixtures **locally** from a clean copy of th
 
 ```powershell
 # Checkout source A at the exact fixed master SHA.
-git worktree add C:\\ninfer-master-snapshot f879a2db06c15133260551a104feaf03886cc620
+git worktree add C:\ninfer-master-snapshot f879a2db06c15133260551a104feaf03886cc620
 
 python -m tools.bench.make_rtx4090_sm89_fixtures `
-  --source-master 'C:\\ninfer-master-snapshot' `
-  --out 'C:\\ninfer-fixtures\\rtx4090-sm89' `
+  --source-master 'C:\ninfer-master-snapshot' `
+  --out 'C:\ninfer-fixtures\rtx4090-sm89' `
   --chars-per-token 3.0
 ```
 
@@ -51,13 +51,13 @@ After the baseline and candidate have each been built at their own **recorded co
 
 ```powershell
 python -m tools.bench.run_rtx4090_sm89_evidence `
-  --plan-dir '.\\profiles\\bench\\sm89-qual-001' `
-  --master-source 'C:\\ninfer-master-snapshot' `
-  --candidate-source 'C:\\ninfer-candidate' `
-  --gold-answers 'C:\\ninfer-fixtures\\rtx4090-sm89\\gold-answers.json' `
+  --plan-dir '.\profiles\bench\sm89-qual-001' `
+  --master-source 'C:\ninfer-master-snapshot' `
+  --candidate-source 'C:\ninfer-candidate' `
+  --gold-answers 'C:\ninfer-fixtures\rtx4090-sm89\gold-answers.json' `
   --repetitions 5 `
   --max-idle-vram-mib 2048 `
-  --out '.\\profiles\\bench\\sm89-evidence-001'
+  --out '.\profiles\bench\sm89-evidence-001'
 ```
 
 The collector verifies the **actual** master and candidate Git HEAD hashes, the model/fixture/gold SHA-256 values frozen in the plan, runtime paths, CUDA compute capability **8.9**, GPU idle state and all 54 checked-in case definitions. It alternates AB/BA per case and repetition, samples whole-card GPU memory, records the CLI's actual token counts and draft acceptance, and saves all 540 stdout/stderr logs and sample metrics to `samples.csv`. GPU-memory samples are from `nvidia-smi` and represent **total card occupancy**, not a per-process allocation profile; the CLI separately reports its workspace peak. A `--max-cases 1` smoke run is allowed but is marked **PARTIAL** and cannot qualify any release.
@@ -68,8 +68,8 @@ The collector verifies the **actual** master and candidate Git HEAD hashes, the 
 
 ```powershell
 python -m tools.bench.report_rtx4090_sm89_evidence `
-  --evidence-dir '.\\profiles\\bench\\sm89-evidence-001' `
-  --out '.\\profiles\\bench\\sm89-report-001'
+  --evidence-dir '.\profiles\bench\sm89-evidence-001' `
+  --out '.\profiles\bench\sm89-report-001'
 ```
 
 This emits `report.json` and `summary.md`: median paired B/A, seeded bootstrap 95% interval, complete-pair count, negative/zero-gain pairs, divergent answer hashes, peak **whole-card** VRAM and explicit failures/OOM. The report **never automatically promotes kernel routes**. Review coding answer correctness and attach actual Nsight profiles, precision/perplexity evidence, release CI and long-context gold accuracy before proposing an opt-in implementation. A generated plan, completed report or microbenchmark alone is not sufficient.
