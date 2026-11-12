@@ -25,7 +25,7 @@ KEYWORDS = (
     "cache", "context", "snapshot", "spill", "checkpoint", "kv",
     "prefix", "replay", "prefill", "host_", "disk_", "state_",
     "admission", "waiting", "paused", "request_queue", "first_token",
-    "hydration", "restore", "transfer", "tokens_predicted",
+    "hydration", "restore", "transfer", "tokens_predicted", "prompt_tokens",
 )
 
 
