@@ -163,6 +163,8 @@ def summarize(rows: list[dict], metadata: dict, expected_cases: list[dict]) -> d
             "max_observed_whole_gpu_vram_mib": max(gpu_mib, default=None),
         })
     complete = (metadata.get("status") == "COMPLETE"
+                and metadata.get("warmup_count") == 2 * len(expected_cases)
+                and metadata.get("warmup_failures") == 0
                 and len(rows) == len(expected_cases) * 2 * reps
                 and all(x["valid"] for x in evidence))
     regression = [x for x in evidence if x["valid"]

@@ -8,6 +8,7 @@ import pytest
 from tools.bench.plan_rtx4090_sm89 import BASE_SHA, build_cases
 from tools.bench.run_rtx4090_sm89_evidence import (
     classify, extract_summary, parse_metrics, run_campaign, validate_plan,
+    rotate_cases, command_for_case,
 )
 from tools.bench.report_rtx4090_sm89_evidence import (
     paired_ratios, median_ci, summarize, write_report,
@@ -76,6 +77,23 @@ def test_gold_answer_and_oom_classification():
                     "CUDA out of memory")[0] == "OOM"
 
 
+def test_order_rotates_and_commands_pin_the_seed():
+    rows = [{"name": name} for name in ("dflash", "prefill", "kv", "q5")]
+    assert [x["name"] for x in rotate_cases(rows, 1)] == [
+        "dflash", "prefill", "kv", "q5"]
+    assert [x["name"] for x in rotate_cases(rows, 2)] == [
+        "dflash", "q5", "kv", "prefill"]
+    assert set(x["name"] for x in rotate_cases(rows, 7)) == {
+        "dflash", "prefill", "kv", "q5"}
+    from dataclasses import asdict
+    case = asdict(next(c for c in build_cases() if c.family == "dflash2"))
+    command = command_for_case(case, "A", {
+        "model": "qwen.ninfer", "fixtures_dir": "fixtures"}, {
+        "A": "master/apps/Release/ninfer.exe"})
+    assert command[command.index("--seed") + 1] == "4090"
+    assert command[command.index("--draft-tokens") + 1] == "3"
+
+
 def test_paired_statistics_use_per_rep_ratios_not_ratio_of_medians():
     rows = []
     for rep, a, b in [(1, 10, 12), (2, 100, 108), (3, 30, 33),
@@ -122,7 +140,8 @@ def test_high_decode_rate_cannot_mask_different_output_lengths():
              "decode_tok_s": "200", "prompt_tokens": "1000",
              "generated_tokens": "99", "answer_sha256": "bbbb"},
         ))
-    meta = {"status": "COMPLETE", "plan_manifest": {
+    meta = {"status": "COMPLETE", "warmup_count": 2, "warmup_failures": 0,
+            "plan_manifest": {
         "repetitions": 5, "baseline_commit_sha": BASE_SHA,
         "candidate_commit_sha": "f" * 40}}
     case = [{"name": "k3", "family": "dflash2"}]
@@ -159,7 +178,8 @@ def test_prompt_mismatch_and_duplicate_rows_are_not_valid_pairs():
                 "prompt_tokens": "900" if arm == "B" and rep == 2 else "1000",
                 "generated_tokens": "100", "answer_sha256": "abc",
             })
-    meta = {"status": "COMPLETE", "plan_manifest": {
+    meta = {"status": "COMPLETE", "warmup_count": 2, "warmup_failures": 0,
+            "plan_manifest": {
         "repetitions": 5, "baseline_commit_sha": BASE_SHA,
         "candidate_commit_sha": "f" * 40}}
     summary = summarize(rows, meta, [{"name": "k3", "family": "dflash2"}])

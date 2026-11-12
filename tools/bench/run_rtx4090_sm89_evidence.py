@@ -114,6 +114,35 @@ def commit_sha(repo: Path) -> str:
     return result.stdout.strip().lower()
 
 
+def source_is_clean(root: Path) -> bool:
+    """Only clean checked-out source is attributable to a pinned commit."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+    return not result.stdout.strip()
+
+
+def rotate_cases(cases: list[dict], repetition: int) -> list[dict]:
+    """Counterbalance ascending/descending workload order each measured round."""
+    if not cases:
+        return []
+    offset = (repetition - 1) % len(cases)
+    shifted = cases[offset:] + cases[:offset]
+    return list(reversed(shifted)) if repetition % 2 == 0 else shifted
+
+
+def command_for_case(case: dict, arm: str, manifest: dict, binaries: dict) -> list[str]:
+    return [
+        str(binaries[arm]), manifest["model"],
+        "--messages", str(Path(manifest["fixtures_dir"]) / case["fixture"]),
+        "--device", "0", "--seed", "4090", "--greedy", "--no-thinking",
+        "--gdn-state-fp16", "--ngram-draft-tokens", "0",
+        "--max-context", str(case["max_context"]), "--max-new", str(case["max_new"]),
+        *case["flags"],
+    ]
+
+
 def validate_plan(directory: Path, source_a: Path, source_b: Path,
                   max_idle_used_mib: float, gpu: dict, gold: dict) -> tuple[dict, list, dict]:
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
@@ -124,6 +153,8 @@ def validate_plan(directory: Path, source_a: Path, source_b: Path,
         raise ValueError("baseline source tree is not the fixed master SHA")
     if commit_sha(source_b) != manifest.get("candidate_commit_sha"):
         raise ValueError("candidate source tree HEAD differs from plan SHA; regenerate plan")
+    if not source_is_clean(source_a) or not source_is_clean(source_b):
+        raise ValueError("uncommitted tracked source changes; use clean build checkouts")
     if not ("RTX 4090" in gpu["gpu_name"] and gpu["gpu_index"] == 0):
         raise ValueError("GPU 0 must be the dedicated GeForce RTX 4090")
     if gpu.get("compute_cap") != "8.9":
@@ -293,6 +324,7 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
         "exe_sha256": {arm: sha256_file(path) for arm, path in binaries.items()},
         "gold_answers_sha256": sha256_file(gold_path),
         "status": "IN_PROGRESS", "selected_cases": len(selected),
+        "warmup_count": 0, "warmup_failures": 0,
         "full_matrix": len(selected) == len(cases),
         "note": "CLI process startup included in wall time. CLI prefill is NOT HTTP TTFT.",
     }
@@ -302,18 +334,32 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
         writer = csv.DictWriter(csv_file, fieldnames=FIELDS)
         writer.writeheader()
         csv_file.flush()
-        for case in selected:
-            for rep in range(1, reps + 1):
+        warmup_dir = raw / "warmup"
+        warmup_dir.mkdir()
+        for rep in range(1, reps + 1):
+            for case in rotate_cases(selected, rep):
                 order = ("A", "B") if rep % 2 else ("B", "A")
+                if rep == 1:
+                    # Warm-up is never included in the measured CSV; failure
+                    # blocks campaign qualification, but raw evidence survives.
+                    for arm in ("A", "B"):
+                        warm_argv = command_for_case(case, arm, manifest, binaries)
+                        wc, wo, we, wt, wgpu, werror = executor(warm_argv, timeout, 0)
+                        wstatus, wreason, _ = classify(
+                            case, parse_metrics(we), wo, wc, werror, gold, we)
+                        if wstatus == "passed" and wgpu.get("gpu_peak_used_mib") is None:
+                            wstatus, wreason = "failed", "missing warm-up GPU telemetry"
+                        prefix = f"{case['name']}-{arm}"
+                        (warmup_dir / (prefix + ".stdout.txt")).write_text(
+                            wo, encoding="utf-8")
+                        (warmup_dir / (prefix + ".stderr.txt")).write_text(
+                            we, encoding="utf-8")
+                        metadata["warmup_count"] += 1
+                        if wstatus != "passed":
+                            metadata["warmup_failures"] += 1
+                            print(f"WARMUP {prefix}: {wstatus}: {wreason}", flush=True)
                 for arm in order:
-                    exe = binaries[arm]
-                    argv = [str(exe), manifest["model"], "--messages",
-                            str(Path(manifest["fixtures_dir"]) / case["fixture"]),
-                            "--device", "0", "--seed", "4090",
-                            "--greedy", "--no-thinking",
-                            "--gdn-state-fp16", "--ngram-draft-tokens", "0",
-                            "--max-context", str(case["max_context"]),
-                            "--max-new", str(case["max_new"]), *case["flags"]]
+                    argv = command_for_case(case, arm, manifest, binaries)
                     code, stdout, stderr, elapsed, telemetry, error = executor(
                         argv, timeout, 0)
                     metrics = parse_metrics(stderr)
@@ -344,7 +390,12 @@ def run_campaign(plan_dir: Path, out: Path, source_a: Path, source_b: Path,
                     all_rows.append(row)
                     print(f"{stem}: {status}; {row['prefill_tok_s']} prefill / "
                           f"{row['decode_tok_s']} decode tok/s", flush=True)
-    metadata["status"] = ("COMPLETE" if len(selected) == len(cases) else "PARTIAL")
+    metadata["status"] = (
+        "COMPLETE" if len(selected) == len(cases)
+        and metadata["warmup_failures"] == 0
+        and metadata["warmup_count"] == len(selected) * 2 else
+        "FAILED_WARMUP" if metadata["warmup_failures"] else "PARTIAL"
+    )
     metadata["successful_samples"] = sum(r["status"] == "passed" for r in all_rows)
     metadata["total_samples"] = len(all_rows)
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

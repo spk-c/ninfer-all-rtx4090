@@ -60,7 +60,7 @@ python -m tools.bench.run_rtx4090_sm89_evidence `
   --out '.\profiles\bench\sm89-evidence-001'
 ```
 
-The collector verifies the **actual** master and candidate Git HEAD hashes, the model/fixture/gold SHA-256 values frozen in the plan, runtime paths, CUDA compute capability **8.9**, GPU idle state and all 54 checked-in case definitions. It alternates AB/BA per case and repetition, samples whole-card GPU memory, records the CLI's actual token counts and draft acceptance, and saves all 540 stdout/stderr logs and sample metrics to `samples.csv`. GPU-memory samples are from `nvidia-smi` and represent **total card occupancy**, not a per-process allocation profile; the CLI separately reports its workspace peak. A `--max-cases 1` smoke run is allowed but is marked **PARTIAL** and cannot qualify any release.
+The collector verifies the **actual** master and candidate Git HEAD hashes, the model/fixture/gold SHA-256 values frozen in the plan, runtime paths, CUDA compute capability **8.9**, GPU idle state and all 54 checked-in case definitions. It alternates AB/BA and rotates case order every round to balance thermal drift. It performs **108 additional unmeasured warm-ups** (one per arm and case), saves their raw logs, then captures 540 measured stdout/stderr files and metrics in `samples.csv`. Warm-up failures invalidate the campaign. It records actual CLI token counts and draft acceptance. GPU-memory samples are from `nvidia-smi` and represent **total card occupancy**, not a per-process allocation profile; the CLI separately reports its workspace peak. A `--max-cases 1` smoke run is allowed but is marked **PARTIAL** and cannot qualify any release.
 
 **Caution:** the CLI's wall-clock elapsed time includes model startup and is **not server TTFT**. Use the existing `tools/bench/run_serve_ttft.py` framework for TTFT follow-up (separately matched configurations); never mislabel the CLI startup time.
 
@@ -72,7 +72,7 @@ python -m tools.bench.report_rtx4090_sm89_evidence `
   --out '.\profiles\bench\sm89-report-001'
 ```
 
-This emits `report.json` and `summary.md`: median paired B/A, seeded bootstrap 95% interval, complete-pair count, negative/zero-gain pairs, divergent answer hashes, peak **whole-card** VRAM and explicit failures/OOM. The report **never automatically promotes kernel routes**. Review coding answer correctness and attach actual Nsight profiles, precision/perplexity evidence, release CI and long-context gold accuracy before proposing an opt-in implementation. A generated plan, completed report or microbenchmark alone is not sufficient.
+This emits `report.json` and `summary.md`: median paired B/A, seeded bootstrap 95% interval, complete-pair count, negative/zero-gain pairs, divergent answer hashes, peak **whole-card** VRAM and explicit failures/OOM. Only pairs with identical **actual prompt and generated-token counts** enter performance ratios; duplicate/missing pairs, dirty source trees or failed warm-ups block qualification. The report **never automatically promotes kernel routes**. Review coding answer correctness and attach actual Nsight profiles, precision/perplexity evidence, release CI and long-context gold accuracy before proposing an opt-in implementation. A generated plan, completed report or microbenchmark alone is not sufficient.
 
 
 ## 3. Prepare truthful prompt fixtures before measurement
