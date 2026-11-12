@@ -93,9 +93,11 @@ inline const DeviceSpecs& device_specs() {
             out.fp8_f32acc_tflops  = 419.0;
         } else {
             // Unmeasured architecture: the DRAM spec is still exact, the rest is not claimed.
-            // 0.93 is the sustained-read fraction both measured architectures land on.
-            out.reference          = "device-derived";
-            out.sustained_read_gbs = out.dram_spec_gbs * 0.93;
+            // Do not invent a sustained-read fraction for an unmeasured GPU (including Ada).
+            // Only the memory-clock-derived theoretical DRAM specification is known here.
+            // A missing measured ceiling must remain NaN until a reproducible local probe.
+            out.reference          = "device-derived-unqualified";
+            out.sustained_read_gbs = std::numeric_limits<double>::quiet_NaN();
             out.bf16_f32acc_tflops = std::numeric_limits<double>::quiet_NaN();
             out.int8_tops          = std::numeric_limits<double>::quiet_NaN();
             out.fp8_f16acc_tflops  = std::numeric_limits<double>::quiet_NaN();

@@ -5,9 +5,9 @@
 // public Op under A16Only and under AllowA8Int at the same column count, so the A8 route's win over
 // the A16 route it replaces is the difference between two cells of one row.
 //
-// It reports TOP/s beside microseconds because that is the number with a known ceiling: 314.8 TOP/s
-// measured by tools/tensor_core_rate_probe.cu. Work is 2*N*K*T, the convention the probes already
-// use, so these cells are comparable with them.
+// It reports TOP/s beside microseconds. Percentage-of-ceiling is only printed for architectures
+// with a measured tensor-core reference; an SM86 reference must never be attributed to SM89.
+// Work is 2*N*K*T, the convention the probes already use.
 //
 // Cold timing is not optional here. These GEMMs stream tens of MB of weights per call against 6 MB
 // of L2, so a warm loop measures a residency production never has.
@@ -23,6 +23,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -38,8 +39,6 @@ using ninfer::QType;
 using ninfer::Tensor;
 using ninfer::ops::LinearPolicy;
 
-// The measured INT8 m16n8k32 ceiling on this card (tools/tensor_core_rate_probe.cu).
-constexpr double kInt8CeilingTops = 314.8;
 constexpr std::size_t kFlushBytes = 256ULL << 20;
 
 struct Profile {
@@ -107,7 +106,13 @@ int main(int argc, char** argv) {
     cudaGetDeviceProperties(&properties, 0);
     std::printf("# gpu=%s sm=%d%d  integer-activation prefill routes, cold, median of %d\n",
                 properties.name, properties.major, properties.minor, repeat);
-    std::printf("# work=2*N*K*T, ceiling %.1f TOP/s\n", kInt8CeilingTops);
+    const auto& specs = ninfer::bench::device_specs();
+    if (std::isfinite(specs.int8_tops) && specs.int8_tops > 0.0) {
+        std::printf("# work=2*N*K*T, measured %s INT8 ceiling %.1f TOP/s\n",
+                    specs.reference, specs.int8_tops);
+    } else {
+        std::printf("# work=2*N*K*T, INT8 ceiling unmeasured for this GPU; percentage unavailable\n");
+    }
     std::printf("%-12s %6s %12s %12s %10s %10s %8s\n", "profile", "T", "A16 us", "A8 us",
                 "A16 TOP/s", "A8 TOP/s", "% ceil");
 
@@ -168,10 +173,15 @@ int main(int argc, char** argv) {
             }
 
             const double a8_tops = cell_us[1] > 0.0 ? tops(profile, token_count, cell_us[1]) : 0.0;
-            std::printf("%-12s %6d %12.1f %12.1f %10.1f %10.1f %7.0f%%\n", profile.name,
+            char ceiling_percent[24] = "-";
+            if (std::isfinite(specs.int8_tops) && specs.int8_tops > 0.0 && a8_tops > 0.0) {
+                std::snprintf(ceiling_percent, sizeof(ceiling_percent), "%.0f%%",
+                              100.0 * a8_tops / specs.int8_tops);
+            }
+            std::printf("%-12s %6d %12.1f %12.1f %10.1f %10.1f %8s\n", profile.name,
                         token_count, cell_us[0], cell_us[1],
-                        cell_us[0] > 0.0 ? tops(profile, token_count, cell_us[0]) : 0.0, a8_tops,
-                        100.0 * a8_tops / kInt8CeilingTops);
+                        cell_us[0] > 0.0 ? tops(profile, token_count, cell_us[0]) : 0.0,
+                        a8_tops, ceiling_percent);
             std::fflush(stdout);
         }
     }
