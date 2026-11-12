@@ -117,6 +117,15 @@ def parse_config(spec: str, *, is_control: bool) -> Config:
     return Config(label=label, argv_template=argv, is_control=is_control)
 
 
+def is_self_contained_apps_binary(path: Path) -> bool:
+    """Support Ninja apps/ and MSVC multi-config apps/Release/ without mixing DLLs."""
+    parent = path.resolve().parent
+    if parent.name.casefold() == "apps":
+        return True
+    return (parent.name.casefold() in {"release", "debug", "relwithdebinfo", "minsizerel"}
+            and parent.parent.name.casefold() == "apps")
+
+
 def preflight(arm_a: Path, arm_b: Path, *, allow_separate_dirs: bool = False) -> None:
     """Refuse the two mistakes that produce a confident wrong answer rather than an error."""
     for path in (arm_a, arm_b):
@@ -129,8 +138,9 @@ def preflight(arm_a: Path, arm_b: Path, *, allow_separate_dirs: bool = False) ->
         # DLL dependencies next to each EXE, so do not copy an upstream binary into the
         # fork's apps/ folder: that could silently load incompatible fork runtime DLLs.
         for path in (arm_a, arm_b):
-            if path.resolve().parent.name.casefold() != 'apps':
-                sys.exit(f'separate-build arm must reside in its own apps directory: {path}')
+            if not is_self_contained_apps_binary(path):
+                sys.exit(f'separate-build arm must reside in its own apps directory '
+                         f'(or apps/Release multi-config directory): {path}')
             try:
                 probe = subprocess.run([str(path.resolve()), '--version'],
                                        capture_output=True, text=True, timeout=30,
