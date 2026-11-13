@@ -208,6 +208,25 @@ void install_stop_handlers() {
 #endif
 
 // The runtime owns inference code. The portable launcher contains no kernels.
+// Opt-in: prevent Windows process power-throttling from downclocking the host-side
+// inference scheduler. This does not change GPU clocks, power limits or privileges.
+// The default remains the OS policy so administrators can opt in explicitly.
+void disable_windows_power_throttling_if_requested() noexcept {
+#ifdef _WIN32
+    const char* setting = std::getenv("NINFER_WIN_DISABLE_POWER_THROTTLING");
+    if (setting == nullptr || std::string(setting) != "1") { return; }
+    PROCESS_POWER_THROTTLING_STATE state{};
+    state.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask   = 0;
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state,
+                               sizeof(state))) {
+        std::fprintf(stderr, "ninfer-serve: Windows process power-throttling opt-out unavailable (%lu)\n",
+                     static_cast<unsigned long>(GetLastError()));
+    }
+#endif
+}
+
 std::string binary_identity() {
     return ninfer::product::module_identity(reinterpret_cast<const void*>(&binary_identity),
                                             NINFER_BUILD_ID);
@@ -239,6 +258,7 @@ int main(int argc, char** argv) {
                   << ")\n";
         return 0;
     }
+    disable_windows_power_throttling_if_requested();
     // --log-colours on colours the statistics tokens as well as the levels; off keeps the log plain.
     ninfer::serve::set_operational_log_colours(options.log_colours.value_or(false));
     if (!options.context_cache.hybrid.persistent_file.empty()) {
