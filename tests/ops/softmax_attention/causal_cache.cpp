@@ -1,4 +1,5 @@
 #include "core/arena.h"
+#include "core/device_launch.h"
 #include "core/paged_kv_view.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sigmoid_mul.h"
