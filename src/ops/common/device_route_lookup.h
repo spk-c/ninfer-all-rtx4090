@@ -13,4 +13,8 @@ namespace ninfer::ops {
 // profile, no entry for the key, or the width lies past the entry's last band.
 [[nodiscard]] std::string_view device_route_schedule(std::string_view key, std::int32_t width);
 
+// True when a route band covers the requested width or a scoped force selects the key.
+// Implemented in device_route.cpp; this declaration keeps the GGUF kernel header lightweight.
+[[nodiscard]] bool device_route_measured(std::string_view key, std::int32_t width);
+
 } // namespace ninfer::ops
