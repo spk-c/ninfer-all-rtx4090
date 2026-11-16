@@ -36,6 +36,7 @@
 
 #include "core/device_buffer.h"
 #include "core/device_launch.h"
+#include "core/pinned_memory.h"
 #include "core/device_wait.h"
 #include "core/decode_graph.h"
 
