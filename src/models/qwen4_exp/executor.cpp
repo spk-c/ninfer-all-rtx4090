@@ -3,18 +3,22 @@
 #include "core/arena.h"
 #include "core/cyclic_kv_cache.h"
 #include "core/decode_graph.h"
+#include "core/device_buffer.h"
 #include "core/device_wait.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_worker_pool.h"
 #include "core/layout.h"
 #include "core/linear_attention_state.h"
-#include "core/paged_kv_cache.h"
+#include "core/paged_kv_view.h"
 #include "core/paged_kv_storage.h"
+#include "core/pinned_memory.h"
+#include "core/qtype.h"
 #include "core/stage_link.h"
 #include "core/tensor_parallel.h"
 #include "core/weight_view.h"
 #include "ninfer/ops/target_logprobs.h"
 #include "models/qwen4_exp/dflash2.h"
+#include "models/dspine/drafter.h"
 #include "models/qwen4_exp/ngram_hash.h"
 #include "models/qwen4_exp/ngram_draft_prefetch.h"
 #include "models/expert_profile.h"
@@ -77,8 +81,10 @@ constexpr std::int32_t kTensorPieceColumns = 1024;
 constexpr std::uint32_t kMaxChunk = 4096;
 static_assert((kMaxChunk + kTensorPieceColumns - 1) / kTensorPieceColumns <=
               TensorParallelExchange::kPieces);
-// The family name of Flash-Next's built-in routing profiles (models/expert_profile.h).
+// The family name of Flash-Next's built-in routing profiles (models/expert_profile.h), and of a
+// latent MoE's (Edge0), whose experts route as they were trained for it.
 constexpr std::string_view kExpertProfileFamily = "qwen3.8-flash-next";
+constexpr std::string_view kLatentProfileFamily = "edge0";
 // Zero bytes after every device slot's down matrix (see expert_stream.cpp and moe_experts_gguf).
 constexpr std::uint64_t kSlotTail = 256;
 
@@ -216,7 +222,9 @@ Tensor direct(const Model& model, WeightId id, std::initializer_list<std::int32_
     Tensor tensor    = weight_tensor(view, shape);
     if (tensor.dtype != dtype) {
         throw std::invalid_argument(model.weight(id).name + " must be stored as " +
-                                    (dtype == DType::BF16 ? "bf16" : "fp32"));
+                                    (dtype == DType::BF16  ? "bf16"
+                                     : dtype == DType::I32 ? "int32"
+                                                           : "fp32"));
     }
     return tensor;
 }
@@ -430,6 +438,32 @@ ExpertTable make_located_table(std::span<const ExpertLocation> locations) {
     return out;
 }
 
+// A latent MoE's encoder or decoder: the groups [begin, end) of `groups` as one bank of their equal
+// runs of rows (all of them, or a tensor-parallel rank's), as a table of `groups` entries pointing
+// at the runs' first rows, the other groups' null (never read).
+ExpertTable make_group_table(const Model& model, WeightId id, std::uint32_t groups,
+                             std::uint32_t begin, std::uint32_t end) {
+    const Weight w = native_weight(model.weight(id).view);
+    if (!is_gguf(w.qtype) || begin >= end || end > groups || w.n % (end - begin) != 0) {
+        throw std::invalid_argument(model.weight(id).name +
+                                    ": a latent projection takes a GGUF bank of whole groups");
+    }
+    const auto block = gguf_block_shape(w.qtype);
+    ExpertTable out;
+    out.format    = w.qtype;
+    out.row_bytes = std::int64_t(w.k / block.elements) * block.bytes;
+    out.rows      = static_cast<std::int32_t>(w.n / (end - begin));
+    out.pointers.assign(groups, nullptr);
+    for (std::uint32_t g = begin; g < end; ++g) {
+        out.pointers[g] = static_cast<const std::byte*>(w.qdata) +
+                          std::size_t(g - begin) * out.rows * out.row_bytes;
+    }
+    out.table = DeviceBuffer(out.pointers.size() * sizeof(void*));
+    out.table.copy_from_host(out.pointers.data(), out.pointers.size() * sizeof(void*));
+    out.seal();
+    return out;
+}
+
 // Native operands retain the artifact's planes. The Program owns only these device tables.
 struct NativeExpertTable {
     QType format = QType::BF16;
@@ -474,17 +508,29 @@ struct NativeMoePlan {
     }
 };
 
+// Edge0's latent experts (TextConfig::latent_moe): the groups' encoders and decoders as tables of
+// `groups` entries, the experts' group labels and the optional multipliers.
+struct LatentPlan {
+    ExpertTable encode, decode;
+    Tensor labels, expert_scales, column_scale;
+    std::int32_t width = 0, groups = 0;
+};
+
 struct MoePlan {
     Tensor router, shared_gate;
     ExpertTable gate, up, down, shared_gate_table, shared_up_table, shared_down_table;
     std::optional<NativeMoePlan> native;
+    std::optional<LatentPlan> latent;
     // Device banks or disk experts' device slots, with zeros after the down banks; host experts
     // are read across the bus.
     bool device_resident = false;
     // Tensor parallelism: the routed experts [expert_begin, expert_end) the rank holds, the only
-    // entries of its tables that are set; the shared expert's tables hold the rank's run of it.
+    // entries of its tables that are set; the shared expert's tables hold the rank's run of it. A
+    // latent MoE's rank holds the layer's groups [group_begin, group_end) and the experts they
+    // label (LatentWeights).
     bool share = false;
     std::uint32_t expert_begin = 0, expert_end = 0;
+    std::uint32_t group_begin = 0, group_end = 0;
     bool iq1m_matrix = true; // ExecutorOptions::iq1m_matrix
 
     [[nodiscard]] ops::GgufMoeWeights banks() const {
@@ -499,6 +545,28 @@ struct MoePlan {
                 shared_gate_table.rows > 0 ? shared_gate_table.rows : 640,
                 iq1m_matrix};
     }
+    // The latent call over `routed`'s routed and shared tables (banks(), pooled() or cached()).
+    [[nodiscard]] ops::GgufLatentWeights latent_banks(const ops::GgufMoeWeights& routed) const {
+        ops::GgufLatentWeights out;
+        out.gate            = routed.gate;
+        out.up              = routed.up;
+        out.down            = routed.down;
+        out.shared_gate     = routed.shared_gate;
+        out.shared_up       = routed.shared_up;
+        out.shared_down     = routed.shared_down;
+        out.encode          = latent->encode.view();
+        out.decode          = latent->decode.view();
+        out.labels          = static_cast<const std::int32_t*>(latent->labels.data);
+        out.expert_scales   = static_cast<const float*>(latent->expert_scales.data);
+        out.column_scale    = static_cast<const float*>(latent->column_scale.data);
+        out.width           = latent->width;
+        out.groups          = latent->groups;
+        out.experts         = routed.experts;
+        out.shared_width    = routed.shared_width;
+        out.device_resident = routed.device_resident;
+        return out;
+    }
+    [[nodiscard]] ops::GgufLatentWeights latent_banks() const { return latent_banks(banks()); }
     // A wide call over a slot pool's table ([E] gate, [E] up, [E] down). Its entries are device
     // cache slots' planes, which start at 256-byte boundaries, or a pool bank's experts, each at
     // its index from a 256-byte boundary: a row stride of whole 16 bytes aligns every entry.
@@ -709,6 +777,66 @@ struct SpanCut {
     SequenceSnapshot* state = nullptr;
 };
 
+// The masked drafter of a DFlash2 or a DSpine round. The two take the same calls over a ring of
+// the target's features and leave the same drafts, candidates and probabilities
+// (models/dspine/drafter.h), so the executor drives either through this.
+class MaskedDrafter {
+public:
+    MaskedDrafter() = default;
+    explicit MaskedDrafter(std::unique_ptr<DFlash2Drafter> dflash2)
+        : dflash2_(std::move(dflash2)) {}
+    MaskedDrafter(std::unique_ptr<dspine::Drafter> dspine,
+                  std::vector<CyclicKVCacheLayerView> ring)
+        : dspine_(std::move(dspine)), ring_(std::move(ring)) {}
+
+    explicit operator bool() const noexcept { return dflash2_ != nullptr || dspine_ != nullptr; }
+    // The executor calls it as it would a pointer to either drafter.
+    const MaskedDrafter* operator->() const noexcept { return this; }
+
+    [[nodiscard]] std::uint32_t taps() const {
+        return dflash2_ ? dflash2_->taps() : dspine_->config().taps();
+    }
+
+    void materialize(const DFlash2ContextCall& call, WorkspaceArena& work,
+                     cudaStream_t stream) const {
+        if (dflash2_) {
+            dflash2_->materialize(call, work, stream);
+            return;
+        }
+        dspine_->materialize({.features  = call.features,
+                              .positions = call.positions,
+                              .counts    = call.counts,
+                              .lanes     = call.lanes,
+                              .min_count = call.min_count,
+                              .max_count = call.max_count},
+                             ring_, work, stream);
+    }
+
+    void propose(const DFlash2ProposalCall& call, WorkspaceArena& work, cudaStream_t stream) const {
+        if (dflash2_) {
+            dflash2_->propose(call, work, stream);
+            return;
+        }
+        dspine_->propose({.anchors       = call.anchors,
+                          .frontiers     = call.frontiers,
+                          .valid_columns = call.valid_columns,
+                          .lanes         = call.lanes,
+                          .configs       = call.configs,
+                          .batch         = call.batch,
+                          .width         = call.width,
+                          .drafts        = call.drafts,
+                          .candidates    = call.candidates,
+                          .proposal_q    = call.proposal_q,
+                          .confidence    = call.confidence},
+                         ring_, work, stream);
+    }
+
+private:
+    std::unique_ptr<DFlash2Drafter> dflash2_;
+    std::unique_ptr<dspine::Drafter> dspine_;
+    std::vector<CyclicKVCacheLayerView> ring_;
+};
+
 } // namespace
 
 struct Executor::Impl {
@@ -833,12 +961,14 @@ struct Executor::Impl {
     // While a draft chain is captured: its replays count no routes for the expert cache (the
     // catch-up passes after a commit still do).
     bool capturing_draft = false;
-    // DFlash2 speculative decoding (options.dflash2), on the head rank. The drafter's operands
-    // until allocate_dflash2() hands them to it, the head as its final hidden reads it, and each
-    // text layer's tap: its index among the drafter's features, or -1.
+    // Masked-drafter speculative decoding (options.dflash2, or options.dspine for a standalone
+    // DSpine drafter), on the head rank. DFlash2's operands until allocate_dflash2() hands them to
+    // its drafter, the head as the drafter's final hidden reads it, DSpine's head-write table, and
+    // each text layer's tap: its index among the drafter's features, or -1.
     std::optional<DFlash2Operands> dflash2_operands;
-    std::unique_ptr<DFlash2Drafter> dflash2;
+    MaskedDrafter drafter;
     Projection dflash2_head;
+    DeviceBuffer dspine_table;
     std::vector<std::int32_t> tap_of;
     // What a pass leaves at the taps: the mean of a tapped layer's four streams of the pass
     // columns [first, first + count), at feature columns from `column` (BF16 [taps * hidden,
@@ -1068,23 +1198,37 @@ struct Executor::Impl {
             throw std::invalid_argument(
                 "qwen4_exp: draft_min_p needs drafts and a finite value in [0,1]");
         }
-        if (options.dflash2 && options.draft_tokens == 0) {
-            throw std::invalid_argument("qwen4_exp: the DFlash2 drafter needs draft_tokens");
+        if (options.dflash2 && options.dspine) {
+            throw std::invalid_argument("qwen4_exp: one masked drafter, DFlash2 or DSpine");
+        }
+        const bool masked = options.dflash2 || options.dspine;
+        if (masked && options.draft_tokens == 0) {
+            throw std::invalid_argument("qwen4_exp: the masked drafter needs draft_tokens");
         }
         if (options.draft_tokens > 0) {
             if (options.dflash2 && !model.dflash2_weights()) {
                 throw std::invalid_argument("qwen4_exp: DFlash2 drafts need a model loaded with "
                                             "its drafter");
             }
-            if (!options.dflash2 && !model.mtp_weights()) {
+            if (options.dspine && model.dspine() == nullptr) {
+                throw std::invalid_argument("qwen4_exp: DSpine drafts need a model loaded with "
+                                            "its drafter (--draft-model)");
+            }
+            if (!masked && !model.mtp_weights()) {
                 throw std::invalid_argument("qwen4_exp: drafts need a model loaded with its MTP "
                                             "block");
             }
             if (options.draft_tokens > 15) {
                 throw std::invalid_argument("qwen4_exp: a speculative round drafts 1 to 15 tokens");
             }
-            if (options.dflash2 && device.size() > 1 && !model.tensor_parallel()) {
-                throw std::invalid_argument("qwen4_exp: the DFlash2 drafter runs on one device or "
+            if (options.dspine &&
+                options.draft_tokens + 1 > model.dspine()->config().block_size) {
+                throw std::invalid_argument(
+                    "qwen4_exp: the DSpine drafter proposes at most block_size - 1 (" +
+                    std::to_string(model.dspine()->config().block_size - 1) + ") drafts a round");
+            }
+            if (masked && device.size() > 1 && !model.tensor_parallel()) {
+                throw std::invalid_argument("qwen4_exp: the masked drafter runs on one device or "
                                             "under tensor parallelism, not over pipeline stages");
             }
             verify_width = options.draft_tokens + 1;
@@ -1121,6 +1265,8 @@ struct Executor::Impl {
         plan_weights();
         if (verify_width > 0 && options.dflash2) {
             plan_dflash2();
+        } else if (verify_width > 0 && options.dspine) {
+            plan_dspine();
         } else if (verify_width > 0) {
             plan_mtp();
         }
@@ -1167,7 +1313,7 @@ struct Executor::Impl {
         allocate_staging();
         if (verify_width > 0) { allocate_speculation(); }
         allocate_span();
-        if (dflash2_operands) { allocate_dflash2(); }
+        if (dflash2_operands || (verify_width > 0 && options.dspine)) { allocate_drafter(); }
         allocate_cache();
         require_wide_route();
         memory.streamed_kv = stream_slots != 0;
@@ -1422,12 +1568,25 @@ struct Executor::Impl {
         dflash2_operands = std::move(p);
     }
 
+    // The standalone DSpine drafter's head (the text's own use of the whole head on the head
+    // rank) and the text layers it taps: the mean of a tapped layer's streams, as DFlash2's.
+    void plan_dspine() {
+        const dspine::Config& c = model.dspine()->config();
+        RankBinding bind(device, model.head_rank());
+        dflash2_head = make_projection(
+            std::vector{model.input(model.weights().output_head, "text/final_hidden")});
+        tap_of.assign(layers.size(), -1);
+        for (std::size_t t = 0; t < c.target_layer_ids.size(); ++t) {
+            tap_of.at(c.target_layer_ids[t]) = static_cast<std::int32_t>(t);
+        }
+    }
+
     // The feature columns a pass captures: a verification of every sequence, each sequence's
     // last window positions of the widest prompt call (a chunk, or a span packing every sequence's
     // prompt), whose context the ring takes, and a span's two windows of one sequence, before its
     // cut and at its end (Executor::forward).
     [[nodiscard]] std::uint32_t planned_feature_columns() const {
-        const std::uint32_t window = *model.dflash2_config()->sliding_window;
+        const std::uint32_t window = drafter_window();
         const std::uint32_t span   = planned_span_tokens();
         const std::uint32_t prompt = std::max(options.prefill_chunk, span);
         return std::max({verify_width * options.sequences,
@@ -1517,6 +1676,12 @@ struct Executor::Impl {
             plan.moe.shared_gate_table = make_table(model, std::span(&lw.moe.shared_gate, 1));
             plan.moe.shared_up_table   = make_table(model, std::span(&lw.moe.shared_up, 1));
             plan.moe.shared_down_table = make_table(model, std::span(&lw.moe.shared_down, 1));
+            if (lw.moe.latent) {
+                plan.moe.group_begin = lw.moe.latent->group_begin;
+                plan.moe.group_end   = lw.moe.latent->group_end;
+                plan.moe.latent      = make_latent_plan(*lw.moe.latent, experts,
+                                                        plan.moe.group_begin, plan.moe.group_end);
+            }
             return plan;
         }
         if (!lw.moe.gate.empty() &&
@@ -1534,6 +1699,10 @@ struct Executor::Impl {
             plan.moe.native = std::move(native);
             return plan;
         }
+        if (lw.moe.latent) {
+            plan.moe.latent =
+                make_latent_plan(*lw.moe.latent, experts, 0, config.latent_moe->groups);
+        }
         if (lw.moe.gate.empty()) {
             plan.moe.gate = make_located_table(lw.moe.located_gate);
             plan.moe.up   = make_located_table(lw.moe.located_up);
@@ -1548,6 +1717,27 @@ struct Executor::Impl {
         plan.moe.shared_up_table   = make_table(model, std::span(&lw.moe.shared_up, 1));
         plan.moe.shared_down_table = make_table(model, std::span(&lw.moe.shared_down, 1));
         return plan;
+    }
+
+    // A layer's latent operands on its device: the groups [begin, end) of its encoder and decoder
+    // (all of them, or a tensor-parallel rank's), the labels and the multipliers.
+    [[nodiscard]] LatentPlan make_latent_plan(const LatentWeights& l, std::uint32_t experts,
+                                              std::uint32_t begin, std::uint32_t end) const {
+        const auto& latent = *config.latent_moe;
+        LatentPlan out;
+        out.width  = static_cast<std::int32_t>(latent.width);
+        out.groups = static_cast<std::int32_t>(latent.groups);
+        out.encode = make_group_table(model, l.encode, latent.groups, begin, end);
+        out.decode = make_group_table(model, l.decode, latent.groups, begin, end);
+        out.labels = direct(model, l.labels, {static_cast<std::int32_t>(experts)}, DType::I32);
+        if (l.expert_scales) {
+            out.expert_scales = direct(model, *l.expert_scales,
+                                       {3, static_cast<std::int32_t>(experts)}, DType::FP32);
+        }
+        if (l.column_scale) {
+            out.column_scale = direct(model, *l.column_scale, {out.width}, DType::FP32);
+        }
+        return out;
     }
 
     void plan_segments() {
@@ -1644,6 +1834,24 @@ struct Executor::Impl {
             if (plan.moe.native) {
                 bytes = std::max(bytes, ops::moe_experts_native_workspace_bytes(t));
             }
+            if (plan.moe.latent) {
+                // The staged misses take a whole chunk; a single call, a span group's included,
+                // a slice of at most kGgufLatentSliceTokens.
+                const std::int32_t group =
+                    rank == 0 ? static_cast<std::int32_t>(planned_group_chunks()) * t : t;
+                const std::int32_t call  = std::min(group, ops::kGgufLatentSliceTokens);
+                const auto& latent       = *plan.moe.latent;
+                bytes = std::max({bytes,
+                                  ops::moe_latent_gguf_workspace_bytes(t, latent.width, latent.groups),
+                                  ops::moe_latent_gguf_workspace_bytes(call, latent.width,
+                                                                       latent.groups)});
+                if (tensor()) {
+                    // A rank's groups' fixed-point part, held beside the part's own workspace.
+                    bytes = std::max(bytes, ops::moe_latent_gguf_workspace_bytes(t, latent.width,
+                                                                                 latent.groups) +
+                                                round_up(std::uint64_t(config.hidden_size) * t * 8));
+                }
+            }
             if (plan.gdn) {
                 bytes = std::max({bytes,
                                   projections_workspace({&plan.gdn->qkv, &plan.gdn->z,
@@ -1698,6 +1906,23 @@ struct Executor::Impl {
         } else if (rank == model.head_rank()) {
             bytes = std::max(bytes,
                              projection_workspace(head, static_cast<std::int32_t>(max_logit_rows)));
+        }
+        if (options.dspine && verify_width > 0 && rank == model.head_rank()) {
+            const dspine::Model& spine = *model.dspine();
+            const auto s               = static_cast<std::int32_t>(options.sequences);
+            const auto w               = static_cast<std::int32_t>(verify_width);
+            const std::uint32_t window = drafter_window();
+            const auto prepare = dspine::Drafter::prepare_columns(spine, s, w);
+            bytes              = std::max(
+                {bytes,
+                 dspine::Drafter::proposal_workspace_bytes(
+                     spine, DType::BF16, window, options.max_context, w, s,
+                     projection_workspace(dflash2_head, (w - 1) * s)),
+                 dspine::Drafter::context_workspace_bytes(
+                     spine, window, static_cast<std::int32_t>(planned_feature_columns()), 1),
+                 dspine::Drafter::context_workspace_bytes(spine, window, w, s),
+                 dspine::Drafter::prepare_workspace_bytes(
+                     spine, DType::BF16, s, w, projection_workspace(dflash2_head, prepare))});
         }
         if (dflash2_operands && rank == model.head_rank()) {
             const auto masks = static_cast<std::int32_t>(options.draft_tokens * options.sequences);
@@ -2240,26 +2465,25 @@ struct Executor::Impl {
     // Bytes of one region of the DFlash2 operands that holds `count` words.
     [[nodiscard]] static std::size_t io_region(std::size_t count) { return round_up(count * 4); }
 
-    // The DFlash2 drafter on the head rank: its context ring (every sequence a lane, zeroed once,
+    // The masked drafter on the head rank: its context ring (every sequence a lane, zeroed once,
     // so that a lane's slots hold finite values before its positions reach them), the captured
-    // features, the proposal's and context calls' operands with their staging, and the drafter.
-    void allocate_dflash2() {
-        const DFlash2Config& c = *model.dflash2_config();
+    // features, the proposal's and context calls' operands with their staging, and the drafter
+    // (DFlash2's, or DSpine's with the head-write table it derives from the head here).
+    void allocate_drafter() {
         const std::size_t head = model.head_rank();
         RankBinding bind(device, head);
         const std::size_t s    = options.sequences;
         const std::size_t k    = options.draft_tokens;
         const std::size_t w    = verify_width;
-        const std::size_t rows = c.target_layer_ids.size() * std::size_t(config.hidden_size);
+        const DrafterGeometry g = drafter_geometry();
+        const std::size_t rows = std::size_t(g.taps) * std::size_t(config.hidden_size);
         feature_columns        = planned_feature_columns();
         features               = DeviceBuffer(rows * feature_columns * 2);
         feature_rows           = DeviceBuffer(rows * w * s * 2);
         LayoutBuilder builder;
-        const auto layout = plan_cyclic_kv_cache(
-            builder, c.num_hidden_layers, *c.sliding_window,
-            static_cast<std::int32_t>(c.attention.num_key_value_heads),
-            static_cast<std::int32_t>(c.attention.head_dim), static_cast<std::int32_t>(s));
-        ring_backing = DeviceBuffer(builder.finish(256, "DFlash2 context ring"));
+        const auto layout = plan_cyclic_kv_cache(builder, g.layers, drafter_window(), g.kv_heads,
+                                                 g.head_dim, static_cast<std::int32_t>(s));
+        ring_backing = DeviceBuffer(builder.finish(256, "masked drafter context ring"));
         ring_backing.fill(0);
         ring = std::make_unique<CyclicKVCache>(DeviceSpan{ring_backing.p, ring_backing.bytes},
                                                layout);
@@ -2308,16 +2532,68 @@ struct Executor::Impl {
         for (std::uint32_t l = 0; l < ring->layer_count(); ++l) {
             views.push_back(ring->layer_view(l));
         }
-        dflash2 = std::make_unique<DFlash2Drafter>(
-            std::move(*dflash2_operands), c, config.hidden_size, config.vocab_size, domain,
-            std::move(views), options.max_context,
-            [this](const Tensor& hidden, Tensor& logits, WorkspaceArena& ws, cudaStream_t stream) {
-                project(dflash2_head, hidden, logits, ws, stream);
-            });
-        dflash2_operands.reset();
+        const auto head_projection = [this](const Tensor& hidden, Tensor& logits,
+                                            WorkspaceArena& ws, cudaStream_t stream) {
+            project(dflash2_head, hidden, logits, ws, stream);
+        };
+        if (options.dspine) {
+            const dspine::Config& c = model.dspine()->config();
+            dspine_table            = DeviceBuffer(dspine::head_write_bytes(c));
+            dspine::Target target{
+                .hidden = config.hidden_size,
+                .vocab  = config.vocab_size,
+                .layers = config.num_hidden_layers,
+                .domain = domain,
+                .logits = DType::BF16,
+                .embed  = [this](const Tensor& ids, Tensor& rows, cudaStream_t stream) {
+                    ops::embedding(ids, embedding_table, rows, stream);
+                },
+                .head = head_projection};
+            auto spine = std::make_unique<dspine::Drafter>(
+                *model.dspine(), std::move(target),
+                Tensor(dspine_table.p, DType::BF16,
+                       {static_cast<std::int32_t>(c.rank), static_cast<std::int32_t>(c.vocab_size)}),
+                drafter_window(), options.max_context, static_cast<std::int32_t>(s),
+                static_cast<std::int32_t>(w));
+            RankState& rank = ranks[head];
+            spine->prepare(*rank.workspace, rank.stream);
+            CUDA_CHECK(ninfer::wait_for_stream(rank.stream));
+            drafter = MaskedDrafter(std::move(spine), std::move(views));
+            memory.ranks[head].state_bytes += dspine_table.bytes;
+        } else {
+            drafter = MaskedDrafter(std::make_unique<DFlash2Drafter>(
+                std::move(*dflash2_operands), *model.dflash2_config(), config.hidden_size,
+                config.vocab_size, domain, std::move(views), options.max_context,
+                head_projection));
+            dflash2_operands.reset();
+        }
         memory.ranks[head].state_bytes += ring_backing.bytes;
         memory.ranks[head].workspace_bytes +=
             features.bytes + feature_rows.bytes + dflash2_io.bytes + dflash2_configs.bytes;
+    }
+
+    // The masked drafter's ring and feature geometry: DFlash2's config, or the DSpine drafter's.
+    struct DrafterGeometry {
+        std::uint32_t layers = 0, taps = 0;
+        std::int32_t kv_heads = 0, head_dim = 0;
+    };
+    [[nodiscard]] DrafterGeometry drafter_geometry() const {
+        if (options.dspine) {
+            const dspine::Config& c = model.dspine()->config();
+            return {c.num_hidden_layers, c.taps(), static_cast<std::int32_t>(c.num_key_value_heads),
+                    static_cast<std::int32_t>(c.head_dim)};
+        }
+        const DFlash2Config& c = *model.dflash2_config();
+        return {c.num_hidden_layers, static_cast<std::uint32_t>(c.target_layer_ids.size()),
+                static_cast<std::int32_t>(c.attention.num_key_value_heads),
+                static_cast<std::int32_t>(c.attention.head_dim)};
+    }
+
+    // The ring's capacity and the drafter's attention window: DFlash2's trained window, or the
+    // narrowest DSpine window that sees the whole context (dspine::ring_capacity).
+    [[nodiscard]] std::uint32_t drafter_window() const {
+        return options.dspine ? dspine::ring_capacity(model.dspine()->config(), options.max_context)
+                              : *model.dflash2_config()->sliding_window;
     }
 
     // The layers whose experts the route records, the expert cache and the expert stream serve:
@@ -2474,7 +2750,8 @@ struct Executor::Impl {
             profile = read_expert_profile(options.hybrid_experts.routing_profile,
                                           model.info().artifact_id, widths);
         } else {
-            profile = builtin_expert_profile(kExpertProfileFamily, widths);
+            profile = builtin_expert_profile(
+                config.latent_moe ? kLatentProfileFamily : kExpertProfileFamily, widths);
         }
         cache = std::make_unique<ExpertCache>(device, std::move(cache_layers), bytes,
                                               profile ? &*profile : nullptr,
@@ -2521,13 +2798,25 @@ struct Executor::Impl {
                 p.format       = tables[k]->format;
                 p.row_bytes    = tables[k]->row_bytes;
                 p.rows         = tables[k]->rows;
-                p.k            = std::int32_t(k == 2 ? config.moe_intermediate_size
-                                                     : config.hidden_size);
+                // A latent layer's gate and up read its latent width (TextConfig::latent_moe).
+                p.k            = std::int32_t(k == 2              ? config.moe_intermediate_size
+                                              : plan->moe.latent ? std::uint32_t(plan->moe.latent->width)
+                                                                 : config.hidden_size);
                 p.expert_bytes = std::int64_t(p.rows) * p.row_bytes;
                 if (stream) {
                     p.located = located[k];
                 } else {
                     p.host = tables[k]->pointers;
+                }
+            }
+            if (const auto& latent = plan->moe.latent) {
+                layer.latent_width = latent->width;
+                if (latent->expert_scales.data != nullptr) {
+                    RankBinding bind(device, plan->rank);
+                    layer.latent_scales.resize(std::size_t(latent->expert_scales.numel()));
+                    CUDA_CHECK(cudaMemcpy(layer.latent_scales.data(), latent->expert_scales.data,
+                                          layer.latent_scales.size() * sizeof(float),
+                                          cudaMemcpyDeviceToHost));
                 }
             }
             layer.gate_table = static_cast<const void* const*>(plan->moe.gate.table.p);
@@ -3814,7 +4103,7 @@ struct Executor::Impl {
             Tensor y(rank.y, DType::FP32, {h, t});
             {
                 auto scope = rank.workspace->scope();
-                ops::moe_experts_gguf(mixed, ids, weights, shared, banks, *rank.workspace, y, s);
+                run_gguf(plan.moe, mixed, ids, weights, shared, banks, *rank.workspace, y, s);
             }
             CUDA_CHECK(cudaEventRecord(buffer.free, s));
             // A span's later chunks run this layer's experts again from the pool; otherwise the
@@ -3867,8 +4156,60 @@ struct Executor::Impl {
         const Tensor mixed(rank.mixed, DType::BF16, {h, t});
         Tensor y(rank.y, DType::FP32, {h, t});
         auto scope = rank.workspace->scope();
-        ops::moe_experts_gguf(mixed, ids, weights, shared, banks, *rank.workspace, y, s);
+        run_gguf(m, mixed, ids, weights, shared, banks, *rank.workspace, y, s);
         return true;
+    }
+
+    // One call over `banks` (device banks, cache slots or a slot pool): Flash-Next's experts, or a
+    // latent MoE's through the same routed tables.
+    static void run_gguf(const MoePlan& m, const Tensor& mixed, const Tensor& ids,
+                         const Tensor& weights, const Tensor& shared,
+                         const ops::GgufMoeWeights& banks, WorkspaceArena& ws, Tensor& y,
+                         cudaStream_t s) {
+        if (m.latent) {
+            ops::moe_latent_gguf(mixed, ids, weights, shared, m.latent_banks(banks), ws, y, s);
+            return;
+        }
+        ops::moe_experts_gguf(mixed, ids, weights, shared, banks, ws, y, s);
+    }
+
+    // A latent layer's call over host or disk experts through the misses (served_by_misses): D and
+    // the shared expert, then the cached pairs while the missing experts arrive or CPU threads
+    // compute them from the pairs' latent inputs, then U.
+    void run_latent_misses(const MoePlan& m, RankState& rank, std::int32_t t, std::size_t index,
+                           const Tensor& mixed, const Tensor& ids, const Tensor& weights,
+                           const Tensor& shared, Tensor& y) {
+        WorkspaceArena& ws       = *rank.workspace;
+        const cudaStream_t s     = rank.stream;
+        const bool wide          = t > kVectorTokens;
+        // A wide call's stages read device memory only: cache slots, staging and the dense banks.
+        const auto all           = m.latent_banks(wide ? m.cached() : m.banks());
+        const auto stage         = ops::moe_latent_gguf_begin(mixed, ids, shared, all, ws, s,
+                                                              wide ? nullptr : &rank.side);
+        const Tensor inputs =
+            stage.inputs != nullptr
+                ? Tensor(stage.inputs, DType::U8,
+                         {static_cast<std::int32_t>(
+                             ops::moe_latent_gguf_input_bytes(stage.pairs, m.latent->width))})
+                : mixed;
+        const auto call = misses->begin(index, ids, inputs, t, m.banks(), s);
+        ops::moe_latent_gguf_add(stage, call.cached_ids, weights, all, ws, s);
+        const auto missing = m.latent_banks(call.missing_banks);
+        std::int32_t products = 0;
+        if (wide) {
+            products = misses->stage_wide(index, s, [&](const Tensor& missing_ids) {
+                ops::moe_latent_gguf_add(stage, missing_ids, weights, missing, ws, s);
+            });
+        } else {
+            misses->await(index, s);
+            ops::moe_latent_gguf_add(stage, call.missing_ids, weights, missing, ws, s);
+            products = call.max_products;
+        }
+        if (products > 0) {
+            ops::moe_latent_gguf_add_products(stage, call.products, call.pairs, call.count,
+                                              products, ids, weights, all, s);
+        }
+        ops::moe_latent_gguf_finish(stage, all, ws, y, s);
     }
 
     // The rank's router counter: every router call of a rank runs on its stream, one at a time.
@@ -3916,6 +4257,10 @@ struct Executor::Impl {
             // meanwhile, and run in a second stage.
             Tensor y(rank.y, DType::FP32, {h, t});
             auto scope      = ws.scope();
+            if (m.latent) {
+                run_latent_misses(m, rank, t, index, mixed, ids, weights, shared, y);
+                return;
+            }
             const auto call = misses->begin(index, ids, mixed, t, m.banks(), s);
             if (t > kVectorTokens) {
                 // As over device banks: the cached experts' slots while the missing experts
@@ -3978,6 +4323,15 @@ struct Executor::Impl {
         }
         Tensor y(rank.y, DType::FP32, {h, t});
         auto scope = ws.scope();
+        if (m.latent) {
+            // The shared expert on the side stream beside the latent work at decode widths.
+            const ops::GgufLatentWeights banks = m.latent_banks();
+            const auto stage = ops::moe_latent_gguf_begin(
+                mixed, ids, shared, banks, ws, s, t <= kVectorTokens ? &rank.side : nullptr);
+            ops::moe_latent_gguf_add(stage, ids, weights, banks, ws, s);
+            ops::moe_latent_gguf_finish(stage, banks, ws, y, s);
+            return;
+        }
         if (ops::moe_experts_gguf_decode_supported(m.banks(), t)) {
             // The shared expert on the side stream beside the routed pairs, as with staged misses.
             const auto state = ops::moe_experts_gguf_decode_begin(mixed, ids, shared, m.banks(), ws,
@@ -4093,7 +4447,7 @@ struct Executor::Impl {
 
     // Whether the pass captures layer i's DFlash2 features.
     [[nodiscard]] bool taps(std::size_t i) const {
-        return dflash2 && capture.count > 0 && tap_of[i] >= 0;
+        return drafter && capture.count > 0 && tap_of[i] >= 0;
     }
 
     // Layer i's DFlash2 features of the pass columns `capture` names, from the completed stack at
@@ -4102,7 +4456,7 @@ struct Executor::Impl {
     void capture_tap(RankState& rank, const float* stack, std::size_t i) {
         const auto h           = static_cast<std::int32_t>(config.hidden_size);
         const auto hc          = static_cast<std::int32_t>(config.hc_count);
-        const std::size_t rows = std::size_t(dflash2->taps()) * config.hidden_size;
+        const std::size_t rows = std::size_t(drafter->taps()) * config.hidden_size;
         const Tensor columns(const_cast<float*>(stack) + std::size_t(capture.first) * hc * h,
                              DType::FP32, {h, hc, capture.count});
         Tensor out(static_cast<std::uint16_t*>(features.p) + std::size_t(capture.column) * rows +
@@ -4740,9 +5094,16 @@ struct Executor::Impl {
         }
         auto scope   = ws.scope();
         Tensor fixed = ws.alloc(DType::I64, {h, n});
-        ops::moe_experts_gguf_part(
-            mixed, ids, weights, &shared, m.banks(), static_cast<std::int32_t>(m.expert_begin),
-            static_cast<std::int32_t>(m.expert_end), ws, fixed, s, &rank.side);
+        if (m.latent) {
+            ops::moe_latent_gguf_part(mixed, ids, weights, &shared, m.latent_banks(),
+                                      static_cast<std::int32_t>(m.group_begin),
+                                      static_cast<std::int32_t>(m.group_end), ws, fixed, s,
+                                      &rank.side);
+        } else {
+            ops::moe_experts_gguf_part(
+                mixed, ids, weights, &shared, m.banks(), static_cast<std::int32_t>(m.expert_begin),
+                static_cast<std::int32_t>(m.expert_end), ws, fixed, s, &rank.side);
+        }
         Tensor y(partial + std::size_t(h) * std::size_t(run.column), DType::FP32, {h, n});
         ops::moe_experts_gguf_combine(std::span<const Tensor>(&fixed, 1), y, s);
     }
@@ -4777,7 +5138,7 @@ struct Executor::Impl {
     // final stacks (mtp_catch_up reads every chunk's).
     [[nodiscard]] bool kv_only_allowed() const noexcept {
         return !mtp && !layers.empty() && layers.back().qsa &&
-               (!dflash2 || tap_of[layers.size() - 1] < 0);
+               (!drafter || tap_of[layers.size() - 1] < 0);
     }
 
     // `none`: the call may leave no logits (a prompt step's).
@@ -5279,8 +5640,8 @@ struct Executor::Impl {
         std::vector<Capture> span_capture(chunks.size());
         std::vector<ContextRun> span_runs;
         std::size_t cut_runs = 0; // the runs that end at the cut
-        if (dflash2) {
-            const auto window = static_cast<std::int32_t>(*model.dflash2_config()->sliding_window);
+        if (drafter) {
+            const auto window = static_cast<std::int32_t>(drafter_window());
             std::int32_t column = 0;
             // The last window positions of the sequence's chunks among chunks[begin, end).
             const auto keep_last = [&](SequenceState* sequence, std::size_t begin,
@@ -5436,7 +5797,7 @@ struct Executor::Impl {
                     }
                 }
                 // Every chunk's stack has completed the layer: its DFlash2 features.
-                if (dflash2 && tap_of[i] >= 0) {
+                if (drafter && tap_of[i] >= 0) {
                     for (std::size_t k = 0; k < chunks.size(); ++k) {
                         if (span_capture[k].count == 0) { continue; }
                         capture = span_capture[k];
@@ -5478,7 +5839,7 @@ struct Executor::Impl {
             // A cut's ring lane is kept once its run before the cut is in.
             const std::span<const ContextRun> runs(span_runs);
             dflash2_context(runs.first(cut_runs), nullptr, 0);
-            if (dflash2 && cut.state != nullptr) {
+            if (drafter && cut.state != nullptr) {
                 copy_ring(*chunks[cut.chunk].sequence, *cut.state, true);
             }
             dflash2_context(runs.subspan(cut_runs), nullptr, 0);
@@ -5499,7 +5860,7 @@ struct Executor::Impl {
             if (cut.state != nullptr) {
                 const SequenceState& sequence = *chunks[cut.chunk].sequence;
                 cut.state->position           = chunks[cut.chunk].first;
-                cut.state->drafter_follows    = (mtp || dflash2) && sequence.drafter_follows;
+                cut.state->drafter_follows    = (mtp || drafter) && sequence.drafter_follows;
             }
         } catch (...) {
             rank.stack  = own_stack;
@@ -5540,9 +5901,7 @@ struct Executor::Impl {
         // DFlash2: the chunk's last window positions, which the ring keeps. A one-token pass
         // runs the decode graphs, which capture its column whether or not the drafter follows.
         const std::int32_t kept =
-            dflash2 ? std::min(part.count, static_cast<std::int32_t>(
-                                               *model.dflash2_config()->sliding_window))
-                    : 0;
+            drafter ? std::min(part.count, static_cast<std::int32_t>(drafter_window())) : 0;
         capture             = {.first = part.count - kept, .count = kept, .column = 0};
         prompt_pass         = true;
         kv_only_pass        = logit_rows == 0 && kv_only_allowed();
@@ -5730,7 +6089,7 @@ struct Executor::Impl {
                             part.sequence->drafter_follows ? 1 : 0, part.sequence->position});
         }
         // The decode graphs capture every column's DFlash2 features.
-        capture = {.first = 0, .count = dflash2 ? static_cast<std::int32_t>(parts.size()) : 0};
+        capture = {.first = 0, .count = drafter ? static_cast<std::int32_t>(parts.size()) : 0};
         try {
             pass(parts, tokens, static_cast<std::uint32_t>(tokens.size()));
         } catch (...) {
@@ -5738,7 +6097,7 @@ struct Executor::Impl {
             throw;
         }
         capture = {};
-        if (dflash2) { dflash2_context(runs, features.p, 1); }
+        if (drafter) { dflash2_context(runs, features.p, 1); }
         if (mtp) { mtp_catch_up(committed); }
     }
 
@@ -5774,7 +6133,7 @@ struct Executor::Impl {
         };
         // Room for both runs: the commit and the decode step between them take a position each.
         const bool drafting =
-            (mtp || dflash2) && can_draft(sequence) && fits(sequence, verify_width + 2);
+            (mtp || drafter) && can_draft(sequence) && fits(sequence, verify_width + 2);
         const auto widest   = std::min<std::uint32_t>(verify_width, kVectorTokens);
         std::vector<std::int32_t> drafts(options.draft_tokens);
         std::vector<std::uint32_t> extents(1);
@@ -5787,7 +6146,7 @@ struct Executor::Impl {
                 const std::uint32_t kept = 1;
                 commit(std::span(&sequence, 1), std::span(&kept, 1));
             }
-            if (dflash2) {
+            if (drafter) {
                 // One proposal runs every column at once. A commit's context call runs its run
                 // length's graph; the verifications above left features in every column, and the
                 // reset after the warm-up drops what these calls put in the ring.
@@ -5857,7 +6216,7 @@ struct Executor::Impl {
                 decode(batch, std::vector<std::int32_t>(batch.size(), kToken));
             }
         }
-        const bool round = batch.size() > 1 && (mtp || dflash2) &&
+        const bool round = batch.size() > 1 && (mtp || drafter) &&
                            std::all_of(batch.begin(), batch.end(), [&](std::uint32_t s) {
                                return can_draft(s) && fits(s, verify_width);
                            });
@@ -5941,7 +6300,7 @@ struct Executor::Impl {
     // ---- MTP speculative decoding ------------------------------------------------------------
 
     void require_drafts(const char* what) const {
-        if (!mtp && !dflash2) {
+        if (!mtp && !drafter) {
             throw std::logic_error(std::string("qwen4_exp ") + what +
                                    ": the executor has no drafts");
         }
@@ -5949,7 +6308,7 @@ struct Executor::Impl {
 
     [[nodiscard]] bool can_draft(std::uint32_t s) const {
         const SequenceState& sequence = sequences.at(s);
-        return (mtp || dflash2) && sequence.drafter_follows && sequence.position > 0;
+        return (mtp || drafter) && sequence.drafter_follows && sequence.position > 0;
     }
 
     // ---- DFlash2 ------------------------------------------------------------------------------
@@ -5996,7 +6355,7 @@ struct Executor::Impl {
         RankBinding bind(device, model.head_rank());
         RankState& rank        = ranks[model.head_rank()];
         const std::size_t r    = io_region(options.sequences) / 4;
-        const std::size_t rows = std::size_t(dflash2->taps()) * config.hidden_size;
+        const std::size_t rows = std::size_t(drafter->taps()) * config.hidden_size;
         const std::size_t positions_words = io_region(feature_columns) / 4;
         std::int32_t* host     = dflash2_stage();
         std::int32_t* counts   = host + positions_words;
@@ -6027,7 +6386,7 @@ struct Executor::Impl {
                 .lanes     = Tensor(io.context_lanes, DType::I32, {b}),
                 .min_count = min_count,
                 .max_count = max_count};
-            dflash2->materialize(call, *rank.workspace, rank.stream);
+            drafter->materialize(call, *rank.workspace, rank.stream);
             return;
         }
         at = 0;
@@ -6044,7 +6403,7 @@ struct Executor::Impl {
                     .lanes     = Tensor(io.context_lanes + j, DType::I32, {1}),
                     .min_count = std::uint32_t(run.count),
                     .max_count = std::uint32_t(run.count)};
-                const auto body = [&] { dflash2->materialize(call, *rank.workspace, rank.stream); };
+                const auto body = [&] { drafter->materialize(call, *rank.workspace, rank.stream); };
                 // A lone run from the first feature column (a verification's or a decode step's
                 // commit) replays its length's graph.
                 if (runs.size() == 1 && run.column == 0 &&
@@ -6095,7 +6454,7 @@ struct Executor::Impl {
             .candidates    = Tensor(io.candidates, DType::I32, {16, ki, n}),
             .proposal_q    = Tensor(io.q, DType::FP32, {16, ki, n}),
             .confidence    = Tensor(io.confidence, DType::FP32, {ki, n})};
-        const auto body = [&] { dflash2->propose(call, *rank.workspace, rank.stream); };
+        const auto body = [&] { drafter->propose(call, *rank.workspace, rank.stream); };
         if (b == 1) {
             dflash2_replay(dflash2_proposals.at(std::size_t(w)), body);
         } else {
@@ -6117,7 +6476,7 @@ struct Executor::Impl {
                 out[j * stride + i] = drafts[j * kk + i];
                 const float p       = confidences[j * kk + i];
                 if (!std::isfinite(p)) {
-                    throw std::runtime_error("qwen4_exp: non-finite DFlash2 draft confidence");
+                    throw std::runtime_error("qwen4_exp: non-finite masked draft confidence");
                 }
                 if (options.draft_min_p > 0 && length == k && p <= options.draft_min_p) {
                     length = static_cast<std::uint32_t>(i + 1);
@@ -6572,7 +6931,7 @@ struct Executor::Impl {
             }
             drafting.push_back(sequence);
         }
-        if (dflash2) {
+        if (drafter) {
             draft_dflash2(drafting, anchors, out, extents, k);
             return static_cast<std::uint32_t>(k);
         }
@@ -6799,7 +7158,7 @@ struct Executor::Impl {
         verifying = true;
         // The verification graphs capture every column's DFlash2 features; commit() takes the
         // kept ones into the ring.
-        capture = {.first = 0, .count = dflash2 ? static_cast<std::int32_t>(tokens.size()) : 0};
+        capture = {.first = 0, .count = drafter ? static_cast<std::int32_t>(tokens.size()) : 0};
         try {
             pass(parts, tokens, static_cast<std::uint32_t>(tokens.size()));
             if (draft_prefetch) {
@@ -6921,7 +7280,7 @@ struct Executor::Impl {
             sequence.position += kept[j];
         }
         verified.clear();
-        if (dflash2) {
+        if (drafter) {
             std::vector<ContextRun> runs;
             for (const Committed& c : committed) {
                 runs.push_back({c.sequence, c.column, c.sequence->drafter_follows ? c.count : 0,
@@ -6933,7 +7292,7 @@ struct Executor::Impl {
                 // Each sequence's kept columns as a row of the verification's width.
                 RankBinding bind(device, model.head_rank());
                 const cudaStream_t stream = ranks[model.head_rank()].stream;
-                const std::size_t rows = std::size_t(dflash2->taps()) * config.hidden_size;
+                const std::size_t rows = std::size_t(drafter->taps()) * config.hidden_size;
                 for (std::size_t j = 0; j < runs.size(); ++j) {
                     if (runs[j].count == 0) { continue; }
                     CUDA_CHECK(cudaMemcpyAsync(
@@ -6954,7 +7313,7 @@ struct Executor::Impl {
         copy_state(sequence, out, true);
         out.position        = sequence.position;
         out.context         = sequence.context;
-        out.drafter_follows = (mtp || dflash2) && sequence.drafter_follows;
+        out.drafter_follows = (mtp || drafter) && sequence.drafter_follows;
     }
 
     // Gives `out` its buffers, sized as `sequence`'s regions, unless it has them.
@@ -6979,7 +7338,7 @@ struct Executor::Impl {
             out.mtp.emplace_back(sequence.mtp.tail.bytes);
             out.mtp.emplace_back(sequence.mtp_pending.bytes);
         }
-        if (dflash2 && out.ring.bytes == 0) {
+        if (drafter && out.ring.bytes == 0) {
             RankBinding bind(device, model.head_rank());
             const auto lane = ring->slot_view(0);
             out.ring = DeviceBuffer((lane.k_layer_bytes + lane.v_layer_bytes) * lane.layers);
@@ -6996,7 +7355,7 @@ struct Executor::Impl {
         sequence.context  = from.context;
         // A snapshot taken before the drafter followed the sequence leaves it behind.
         sequence.drafter_follows =
-            ((mtp && !from.mtp.empty()) || (dflash2 && from.ring.bytes != 0)) &&
+            ((mtp && !from.mtp.empty()) || (drafter && from.ring.bytes != 0)) &&
             from.drafter_follows;
         // A media prompt that resumes from the state sets its media again (set_media), which
         // skips the items the state already holds.
@@ -7054,7 +7413,7 @@ struct Executor::Impl {
             out.push_back({at != nullptr ? at->mtp[1].p : sequence.mtp_pending.p,
                            sequence.mtp_pending.bytes, head});
         }
-        if (dflash2) {
+        if (drafter) {
             // The ring lane's slots of the positions before `position` (all of them past the
             // window), each layer's K then V, head by head while they are partly written.
             const std::size_t head = model.head_rank();
@@ -7130,14 +7489,14 @@ struct Executor::Impl {
                              std::span<std::byte* const> pages, std::size_t page_bytes) {
         const SequenceState& sequence = sequences.at(s);
         if (at != nullptr && (at->layers.size() != state_count() || (mtp && at->mtp.size() != 2) ||
-                              (dflash2 && at->ring.bytes == 0))) {
+                              (drafter && at->ring.bytes == 0))) {
             throw std::invalid_argument("qwen4_exp image: the snapshot holds no state");
         }
         const std::uint32_t position = at != nullptr ? at->position : sequence.position;
         copy_image(image_regions(sequence, at, position), pages, page_bytes, true);
         return SequenceImage{.position = position,
                              .context  = at != nullptr ? at->context : sequence.context,
-                             .drafter_follows = (mtp || dflash2) &&
+                             .drafter_follows = (mtp || drafter) &&
                                                 (at != nullptr ? at->drafter_follows
                                                                : sequence.drafter_follows)};
     }
@@ -7152,7 +7511,7 @@ struct Executor::Impl {
         forget_streamed_kv(sequence);
         sequence.position    = image.position;
         sequence.context     = image.context;
-        sequence.drafter_follows = (mtp || dflash2) && image.drafter_follows;
+        sequence.drafter_follows = (mtp || drafter) && image.drafter_follows;
         sequence.media_columns.clear();
         sequence.media_rope.clear();
         sequence.rope_delta = 0;
@@ -7187,7 +7546,7 @@ struct Executor::Impl {
     // The sequence's DFlash2 ring lane, whose slots the positions past the snapshot overwrite,
     // between the sequence and a snapshot, on the head rank's stream.
     void copy_ring(SequenceState& sequence, SequenceSnapshot& snapshot, bool save) {
-        if (!dflash2 || snapshot.ring.bytes == 0) { return; }
+        if (!drafter || snapshot.ring.bytes == 0) { return; }
         RankBinding bind(device, model.head_rank());
         const cudaStream_t stream = ranks[model.head_rank()].stream;
         const auto lane = ring->slot_view(static_cast<std::int32_t>(sequence.slot));
@@ -7344,7 +7703,7 @@ std::size_t Executor::set_media(std::uint32_t sequence, std::span<const MediaIte
 bool Executor::vision() const noexcept { return impl_->vision_context != nullptr; }
 
 std::uint32_t Executor::draft_tokens() const noexcept {
-    return impl_->mtp || impl_->dflash2 ? impl_->options.draft_tokens : 0;
+    return impl_->mtp || impl_->drafter ? impl_->options.draft_tokens : 0;
 }
 
 bool Executor::can_draft(std::uint32_t sequence) const { return impl_->can_draft(sequence); }

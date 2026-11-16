@@ -14,9 +14,9 @@
 
 // Token log probabilities on a real model through the public Engine, for any model family:
 // NINFER_LOGPROBS_ARTIFACT names the artifact, NINFER_LOGPROBS_NGRAM_TABLE a Qwen3.8-Flash-Next
-// table artifact, NINFER_LOGPROBS_SPECULATIVE=mtp|dflash2 verifies the tokens in speculative
-// rounds, and NINFER_LOGPROBS_CONTEXT_CACHE=hybrid admits every request through the hybrid prefix
-// cache.
+// table artifact, NINFER_LOGPROBS_SPECULATIVE=mtp|dflash2|dspine verifies the tokens in
+// speculative rounds (NINFER_LOGPROBS_DRAFT_MODEL names the DSpine drafter), and
+// NINFER_LOGPROBS_CONTEXT_CACHE=hybrid admits every request through the hybrid prefix cache.
 namespace {
 
 int g_failures = 0;
@@ -56,10 +56,15 @@ ninfer::EngineOptions engine_options(const char* artifact) {
         options.context_cache.host_cache_budget_bytes = 1ULL << 30;
     }
     if (const char* spec = std::getenv("NINFER_LOGPROBS_SPECULATIVE"); spec && *spec) {
+        using ninfer::SpeculativeBackend;
         const std::string_view backend(spec);
-        options.speculative.backend      = backend == "mtp" ? ninfer::SpeculativeBackend::Mtp
-                                                            : ninfer::SpeculativeBackend::DFlash2;
+        options.speculative.backend      = backend == "mtp"      ? SpeculativeBackend::Mtp
+                                           : backend == "dspine" ? SpeculativeBackend::DSpine
+                                                                 : SpeculativeBackend::DFlash2;
         options.speculative.draft_tokens = backend == "mtp" ? 3 : 15;
+        if (const char* drafter = std::getenv("NINFER_LOGPROBS_DRAFT_MODEL"); drafter && *drafter) {
+            options.speculative.draft_model = drafter;
+        }
     }
     return options;
 }
@@ -244,8 +249,9 @@ int run() {
 
     // Two constrained requests admitted together: on a Qwen3.5-core model under the hybrid cache
     // (the server's default) their prompts share one prefill pass, whose rows each sample under
-    // their own lane's first mask. The legacy cache splits a chat prompt at its turn closure, and
-    // no shared pass crosses that split.
+    // their own lane's first mask. A drafter's prompt work keeps a drafting request's last chunk
+    // out of a shared pass (only requests that draft nothing share one), and the legacy cache
+    // splits a chat prompt at its turn closure, which no shared pass crosses.
     {
         const ninfer::RuntimeStats before = engine.runtime_stats();
         std::vector<ninfer::GenerationSubmission> group;
@@ -276,9 +282,12 @@ int run() {
         std::cout << "grouped json: " << passes << " shared passes of " << requests
                   << " requests\n";
         const char* cache         = std::getenv("NINFER_LOGPROBS_CONTEXT_CACHE");
+        const char* spec          = std::getenv("NINFER_LOGPROBS_SPECULATIVE");
         const bool hybrid         = cache != nullptr && std::string_view(cache) == "hybrid";
+        const bool drafting       = spec != nullptr && *spec != '\0';
         const std::uint32_t limit = engine.branch_token_limit();
-        if (hybrid && limit != 0 && limit != std::numeric_limits<std::uint32_t>::max()) {
+        if (hybrid && !drafting && limit != 0 &&
+            limit != std::numeric_limits<std::uint32_t>::max()) {
             check(passes == 1 && requests == 2, "the constrained requests shared one prefill pass");
         }
     }

@@ -11,8 +11,8 @@
 // a same-topology payload control, and only the profiler evidence needed for the
 // concrete kernel question.
 
-#include "core/arena.h"
-#include "core/device.h"
+#include "core/device_buffer.h"
+#include "core/device_launch.h"
 
 #include <cuda_runtime.h>
 

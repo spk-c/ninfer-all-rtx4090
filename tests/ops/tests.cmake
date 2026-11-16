@@ -15,6 +15,7 @@ set(ninfer_op_tests
   moe_route
   moe_experts
   moe_experts_gguf
+  moe_latent_gguf
   moe_experts_native
   rmsnorm
   rmsnorm_pack_tail
@@ -190,6 +191,10 @@ set_tests_properties(
 
 ninfer_add_op_test(ninfer_prepare_masked_block_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_prepare_masked_block.cpp"
+  LIBRARIES ninfer_ops)
+
+ninfer_add_op_test(ninfer_dspine_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dspine.cpp"
   LIBRARIES ninfer_ops)
 
 ninfer_add_op_test(ninfer_sparse_moe_test

@@ -2,13 +2,15 @@
 
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "core/qtype.h"
 #include "models/deepseek_v41/dspark_ranking.h"
+#include "models/deepseek_v41/engram.h"
 #include "models/qwen3_5/frontend/tokenizer.h"
 #include "models/qwen3_5/load/bindings.h"
 
 #include <algorithm>
 #include <array>
-#include <cstring>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -45,14 +47,8 @@ FrontendResources bind_resources(artifact::Binder& binder, const TextConfig& con
     }
     out.public_token_count = static_cast<std::uint32_t>(count);
     const auto map = resource("engram_token_map");
-    if (map.size() != std::size_t(config.vocab_size) * 4) {
-        throw artifact::ArtifactError("the Engram token map must hold a compressed id per token");
-    }
-    token_map.resize(config.vocab_size);
-    std::memcpy(token_map.data(), map.data(), map.size());
-    for (const auto id : token_map) {
-        if (id < 0) { throw artifact::ArtifactError("the Engram token map holds a negative id"); }
-    }
+    token_map      = decode_engram_token_map(
+        std::as_bytes(std::span(map.data(), map.size())), config.vocab_size);
     return out;
 }
 
@@ -152,6 +148,14 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
         throw artifact::ArtifactError("the artifact's text component is not DeepseekV41ForCausalLM");
     }
     TextConfig config = parse_text_config(reader.directory().component("text").config);
+    if (!options.dspine.empty()) {
+        if (options.dspark) {
+            throw std::invalid_argument("DeepSeek-V4.1 drafts with one drafter: its DSpark drafter "
+                                        "or a DSpine drafter");
+        }
+        dspine::check_target(dspine::read_config(options.dspine), config.hidden_size,
+                             config.vocab_size, config.num_hidden_layers, "DeepSeek-V4.1");
+    }
     const bool vision = options.vision != VisionPlacement::None;
     if (vision && !has_vision(reader)) {
         throw artifact::ArtifactError("the artifact carries no vision tower (convert with "
@@ -455,6 +459,9 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
             model->expert_files_.push_back(file.path ? options.artifact.parent_path() / *file.path
                                                      : options.artifact);
         }
+    }
+    if (!options.dspine.empty()) {
+        model->dspine_ = dspine::load_model(options.dspine, device, observer);
     }
     return model;
 }

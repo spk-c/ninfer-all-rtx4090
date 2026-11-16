@@ -1,6 +1,7 @@
 #include "models/qwen3_5/load/bindings.h"
 
 #include "artifact/permute_row_split.h"
+#include "core/qtype.h"
 
 #include <span>
 #include <stdexcept>
@@ -41,8 +42,9 @@ void apply_storage_trades(Bindings& bindings, const Config& config, const ModelW
         }
     }
     if (options.lm_head_q4 || options.lm_head_q6) {
-        if (options.masked_draft()) {
-            // DFlash's candidate top-k reads the Q8 output head through its own kernel.
+        if (options.dflash() || options.dflash2()) {
+            // DFlash's candidate top-k reads the Q8 output head through its own kernel; DSpine's
+            // goes through Linear like the target's own rows.
             throw std::invalid_argument(
                 "--lm-head-q4/--lm-head-q6 are not supported with DFlash or DFlash2");
         }

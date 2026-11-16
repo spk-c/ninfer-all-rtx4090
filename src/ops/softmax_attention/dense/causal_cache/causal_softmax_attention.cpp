@@ -4,16 +4,21 @@
 #include "ninfer/ops/sigmoid_mul.h"
 
 #include "core/layout.h"
-#include "core/device.h"
+#include "core/device_launch.h"
 #include "core/paged_kv_storage.h"
 #include "ops/common/device_multiprocessors.h"
 #include "ops/common/device_tier.h"
 #include "ops/kv_cache/append/launch.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/geometry.cuh"
-#include "ops/softmax_attention/dense/causal_cache/launch.h"
-#include "ops/softmax_attention/dense/causal_cache/prompt_nvfp4_fast_plan.h"
-#include "ops/softmax_attention/dense/causal_cache/prompt_sm70.h"
+#include "ops/softmax_attention/dense/causal_cache/int8/prompt_fast_plan.h"
+#include "ops/softmax_attention/dense/causal_cache/prompt_launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/prompt_fast_launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/prompt_fast_plan.h"
+#include "ops/softmax_attention/dense/causal_cache/prompt_policy.h"
+#include "ops/softmax_attention/dense/causal_cache/sm70/prompt.h"
+#include "ops/softmax_attention/dense/causal_cache/route.h"
+#include "ops/softmax_attention/dense/causal_cache/small_t_launch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -677,15 +682,20 @@ static std::size_t workspace_capacity_bytes(AttentionHeadGeometry geometry,
             maximum = std::max(maximum, exact_capacity(width));
         }
     }
-    if (batch_size == 1 && kv_cache_is_int8_family(cache_storage) &&
+    if (batch_size == 1 &&
+        (kv_cache_is_int8_family(cache_storage) ||
+         cache_storage == KvCacheStorage::Fp8E4M3Row256) &&
         detail::causal_attention_prompt_fast_kernel(cache_storage, envelope.fast_prompt_kernel)) {
-        // The fast INT8-family prompt kernel's split partials. Only widths past every
-        // graph-captured call split (prompt_i8_fast_plan.h), and those always take the prompt
-        // route, so each plans at the envelope's maximum, which bounds every launch inside it.
+        // The fast prompt kernels' (INT8 family, row-scaled FP8) split partials. Only widths past
+        // every graph-captured call split (int8/prompt_fast_plan.h), and those always take the prompt
+        // route, so each plans at the envelope's maximum, which bounds every launch inside it. The
+        // FP8 fast CTA is four warps, so its plan never takes the wide eight-warp candidate.
         const detail::CausalPromptI8FastSplitPolicy policy =
             detail::causal_attention_prompt_fast_split_policy();
         const std::int32_t multiprocessors = detail::current_device_multiprocessors(170);
-        const bool wide                    = detail::causal_prompt_i8_fast_wide(cache_storage);
+        const bool wide                    = cache_storage == KvCacheStorage::Fp8E4M3Row256
+                                                 ? false
+                                                 : detail::causal_prompt_i8_fast_wide(cache_storage);
         for (std::int32_t width = std::max(min_width, detail::kCausalPromptI8FastMinSplitWidth);
              width <= max_width && policy.maximum > 1; ++width) {
             const detail::CausalPromptI8FastPlan plan = detail::causal_prompt_i8_fast_plan(
@@ -840,7 +850,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         return;
     }
     // A position-split rank's prompt: the rows it holds appended, then its keys' partial output
-    // (prompt_sm70.h), every storage on one route.
+    // (sm70/prompt.h), every storage on one route.
     if (partial_out != nullptr) {
         detail::kv_cache_append_batch_launch(k, v, positions, valid_columns, kv_table_rows, cache,
                                              stream);

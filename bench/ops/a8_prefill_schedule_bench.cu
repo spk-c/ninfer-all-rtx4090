@@ -18,6 +18,7 @@
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer_bench_common.h"
 #include "artifact/permute_row_split.h"
+#include "core/qtype.h"
 #include "core/weight_view.h"
 #include "quantized_weight.cuh"
 
