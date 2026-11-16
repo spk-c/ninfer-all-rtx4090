@@ -657,7 +657,7 @@ int main(int argc, char** argv) {
                 if ((c.qtype == QType::GGUF_Q3_K && down) || (c.qtype == QType::GGUF_IQ4_NL && !down)) {
                     continue;
                 }
-                const int f = run_type(c, seed++, k);
+                const int f = run_type(c, seed++, k, widths);
                 std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k << '\n';
                 failures += f;
             }
