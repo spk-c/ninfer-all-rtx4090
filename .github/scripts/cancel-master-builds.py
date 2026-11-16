@@ -1,13 +1,14 @@
-"""Cancel older master build/publication runs without touching other branches."""
+"""Cancel older master CI and Native release runs without touching other branches.
+
+A cancelled build saves the objects it completed and keeps its periodic checkpoints, so the newer
+run starts from them; only the units it was compiling are lost."""
 import json
 import os
 import subprocess
 import time
 
 
-WORKFLOWS = {
-    ".github/workflows/ci.yml", ".github/workflows/native-release.yml",
-}
+WORKFLOWS = {".github/workflows/ci.yml", ".github/workflows/native-release.yml"}
 
 
 def superseded(run, trigger):
@@ -21,13 +22,18 @@ def superseded(run, trigger):
 def cancel(run, api, post, sleep=time.sleep, checks=13, interval=5):
     """Cancel one run, or accept its own end within about a minute.
 
-    CI and Native release also cancel older master runs through their concurrency groups. GitHub
+    Both workflows also cancel older master runs through their concurrency groups. GitHub
     refuses a second cancellation of a run it is already stopping, and that run still reads
     in_progress for a few seconds.
     """
     error = post(run["id"])
     if not error:
         print(f"Cancellation requested: {run['name']} ({run['id']})", flush=True)
+        return
+    # A run GitHub never queued has no jobs and cannot be cancelled; five such runs of 11 November
+    # (e4b8f4485) stopped every coordinator since before it reached the runs it should cancel.
+    if "has not been queued yet" in error:
+        print(f"::notice::Never queued, left as is: {run['name']} ({run['id']})", flush=True)
         return
     for check in range(checks):
         if check:

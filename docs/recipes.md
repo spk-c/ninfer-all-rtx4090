@@ -43,8 +43,8 @@ is `true`):
 | `--kv-dtype` | KV-cache storage: ten formats from `bf16` to `rk2v4-e8` and the lossless `bf16p`; `rk8v4` is the all-round choice, `rk4v4` the longest windows ([context and memory](cli.md#context-and-memory)) |
 | `--gdn-state-fp16` | keep the Gated DeltaNet recurrent state in FP16 |
 | `--rope-yarn` | past the native window, YaRN instead of plain RoPE |
-| `--spec`, `--draft-tokens` | the speculative backend (`mtp`, `dflash`, `dflash2`) and the drafts of a round (1 to 15; 1 to 7 for Gemma 4) |
-| `--adaptive-mtp` | MTP only: pick each round's width from the drafts' measured survival |
+| `--spec`, `--draft-tokens`, `--draft-model` | the speculative backend (`mtp`, `dflash`, `dflash2`, `dspine` with its drafter artifact) and the drafts of a round (1 to 15; 1 to 7 for Gemma 4) |
+| `--adaptive-mtp` | pick each round's width from the drafts' measured survival: MTP, and on Qwen3.5-core models DFlash, DFlash2 and DSpine (`--draft-tokens` or half) |
 | `--vision`, `--vision-residency`, `--vision-max-merged` | image and video input, where the tower lives (`overlay` borrows device memory per image), and the merged-token budget of one item |
 | `--max-concurrency` | requests admitted at once, 1 to 8 |
 | `--devices` | one pipeline stage per listed GPU (Linux) |
@@ -155,6 +155,41 @@ docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -w / \
 - **Drafting.** `--spec mtp --draft-tokens 3` drafts with the MTP block the published artifacts
   carry.
 - **Images and video.** `--vision` adds the Vision tower (0.9 GB on the GPU).
+
+## Edge0-145B and Edge0-120B
+
+Converted from Edge0's release folders ([convert](edge0.md#convert)) and published: each model
+with the base model's Vision tower and without its n-gram table, and the table once for all four.
+
+```bash
+hf download WaveCut/Edge0-ngram-table-FP8-NInfer-v3 Edge0-ngram-table-FP8-ninfer-v3.ninfer --local-dir models
+hf download WaveCut/Edge0-120B-q3k-NInfer-v3 Edge0-120B-q3k-ninfer-v3.ninfer --local-dir models
+hf download WaveCut/Edge0-145B-q3k-NInfer-v3 Edge0-145B-q3k-ninfer-v3.ninfer --local-dir models
+hf download WaveCut/Edge0-145B-NVFP4-NInfer-v3 Edge0-145B-NVFP4-ninfer-v3.ninfer --local-dir models
+
+# Every expert on one 48 GB GPU, 32,768 tokens; one request at a time drafts with the MTP block.
+ninfer-serve --config configs/edge0-120b-q3k-device.ini
+
+# One GPU: Edge0-145B-q3k's experts in pinned host memory, the most used of them cached on the GPU.
+ninfer-serve --config configs/edge0-145b-q3k-host.ini
+
+# One GPU and little RAM: Edge0-145B-NVFP4's experts stay in the file and stream into a GPU cache.
+ninfer-serve --config configs/edge0-145b-nvfp4-disk.ini
+```
+
+- **Other releases.** Each release runs with any of the three files and its own artifact on the
+  command line (`ninfer-serve models/<file>.ninfer --config ...`); all four share the table.
+  [WaveCut/Edge0-120B-NVFP4-NInfer-v3](https://huggingface.co/WaveCut/Edge0-120B-NVFP4-NInfer-v3)
+  is the fourth.
+- **Memory.** Host experts pin 40.1 GB of RAM for Edge0-145B-q3k, 47.6 GB for -NVFP4, 28.6 GB for
+  Edge0-120B-q3k and 34.0 GB for -NVFP4; device experts need about 36 GB of GPU memory for
+  Edge0-120B-q3k and 41 GB for -NVFP4 before KV ([run](edge0.md#run)).
+- **Vision.** `--vision` (or `vision = true` in a configuration file) adds the Vision tower for
+  images and video, 0.9 GB of GPU memory ([measurements](edge0.md#vision)).
+- **Drafting.** Host experts, and device experts serving one request at a time, draft three tokens
+  a round with the MTP block; with disk experts `--spec mtp --draft-tokens 3` asks for it. The
+  [measurements](edge0.md#measurements) on an A40 show what each placement decodes with and without
+  drafts.
 
 ## Gemma 4 26B-A4B
 

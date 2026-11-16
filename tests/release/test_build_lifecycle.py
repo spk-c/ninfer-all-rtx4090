@@ -1,6 +1,5 @@
 """Check cancellation, failure propagation, and source selection without a compiler."""
 import importlib.util
-import json
 import os
 from pathlib import Path
 import signal
@@ -16,9 +15,6 @@ SCRIPT = ROOT / ".github/scripts/run-cached-build.py"
 SPEC = importlib.util.spec_from_file_location("cancel_master", ROOT / ".github/scripts/cancel-master-builds.py")
 CANCEL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CANCEL)
-SPEC = importlib.util.spec_from_file_location("wait_builds", ROOT / ".github/scripts/wait-previous-builds.py")
-WAIT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(WAIT)
 
 
 class BuildLifecycleTest(unittest.TestCase):
@@ -140,26 +136,16 @@ class BuildLifecycleTest(unittest.TestCase):
             self.assertEqual(result.returncode, 124)
             self.assertFalse((root / "started").exists())
 
-    def test_handoff_waits_for_cleanup_but_never_waits_for_a_newer_run(self):
-        polls = []
-
-        def api(command, **_kwargs):
-            path = command[-1]
-            if path.endswith("/actions/runs/10"):
-                return json.dumps(dict(workflow_id=1, head_branch="master", run_number=3))
-            if "/workflows/1/runs?" in path:
-                return json.dumps([dict(workflow_runs=[
-                    dict(id=9, run_number=2), dict(id=11, run_number=4)])])
-            self.assertTrue(path.endswith("/actions/runs/9"))
-            polls.append(path)
-            return json.dumps(dict(status="in_progress" if len(polls) == 1 else "completed"))
-
-        with patch.dict(os.environ, GITHUB_REPOSITORY="owner/repo", GITHUB_RUN_ID="10"), \
-                patch.object(WAIT.subprocess, "check_output", side_effect=api), \
-                patch.object(WAIT.time, "sleep") as sleep:
-            WAIT.main()
-            sleep.assert_called_once_with(15)
-        self.assertEqual(len(polls), 2)
+    def test_the_build_does_not_receive_the_bucket_credential(self):
+        # CI gives the supervisor the credential for checkpoints of pull request branches.
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "build.log"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--log", str(log), "--checkpoint-family=", "--",
+                 sys.executable, "-c", "import os; print('token:', os.environ.get('HF_TOKEN', 'absent'))"],
+                env=os.environ | {"HF_TOKEN": "test-only"}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("token: absent", log.read_text())
 
     def test_build_failure_is_not_hidden_by_logging(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,9 +194,10 @@ class BuildLifecycleTest(unittest.TestCase):
     def test_master_selection_preserves_prs_other_workflows_and_new_runs(self):
         trigger = dict(head_sha="b" * 40, created_at="2026-10-20T12:00:00Z")
         run = dict(status="in_progress", head_branch="master", event="push",
-                   path=".github/workflows/native-release.yml", head_sha="a" * 40,
+                   path=".github/workflows/ci.yml", head_sha="a" * 40,
                    created_at="2026-10-20T11:00:00Z")
         self.assertTrue(CANCEL.superseded(run, trigger))
+        self.assertTrue(CANCEL.superseded(run | dict(path=".github/workflows/native-release.yml"), trigger))
         for changes in (dict(head_branch="build/windows-release"), dict(event="pull_request"),
                         dict(status="completed"), dict(head_sha=trigger["head_sha"]),
                         dict(path=".github/workflows/other.yml"),
@@ -228,6 +215,14 @@ class BuildLifecycleTest(unittest.TestCase):
             CANCEL.cancel(run, lambda path: {"status": next(statuses)},
                           lambda run_id: "HTTP 409", sleep=sleeps.append)
         self.assertEqual(sleeps, [5, 5])
+
+    def test_a_run_github_never_queued_is_left_without_polling(self):
+        run = dict(id=43096747885, name="CI")
+        with patch("builtins.print") as printed:
+            CANCEL.cancel(run, lambda path: self.fail("polled"),
+                          lambda run_id: "gh: Cannot cancel a workflow run that has not been queued yet. (HTTP 409)",
+                          sleep=lambda seconds: self.fail("slept"))
+        self.assertIn("Never queued", printed.call_args.args[0])
 
     def test_refused_cancel_fails_when_the_run_keeps_going(self):
         run = dict(id=7, name="CI")

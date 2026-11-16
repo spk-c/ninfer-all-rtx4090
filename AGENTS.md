@@ -48,9 +48,15 @@ eight requests at once (one batched decode step between prompt chunks), and may 
 experts off the GPU, in pinned host memory with a device cache of the most used
 ones (`--expert-residency host`) or in the artifact's files, read into a device cache as each layer
 routes to them (`--expert-residency disk`). Its n-gram table is stored in the model's artifact or
-in a separate table artifact the model names by digest (`--ngram-table`); it stays in that file,
+in a separate table artifact the model names by digest (`--ngram-table`), which any table of the
+same hash constants and geometry may replace in any row format; it stays in that file,
 read a row at a time, unless `--ngram-residency ram` loads it. A model with PLE requires its table
 unless `--no-ngram-table` overrides that; a qualification layer slice without PLE needs no table.
+Edge0-145B and Edge0-120B (`docs/edge0.md`) are a form of this family converted from Edge0's
+release folders (`text_config.latent_moe`): each text layer's routed experts are latent experts in
+8 groups (NVFP4, or Q3_K and IQ4_NL) between Q8_0 or Q4_0 group encoders and decoders, which
+`moe_latent_gguf` runs with the family's placements, CPU share and tensor parallelism by whole
+groups.
 Native Qwen MoE, Gemma MoE and Flint also support host/disk expert placements, with whole-layer
 device banks beside the optional persistent cache and the same CPU share of decode misses.
 Gemma 4 26B-A4B (`Gemma4ForCausalLM`, the text component of `Gemma4ForConditionalGeneration`;
@@ -95,8 +101,8 @@ The CPU's GGUF expert products reproduce the GPU's decode products bit for bit
 (`gguf_expert_cpu`); a change to either side keeps them equal.
 Develop the existing GGUF host-RAM and disk-streaming paths;
 reuse published weights and the published IQ4 table when adding MTP. Disk residency uses the OS
-page cache. An additional application-managed RAM cache of experts is excluded from this delivery
-by the user's decision. Keep the bounded transfer buffers and the device expert cache.
+page cache. An additional application-managed RAM cache of experts is not part of this delivery.
+Keep the bounded transfer buffers and the device expert cache.
 This line builds for **`sm_86`** (the RTX 30 series; that build also runs the RTX 40 series),
 `sm_89`, `120a` (the RTX 50 series and RTX PRO 6000 Blackwell, CUDA 13.1 or newer except 13.2.0 and 13.2.1) and `sm_75`
 (Turing: the TITAN RTX and RTX 20 series, Turing forms of the sm_80 instructions and Turing shapes

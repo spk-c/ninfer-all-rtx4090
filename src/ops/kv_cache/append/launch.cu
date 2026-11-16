@@ -1,6 +1,6 @@
 #include "ops/kv_cache/append/launch.h"
 
-#include "core/device.h"
+#include "core/device_launch.h"
 #include "ops/common/math.h"
 #include "ops/kv_cache/append/kernel.cuh"
 #include "ops/kv_cache/plane_types.h"
@@ -190,6 +190,9 @@ void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, co
         return;
     case 4096:
         launch_cyclic_profile<4096>(k, v, positions, counts, lanes, cache, plan, stream);
+        return;
+    case 8192:
+        launch_cyclic_profile<8192>(k, v, positions, counts, lanes, cache, plan, stream);
         return;
     default:
         throw std::invalid_argument("kv_cache_append_prefix: unsupported cyclic capacity");

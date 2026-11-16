@@ -7,8 +7,9 @@
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "core/arena.h"
-#include "core/device.h"
-#include "core/paged_kv_cache.h"
+#include "core/device_buffer.h"
+#include "core/device_launch.h"
+#include "core/paged_kv_view.h"
 #include "core/paged_kv_storage.h"
 #include "ops/kv_bf16p_host.h"
 #include "ops/op_tester.h"
@@ -22,6 +23,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ninfer;
@@ -426,6 +428,12 @@ int main() {
         failures += append_case(kv_heads, 0, 100, 11U + static_cast<std::uint32_t>(kv_heads));
         failures += append_case(kv_heads, 37, 130, 21U + static_cast<std::uint32_t>(kv_heads));
         failures += append_case(kv_heads, 63, 1, 31U + static_cast<std::uint32_t>(kv_heads));
+    }
+    // Attention over a packed cache needs sm_75 or newer; a Volta card checks the appends only.
+    if (ops::current_device_volta()) {
+        std::cout << "SKIP attention: --kv-dtype bf16p needs sm_75 or newer\n";
+        std::cout << (failures == 0 ? "PASS" : "FAIL") << " kv_bf16p failures=" << failures << '\n';
+        return failures == 0 ? 0 : 1;
     }
     struct Shape {
         int history, width;

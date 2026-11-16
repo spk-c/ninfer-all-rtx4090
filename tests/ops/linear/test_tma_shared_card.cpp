@@ -12,7 +12,9 @@
 // admitted A16 policy. That qualifies the portable route, not Blackwell's TMA stage release.
 
 #include "core/arena.h"
-#include "core/device.h"
+#include "core/device_buffer.h"
+#include "core/device_launch.h"
+#include "core/qtype.h"
 #include "core/tensor.h"
 #include "core/weight.h"
 #include "ninfer/ops/linear.h"

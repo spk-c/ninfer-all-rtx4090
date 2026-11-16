@@ -1,7 +1,8 @@
 #include "ops/linear/sm70/sm70_project.h"
 
-#include "core/device.h"
+#include "core/device_launch.h"
 #include "core/layout.h"
+#include "core/qtype.h"
 #include "ops/common/math.cuh"
 #include "ops/linear/sm70/sm70_dequantize.h"
 #include "ops/linear/sm70/sm70_epilogue.cuh"

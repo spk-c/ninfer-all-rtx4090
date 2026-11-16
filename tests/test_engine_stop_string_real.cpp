@@ -2,6 +2,7 @@
 #include "ninfer/engine.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -17,8 +18,9 @@
 // limit ended at that position.
 //   NINFER_STOP_ARTIFACT       the artifact (skipped without one)
 //   NINFER_STOP_NGRAM_TABLE    a Qwen3.8-Flash-Next table artifact
-//   NINFER_STOP_SPECULATIVE    mtp | dflash | dflash2 | dspark | lookup: the reply decodes in
-//                              speculative rounds (NINFER_STOP_DRAFTS tokens, 4 by default)
+//   NINFER_STOP_SPECULATIVE    mtp | dflash | dflash2 | dspark | dspine | lookup: the reply decodes
+//                              in speculative rounds (NINFER_STOP_DRAFTS tokens, 4 by default)
+//   NINFER_STOP_DRAFT_MODEL    the DSpine drafter artifact (with dspine)
 //   NINFER_STOP_EXPERTS        host | disk: where the routed experts stay
 //   NINFER_STOP_CONTEXT_CACHE  hybrid: the hybrid prefix cache
 //   NINFER_STOP_KV             int8: an int8 KV cache
@@ -98,7 +100,9 @@ ninfer::EngineOptions engine_options(const char* artifact) {
             options.speculative.backend = backend == "mtp"       ? ninfer::SpeculativeBackend::Mtp
                                           : backend == "dflash"  ? ninfer::SpeculativeBackend::DFlash
                                           : backend == "dflash2" ? ninfer::SpeculativeBackend::DFlash2
+                                          : backend == "dspine"  ? ninfer::SpeculativeBackend::DSpine
                                                                  : ninfer::SpeculativeBackend::DSpark;
+            options.speculative.draft_model = std::string(variable("NINFER_STOP_DRAFT_MODEL"));
         }
         options.speculative.draft_tokens = count;
     }
@@ -168,19 +172,25 @@ int run() {
         whole_ids  = std::move(reply.generated_token_ids);
     }
     // A stop string of several tokens, taken from the reply itself where it first occurs: late
-    // enough that the reply before it is long, early enough that the reply reaches it.
+    // enough that the reply before it is long, early enough that the reply reaches it. It begins at
+    // a space after a word where the reply has one: a match that begins inside a word leaves a
+    // fragment of it in the visible text, which the next prompt's tokenizer joins to the token
+    // before it (Qwen3.8-27B's "E" and the "l" of "lias" become "El"), so no state the turn kept
+    // continues that prompt.
     const auto asked_bytes       = variable("NINFER_STOP_BYTES");
     const std::size_t stop_bytes = asked_bytes.empty() ? 14U : std::stoul(std::string(asked_bytes));
     std::optional<std::size_t> cut;
-    for (std::size_t at = whole.size() * 3 / 4; at + stop_bytes <= whole.size(); ++at) {
-        const std::string_view candidate = std::string_view(whole).substr(at, stop_bytes);
-        const bool ascii = std::all_of(candidate.begin(), candidate.end(), [](char byte) {
-            return static_cast<unsigned char>(byte) < 0x80U;
-        });
-        if (ascii && whole.find(candidate) == at) {
-            cut = at;
-            break;
+    for (const bool after_word : {true, false}) {
+        for (std::size_t at = whole.size() * 3 / 4; !cut && at + stop_bytes <= whole.size(); ++at) {
+            const std::string_view candidate = std::string_view(whole).substr(at, stop_bytes);
+            const bool ascii = std::all_of(candidate.begin(), candidate.end(), [](char byte) {
+                return static_cast<unsigned char>(byte) < 0x80U;
+            });
+            const bool word_ends = at > 0 && whole[at] == ' ' &&
+                                   std::isalnum(static_cast<unsigned char>(whole[at - 1])) != 0;
+            if (ascii && (word_ends || !after_word) && whole.find(candidate) == at) { cut = at; }
         }
+        if (cut) { break; }
     }
     check(cut.has_value(), "the reply holds a usable stop string");
     if (!cut) { return 1; }

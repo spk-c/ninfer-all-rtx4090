@@ -8,6 +8,7 @@
 // device without peer access cannot address.
 
 #include "core/device.h"
+#include "core/device_buffer.h"
 #include "core/tensor.h"
 #include "core/weight_view.h"
 #include "models/qwen3_5/weights.h"

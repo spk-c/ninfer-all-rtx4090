@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/paged_kv_cache.h"
+#include "core/paged_kv_page.h"
 
 #include <cstdint>
 

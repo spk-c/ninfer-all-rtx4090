@@ -3,9 +3,11 @@
 #include "artifact/formats.h"
 #include "artifact/reader.h"
 #include "core/arena.h"
+#include "core/device_buffer.h"
 #include "core/device_wait.h"
 #include "core/host_pages.h"
 #include "core/file_read_error.h"
+#include "core/pinned_memory.h"
 #include "core/startup.h"
 #include "core/tensor_parallel.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
@@ -156,19 +158,21 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     const SpeculativeOptions& speculative = options.speculative;
     if (speculative.backend == SpeculativeBackend::DFlash ||
         speculative.backend == SpeculativeBackend::DSpark) {
-        throw std::invalid_argument("Qwen3.8-Flash-Next drafts with its MTP block (--spec mtp) "
-                                    "or its DFlash2 drafter (--spec dflash2)");
+        throw std::invalid_argument("Qwen3.8-Flash-Next drafts with its MTP block (--spec mtp), "
+                                    "its DFlash2 drafter (--spec dflash2) or a DSpine drafter "
+                                    "(--spec dspine)");
     }
     const bool mtp     = speculative.backend == SpeculativeBackend::Mtp;
     const bool dflash2 = speculative.backend == SpeculativeBackend::DFlash2;
-    const bool drafts  = mtp || dflash2;
+    const bool dspine  = speculative.backend == SpeculativeBackend::DSpine;
+    const bool drafts  = mtp || dflash2 || dspine;
     const float floor  = speculative.draft_min_p.value_or(0.0F);
     if (!std::isfinite(floor) || floor < 0 || floor > 1 || (!drafts && floor != 0)) {
         throw std::invalid_argument(
-            "--draft-min-p requires --spec mtp or dflash2 and a finite value in [0,1]");
+            "--draft-min-p requires --spec mtp, dflash2 or dspine and a finite value in [0,1]");
     }
     if (drafts && (speculative.draft_tokens == 0 || speculative.draft_tokens > 15)) {
-        throw std::invalid_argument("--spec mtp and --spec dflash2 require --draft-tokens in "
+        throw std::invalid_argument("--spec mtp, dflash2 and dspine require --draft-tokens in "
                                     "[1,15]");
     }
     // The drafter predicts a block of eight positions, the last token and seven masks: incoai's
@@ -188,7 +192,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
                                     "--mtp-attention-window, --lm-head-draft or n-gram archive");
     }
     if (speculative.lookup_ngram != 0 && !drafts) {
-        throw std::invalid_argument("--lookup-ngram requires --spec mtp or dflash2");
+        throw std::invalid_argument("--lookup-ngram requires --spec mtp, dflash2 or dspine");
     }
     if (speculative.mtp_policy == MtpDraftPolicy::Adaptive && !mtp) {
         throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
@@ -244,6 +248,16 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
         ngram = models::qwen4_exp::ngram_table_source(
             reader, options.artifact_path, text, table.path,
             table.residency == NgramResidency::RamHot && table.hot_profile.empty());
+        if (ngram->table_digest != ngram->model_digest ||
+            ngram->table_format != ngram->model_format) {
+            publish_diagnostic(
+                options.diagnostic_observer, DiagnosticLevel::Warning,
+                "Qwen3.8-Flash-Next: n-gram table %s, sha256 %.16s..., in place of the %s table "
+                "the model names, sha256 %.16s...; its hash constants and geometry match the "
+                "model's, its values are not checked",
+                ngram->table_format.c_str(), ngram->table_digest.c_str(),
+                ngram->model_format.c_str(), ngram->model_digest.c_str());
+        }
         if (table.residency == NgramResidency::RamHot) {
             if (!table.hot_profile.empty()) {
                 auto profile = models::qwen4_exp::read_ngram_profile(table.hot_profile);
@@ -270,6 +284,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     load.vision       = options.enable_vision;
     load.mtp          = mtp;
     load.dflash2      = dflash2;
+    if (dspine) { load.dspine = speculative.draft_model; }
     // Tensor parallelism: every layer's mixer heads, routed experts and shared expert divided over
     // the devices, and the head's rows; the MTP block, the DFlash2 drafter and Vision on the first.
     // Without --tensor-split each device takes a share of its speed that fits beside what it holds.
@@ -312,6 +327,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     executor.sequences       = options.max_concurrency;
     executor.draft_tokens    = drafts ? speculative.draft_tokens : 0;
     executor.dflash2         = dflash2;
+    executor.dspine          = dspine;
     executor.draft_min_p     = speculative.draft_min_p.value_or(0.0F);
     // The rotation past the native window, as every family resolves it (rope_scaling.h): YaRN
     // reaches every rotation this model makes (sparse attention, its indexer, the MTP block);
@@ -325,6 +341,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
                         (executor.draft_tokens + 1) * executor.sequences);
     };
     executor.prefill_chunk = chunk_of(options.prefill_chunk ? options.prefill_chunk : 1024);
+    instance->ngram_table_digest = ngram ? ngram->table_digest : std::string();
     executor.ngram           = std::move(ngram);
     executor.ngram_read      = std::move(ngram_read);
     executor.iq1m_matrix     = options.iq1m_expert_matrix;
@@ -401,12 +418,12 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     }
     publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
                        "Qwen3.8-Flash-Next: %zu stage(s), prompt chunks of %u tokens, experts in "
-                       "%s memory, n-gram table %s, state %.0f MiB, workspace %.0f MiB, expert "
+                       "%s, n-gram table %s, state %.0f MiB, workspace %.0f MiB, expert "
                        "cache %.0f MiB, CUDA Graphs %.0f MiB",
                        model->stages().stages(), executor.prefill_chunk,
-                       options.expert_residency == ExpertResidency::Host   ? "host"
+                       options.expert_residency == ExpertResidency::Host   ? "host memory"
                        : options.expert_residency == ExpertResidency::Disk ? "the artifact's files"
-                                                                           : "device",
+                                                                           : "device memory",
                        table_place.c_str(),
                        double(instance->executor->memory().state_bytes) / 1048576.0,
                        double(instance->executor->memory().workspace_bytes) / 1048576.0,
@@ -432,9 +449,13 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
         publish_diagnostic(
             options.diagnostic_observer, DiagnosticLevel::Info,
             "Qwen3.8-Flash-Next: tensor parallelism, by device Gated DeltaNet key "
-            "heads %s, sparse-attention KV heads %s, routed experts %s, shared-expert "
+            "heads %s, sparse-attention KV heads %s, %s %s, shared-expert "
             "middle %s, head rows %s",
-            keys.c_str(), kv.c_str(), experts.c_str(), shared.c_str(), head.c_str());
+            keys.c_str(), kv.c_str(),
+            model->config().latent_moe
+                ? "latent groups cut in each layer nearest the routed experts' shares"
+                : "routed experts",
+            experts.c_str(), shared.c_str(), head.c_str());
     }
     if (const auto memory = instance->executor->memory(); memory.streamed_kv) {
         publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
@@ -455,12 +476,14 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     if (drafts) {
         publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
                            "Qwen3.8-Flash-Next: %s speculative decoding, %u drafts a round",
-                           dflash2 ? "DFlash2" : "MTP", speculative.draft_tokens);
+                           dflash2 ? "DFlash2" : (dspine ? "DSpine" : "MTP"),
+                           speculative.draft_tokens);
         if (speculative.ngram_draft_tokens != 0) {
             publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
                                "Qwen3.8-Flash-Next drafts with its %s only; n-gram copy "
                                "proposals (--ngram-draft-tokens) are not available for it",
-                               dflash2 ? "DFlash2 drafter" : "MTP block");
+                               dflash2 ? "DFlash2 drafter"
+                                       : (dspine ? "DSpine drafter" : "MTP block"));
         }
     }
     if (executor.rope_yarn.active()) {
@@ -1208,8 +1231,8 @@ struct Qwen4ExpCore::Impl {
     // ---- The context cache's store ------------------------------------------------------------
 
     // The disk tier's directory for this model and execution profile: an image holds the KV in its
-    // storage format and the drafter's state (the MTP block's, or the DFlash2 ring lane's) only
-    // when it runs. Verify width changes reductions; disabling PLE changes every layer's
+    // storage format and the drafter's state (the MTP block's, or the DFlash2 or DSpine ring
+    // lane's) only when it runs. Verify width changes reductions; disabling PLE changes every layer's
     // recurrent/KV state. Each needs its own store.
     [[nodiscard]] std::string profile_name(const EngineOptions& options) const {
         std::string id;
@@ -1221,11 +1244,18 @@ struct Qwen4ExpCore::Impl {
         return "qwen4_exp-image1-" + id + "-kv" +
                std::to_string(static_cast<int>(options.kv_cache)) +
                (options.speculative.backend == SpeculativeBackend::DFlash2 ? "-dflash2" : "") +
+               (instance.model->dspine() != nullptr
+                    ? "-dspine" + instance.model->dspine()->artifact_hex() + "-ring" +
+                          std::to_string(models::dspine::ring_capacity(
+                              instance.model->dspine()->config(), options.max_context))
+                    : std::string()) +
                "-drafts" + std::to_string(drafts) + "-draft-min-p" +
                std::to_string(
                    std::bit_cast<std::uint32_t>(options.speculative.draft_min_p.value_or(0.0F))) +
-               "-ngram" + std::to_string(options.ngram_table.disabled ? 0 : 1) + "-experts-" +
-               instance.executor->expert_execution_profile();
+               "-ngram" +
+               (instance.ngram_table_digest.empty() ? std::string("0")
+                                                    : instance.ngram_table_digest.substr(0, 16)) +
+               "-experts-" + instance.executor->expert_execution_profile();
     }
 
     struct FileHeader {
@@ -3682,13 +3712,17 @@ MemorySummary Qwen4ExpCore::memory_summary() const {
     const auto arena   = [](std::uint64_t bytes) {
         return ArenaMemorySummary{bytes, bytes, bytes};
     };
+    // A DSpine drafter's weights load beside the model's on its first device.
+    const auto* drafter                 = impl_->instance.model->dspine();
+    const std::uint64_t drafter_weights = drafter != nullptr ? drafter->device_bytes() : 0U;
     std::vector<DeviceMemorySummary> devices;
     for (std::size_t r = 0; r < impl_->device.size(); ++r) {
         const auto& rank = memory.ranks.at(r);
+        const std::uint64_t rank_weights =
+            (r < stats.device_capacity_by_rank.size() ? stats.device_capacity_by_rank[r] : 0) +
+            (r == 0 ? drafter_weights : 0U);
         devices.push_back({.device    = impl_->device.rank(r).device,
-                           .weights   = arena(r < stats.device_capacity_by_rank.size()
-                                                  ? stats.device_capacity_by_rank[r]
-                                                  : 0),
+                           .weights   = arena(rank_weights),
                            .sequence  = arena(rank.state_bytes),
                            .workspace = arena(rank.workspace_bytes),
                            .expert_cache_bytes = rank.expert_cache_bytes});

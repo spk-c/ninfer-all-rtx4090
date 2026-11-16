@@ -6,10 +6,12 @@
 // captured per graph, and the reported node count is the captured graph's real node count.
 
 #include "core/weight.h"
-#include "ninfer/ops/linear.h"
+#include "ninfer/ops/linear_policy.h"
 #include "ninfer/ops/linear_add.h"
 
-#include "core/device.h"
+#include "core/device_buffer.h"
+#include "core/device_launch.h"
+#include "core/qtype.h"
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 

@@ -9,10 +9,10 @@
 // replicas of what each device computes for itself (LoadOptions::tensor_split).
 
 #include "artifact/materializer.h"
-#include "core/arena.h"
 #include "core/device.h"
 #include "core/stage_plan.h"
 #include "core/startup.h"
+#include "core/tensor.h"
 #include "models/qwen3_5/auxiliary_replicas.h"
 #include "models/qwen3_5/frontend/resources.h"
 #include "models/qwen3_5/model.h"
@@ -62,8 +62,20 @@ struct GdnWeights {
     WeightId convolution, norm, output;
 };
 
+// A latent MoE's own operands (TextConfig::latent_moe): the groups' encoders [groups * width,
+// hidden] and decoders [groups * hidden, width] as one parameter each, the experts' group labels,
+// and the optional multipliers. Under tensor parallelism a rank's encoder and decoder hold the
+// layer's groups [group_begin, group_end), else every group.
+struct LatentWeights {
+    WeightId encode, decode, labels;
+    std::optional<WeightId> expert_scales, column_scale;
+    std::uint32_t group_begin = 0, group_end = 0;
+};
+
 struct MoeWeights {
     WeightId router, shared_score;
+    // Edge0's latent experts: then each expert's gate and up are [640, width], its down [width, 640].
+    std::optional<LatentWeights> latent;
     // One per expert; empty when the experts stay in the files, which `located` then describes.
     std::vector<WeightId> gate, up, down;
     std::vector<ExpertLocation> located_gate, located_up, located_down;
@@ -109,6 +121,9 @@ struct TextWeights {
 struct TensorShare {
     std::uint32_t key_head_begin = 0, key_head_end = 0;
     std::uint32_t kv_head_begin = 0, kv_head_end = 0;
+    // A latent MoE's ranks hold whole projection groups, chosen in each layer by its labels
+    // (LatentWeights::group_begin); expert_begin and expert_end then count the rank's share of
+    // the experts, which only the shared expert's runs follow.
     std::uint32_t expert_begin = 0, expert_end = 0;
     std::uint32_t shared_begin = 0, shared_end = 0;
 };
@@ -156,6 +171,9 @@ struct LoadOptions {
     // Loads the DFlash2 drafter the artifact carries (its `dflash2` component) onto the device of
     // the head, which it reads, as it reads the token embedding.
     bool dflash2 = false;
+    // Loads the standalone DSpine drafter artifact at this path (--draft-model) onto the device of
+    // the head; empty for none. One device or tensor parallelism, as DFlash2.
+    std::filesystem::path dspine;
     // Tensor parallelism (`--tensor-parallel`): each rank's relative share of every layer, one
     // positive weight per rank; empty for none. Each rank holds a run of every Gated DeltaNet
     // layer's heads, of the sparse-attention layers' KV heads (as far as the two allow) and of the
@@ -224,6 +242,9 @@ public:
         return dflash2_weights_;
     }
 
+    // The standalone DSpine drafter when the model was loaded with one (LoadOptions::dspine).
+    [[nodiscard]] const dspine::Model* dspine() const noexcept { return dspine_.get(); }
+
     [[nodiscard]] const FrontendResources& resources() const noexcept { return resources_; }
 
     // The artifact's files, in its order (disk-resident experts are read from them).
@@ -269,6 +290,7 @@ private:
     std::optional<MtpWeights> mtp_weights_;
     std::optional<DFlash2Config> dflash2_config_;
     std::optional<DFlash2Weights> dflash2_weights_;
+    std::unique_ptr<dspine::Model> dspine_;
     std::vector<TensorShare> shares_; // by rank under tensor parallelism
 };
 

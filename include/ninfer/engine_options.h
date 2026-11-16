@@ -54,6 +54,9 @@ struct SpeculativeOptions {
     // memory); 0 keeps every expert on the device. Unset: 64 with the STQ drafter and host or disk
     // experts, otherwise every expert.
     std::optional<std::uint32_t> draft_experts;
+    // --spec dspine: the DSpine drafter artifact (tools/convert, recipe dspine_q8 or dspine_bf16),
+    // trained for the model's hidden width, vocabulary and layers. Empty otherwise.
+    std::string draft_model;
     // An Engine's options() report the resolved head.
     ProposalHead proposal_head = ProposalHead::Auto;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
@@ -82,9 +85,9 @@ struct SpeculativeOptions {
     // round verified through the first draft at or below kAutomaticDFlash2MinP, or without one
     // with its MTP block, kAutomaticDraftTokens a round ending at the first draft at or below
     // kAutomaticDraftMinP, a round of several requests with a CPU share verifying at most the
-    // tokens of the widest call the CPU shares (64 with GGUF host experts); Gemma 4 with host or
-    // disk experts with its assistant, kAutomaticDraftTokens a round; others run without drafts.
-    // The Engine's options() report the resolved backend.
+    // tokens of the widest call the CPU shares (64 with GGUF host experts), Edge0's form also with
+    // device experts at max_concurrency 1; Gemma 4 with host or disk experts with its assistant,
+    // kAutomaticDraftTokens a round; others run without drafts. options() report the backend.
     bool automatic = false;
     static constexpr std::uint32_t kAutomaticDraftTokens   = 3;
     static constexpr float kAutomaticDraftMinP             = 0.5F;

@@ -30,7 +30,8 @@ it puts in front of a window that lacks it; the scored tokens stay the window's 
 
 Seven of them were measured on this corpus with Qwen3.8-27B on an RTX 3090; the results, alongside
 each format's size and decode speed, are in [`docs/config-calculator.html`](config-calculator.html).
-`--fast-prefill-kernel` scores an `int8` or `rk*` cache with the fast prompt-attention kernel (as
+`--fast-prefill-kernel` scores an `int8` or `rk*` cache with the fast prompt-attention kernel and
+an `fp8` cache with its in-register dequant kernel (as
 `ninfer-serve --fast-prefill-kernel` prefills); `report.json` records it as `fast_prefill_kernel`.
 The evaluator also takes the server's `--devices` (one pipeline stage per GPU, or with
 `--tensor-parallel`, `--tensor-split`, `--tensor-attention`, `--tensor-parallel-transport` and
@@ -39,8 +40,8 @@ The evaluator also takes the server's `--devices` (one pipeline stage per GPU, o
 MoE residency options (`--expert-residency`, `--expert-cache-mib`) for native Qwen, Gemma 4, Flint,
 DeepSeek-V4.1 and Qwen3.8-Flash-Next, its Qwen3.8-Flash-Next n-gram options (`--ngram-table`,
 `--ngram-residency`, `--ngram-io`, `--ngram-io-depth`, `--ngram-hot-profile`, `--ngram-ram-mib`,
-`--ngram-lock`, `--ngram-dedupe`, `--no-ngram-table`; DeepSeek-V4.1's Engram table takes all but
-`ram-hot` and `--ngram-hot-profile`) and `--kv-resident` (streamed sparse-attention KV), and its
+`--ngram-lock`, `--ngram-dedupe`, `--no-ngram-table`; DeepSeek-V4.1's Engram table takes them
+too) and `--kv-resident` (streamed sparse-attention KV), and its
 precision options (`--prefill-cublas`, `--lm-head-q4/q6`, `--embedding-q4/q6`, `--gdn-state-fp16`,
 `--mlp-a8-decode`, `--no-prefill-a8`, `--iq1m-experts`), and the
 [adapter and control vector options](serving.md#lora-adapters-and-control-vectors) of a Qwen3.5-core

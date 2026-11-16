@@ -20,8 +20,9 @@ format and the SHA-256 of the rows) and either stores the rows too, as one self-
 leaves them to a table artifact of their own that every Flash-Next model can share. Nothing reads
 the table at load; each token reads the 16 rows it addresses from the file, unless the table, or the
 part of it a profile ranks most used, is loaded into RAM ([the n-gram rows](#the-n-gram-rows)). A
-model stored without its rows takes them from `--ngram-table PATH`, which
-must hold the table the model names; without a table the engine refuses to start
+model stored without its rows takes them from `--ngram-table PATH`: the table the model names, or
+any other table of its shape ([another table of the same shape](#another-table-of-the-same-shape));
+without a table the engine refuses to start
 ([running without it](#without-the-n-gram-table) is an experiment, not a mode).
 
 The published conversions store the models without the table, which is published once:
@@ -29,9 +30,9 @@ The published conversions store the models without the table, which is published
 | Artifact | Size | |
 |---|---:|---|
 | [n-gram table](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) | 26.92 GiB | IQ4_NL rows and an optional broad hot-row profile |
-| [Q2_0](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) | 38.49 GiB | Vision and shared-Q8_0 MTP |
-| [IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) | 54.50 GiB | Vision and shared-Q8_0 MTP |
-| [Coder IQ1_M](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) | 31.02 GiB | 256 text experts per layer, Vision and shared-Q8_0 MTP |
+| [Q2_0](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) | 38.23 GiB | Vision and shared-Q8_0 MTP |
+| [IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) | 54.24 GiB | Vision and shared-Q8_0 MTP |
+| [Coder IQ1_M](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) | 30.76 GiB | 256 text experts per layer, Vision and shared-Q8_0 MTP |
 | [Unsloth UD-IQ2_XS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ2_XS-NInfer-v3) | 47.43 GiB | Unsloth Dynamic v3.1, Vision, shared-Q8_0 MTP and the DFlash2 drafter |
 | [Unsloth UD-IQ3_XXS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ3_XXS-NInfer-v3) | 54.66 GiB | Unsloth Dynamic v3.1, Vision, shared-Q8_0 MTP and the DFlash2 drafter |
 
@@ -218,8 +219,8 @@ banks keep the exporter's expert-major layout, so one expert is one contiguous r
 recipe undoes llama.cpp's exporter conventions as the Qwen3.8-27B GGUF recipe does (grouped GDN
 value heads, `1 + w` norms, `A_log`, the head-interleaved query and gate). The n-gram table keeps
 the release's IQ4_NL rows, and its component carries the hash constants they were written for; the
-runtime derives them again from the model's configuration and refuses a table that disagrees, or a
-table artifact whose digest or row format differs from the one the model names.
+runtime derives them again from the model's configuration and refuses a table that disagrees
+([another table of the same shape](#another-table-of-the-same-shape)).
 
 ## Run
 
@@ -264,7 +265,7 @@ the same options, and the Docker image's `serve` command takes them with the fil
 | `--expert-profile-out PATH` | record every layer's expert routes after requests, for a later `--expert-profile` |
 | `--expert-mirror DIR` | disk experts: copies of the artifact's files on a second drive; reads alternate between the drives by 1 MiB stripe of the file offset ([disk expert reads](expert-disk-reads.md)) |
 | `--expert-direct auto\|on\|off` | disk experts on Linux: the NVMe drive writes the experts straight into device memory through NInfer's kernel modules; `auto` (default) when they are loaded and a self-test read passes, `on` fails startup otherwise ([disk expert reads](expert-disk-reads.md)) |
-| `--ngram-table PATH` | the table artifact to read the n-gram rows from; required for a model stored without its table, and it must hold the table the model names (same SHA-256 and row format) |
+| `--ngram-table PATH` | the table artifact to read the n-gram rows from; required for a model stored without its table. Any table of the model's hash constants, row count and row width, in any row format ([another table of the same shape](#another-table-of-the-same-shape)) |
 | `--ngram-residency disk\|ram\|ram-hot` | where the n-gram rows come from: the table's file, 16 rows a token (default); the whole 28.8 GB table in RAM; or the rows a hot-row profile ranks first in RAM and the rest from the file ([the n-gram rows](#the-n-gram-rows)) |
 | `--ngram-io buffered\|direct\|mmap` | how rows are read from the file: positioned reads through the OS page cache (default), reads past it (`O_DIRECT`, `FILE_FLAG_NO_BUFFERING`), or copies out of a mapping |
 | `--ngram-io-depth N` | row reads in flight (1 to 1024, default 64) |
@@ -500,7 +501,30 @@ the leading rows serve this share of row reads per RAM budget:
 
 Across the 239 language and domain groups with at least 2,048 held-out tokens the hit rate at 4 GiB
 runs from 20.5% to 95.5% (median 49.4%); Japanese books have the lowest coverage. Hits measure row
-reuse, not speed or quality.
+reuse, not speed or quality. Edge0's FP8 table carries the same profile, since one hash addresses
+both tables' rows.
+
+### Another table of the same shape
+
+A model reads any n-gram table artifact of its hash constants, row count and row width, in any row
+format the runtime decodes (IQ4_NL, FP8 with an FP16 row scale, BF16): the table its `ngram`
+component names, or another one. The engine checks the table's shape against the model's
+configuration, not its values; for another table it warns at startup with both tables' formats and
+digests. A table of the same shape with other values starts too and degrades the output, as a wrong
+table would.
+
+Flash-Next's IQ4_NL table and [Edge0's](edge0.md) FP8 table are two quantizations of one BF16
+table, so each model family reads either. Over three of the HF checkpoint's 128 BF16 table shards
+(7.5 million rows at the start, the middle and the end of the table, the 90 zero pad rows left out),
+every IQ4_NL row has a cosine of at least 0.9939 with its FP8 row and of at least 0.9945 with its
+BF16 row; each BF16 row against the next, unrelated one has a median cosine of 0.02 to 0.04, none
+of the 7.5 million pairs reaching 0.9.
+
+On one A40 (the CUDA 12.8 `sm_86` build, November 13, 2026), the first 40 KB of `wikitext/00.txt`
+with INT8 KV and device experts, the GSQ-RCO Q2_0 release scores 2.542153 with its IQ4_NL table and
+2.531971 (0.40% lower) with Edge0's 48.38 GiB FP8 table; Edge0's figures are in
+[its guide](edge0.md#with-flash-nexts-table). Q2_0's greedy answer to the sky prompt keeps its
+content and changes its wording with the FP8 table; it decodes at 87.6 and 87.5 tokens per second.
 
 ### Without the n-gram table
 
@@ -624,8 +648,9 @@ their whole store at startup and never pin while a request waits. A prompt that 
 sequence resumes from its image, copied back into a sequence. `--host-kv-mib` (or `--host-cache-mib`) is the budget, 8 GiB by
 default; past it the least recently used images go to the disk tier with `--disk-kv-path DIR`
 (`--disk-kv-gib`, 64 by default), one file each under a directory per artifact, KV format, MTP
-draft width and n-gram enablement, or are dropped without one. A different verify width or disabling
-the n-gram table can change sequence state, so those runs cannot restore another profile's images.
+draft width and n-gram table (its SHA-256, or none), or are dropped without one. A different verify
+width or another n-gram table can change sequence state, so those runs cannot restore another
+profile's images.
 A request that does not draft (a decision read) runs its prompt without the MTP block, so its
 sequence's snapshots and images carry no MTP state and serve only requests that do not draft.
 With `--disk-kv-restore` a
@@ -661,7 +686,9 @@ verification window's routes share the layer's missing experts, which the CPU co
 cached ones run; a round of several requests verifies at most 64 tokens,
 [below](#mtp-with-several-requests)), unless it also carries the DFlash2 drafter, which then drafts
 on one device ([DFlash2](#dflash2-speculative-decoding)); with disk experts it decodes without
-drafts ([below](#mtp-with-several-requests)), and `--spec none` decodes without drafts. Decoding
+drafts ([below](#mtp-with-several-requests)), and `--spec none` decodes without drafts. An
+[Edge0](edge0.md#drafting) artifact also drafts with device experts when the engine serves one
+request at a time. Decoding
 requests then run rounds: the MTP block (one more sparse-attention layer with its own 512-expert
 MoE, its own final mixer and the model's head) drafts N tokens from the stack the model left at the
 request's last position (the head's argmax at each step; with `--gumbel-sampling` a sampled
@@ -787,6 +814,12 @@ request's proposal and its commits run from CUDA Graphs captured at startup. `--
 proposes from the context in place of the drafter as it does under MTP; `--adaptive-mtp` needs
 `--spec mtp`, and pipeline stages are refused. The drafter's mathematics is in
 [DFlash and DFlash2](maintainer/dflash.md#qwen38-flash-next).
+
+`--spec dspine --draft-model PATH --draft-tokens N` drafts instead with a
+[DSpine](maintainer/dspine.md) drafter trained for this model, up to its block less one: through
+the same features, ring lanes, rounds, acceptance and `--draft-min-p`, with DSpine's block and code
+bridge, on one device or under tensor parallelism. No DSpine drafter for Qwen3.8-Flash-Next is
+published yet.
 
 Without `--spec`, an artifact with the drafter and host experts on one device drafts four tokens a
 round with `--draft-min-p 0.7`; over pipeline stages its MTP block drafts instead. On an RTX 3090

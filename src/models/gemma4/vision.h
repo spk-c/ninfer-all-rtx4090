@@ -13,7 +13,8 @@
 // position table, norms) is resident either way.
 
 #include "core/arena.h"
-#include "core/device.h"
+#include "core/device_buffer.h"
+#include "core/device_launch.h"
 #include "core/weight.h"
 #include "models/gemma4/model.h"
 

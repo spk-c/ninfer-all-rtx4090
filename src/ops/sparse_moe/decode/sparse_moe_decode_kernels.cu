@@ -1,8 +1,9 @@
 #include "core/weight.h"
 #include "ops/sparse_moe/decode/sparse_moe_decode.h"
 
-#include "core/device.h"
+#include "core/device_launch.h"
 #include "core/pdl.cuh"
+#include "core/qtype.h"
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/silu.h"
