@@ -45,7 +45,7 @@ jobs:
           git ls-files --error-unmatch docs/rtx4090.md > /dev/null
           # Require essential new upstream implementations before proceeding.
           git ls-files --error-unmatch src/models/dspine/drafter.cpp > /dev/null
-          git ls-files --error-unmatch src/ops/softmax_attention/dense/causal_cache/prompt_fp8_fast.cuh > /dev/null
+          git ls-files --error-unmatch src/ops/softmax_attention/dense/causal_cache/fp8/prompt_fast.cuh > /dev/null
           git ls-files --error-unmatch docs/edge0.md > /dev/null
           git diff --cached --check
           # One-shot CI helper is removed from the final merged tree.
