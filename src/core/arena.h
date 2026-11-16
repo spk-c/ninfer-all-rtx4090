@@ -1,9 +1,8 @@
 #pragma once
 
 #include "core/dtype.h"
+#include "core/pinned_memory.h"
 #include "core/tensor.h"
-
-#include <cuda_runtime_api.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -109,42 +108,6 @@ private:
     std::size_t active_rank_ = 0;
 };
 
-class PinnedHostBuffer {
-public:
-    explicit PinnedHostBuffer(std::size_t size_bytes, bool mapped = false);
-    ~PinnedHostBuffer();
-
-    PinnedHostBuffer(const PinnedHostBuffer&)            = delete;
-    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
-    PinnedHostBuffer(PinnedHostBuffer&& other) noexcept;
-    PinnedHostBuffer& operator=(PinnedHostBuffer&& other) noexcept;
-
-    void* data() const noexcept;
-    std::size_t size() const noexcept;
-    // Exact, capturable transfer through an SM kernel, avoiding copy-engine queue dependencies
-    // around GPU/host handshakes. Requires a mapped allocation and borrows its bytes until done.
-    void copy_to_device_using_kernel(void* destination, std::size_t bytes,
-                                      cudaStream_t stream) const;
-
-private:
-    void* data_       = nullptr;
-    std::size_t size_ = 0;
-};
-
-// Registers an existing host allocation without moving its bytes. The allocation must outlive
-// the registration and every queued transfer; portable registration serves every device rank.
-// `mapped` also maps it into the device address space, for kernels that read it in place
-// (cudaHostGetDevicePointer gives the address they use).
-class HostMemoryRegistration {
-public:
-    HostMemoryRegistration(void* data, std::size_t bytes, bool mapped = false);
-    ~HostMemoryRegistration();
-    HostMemoryRegistration(const HostMemoryRegistration&) = delete;
-    HostMemoryRegistration& operator=(const HostMemoryRegistration&) = delete;
-
-private:
-    void* data_ = nullptr;
-};
 
 using WorkspaceArena = DeviceArena;
 
