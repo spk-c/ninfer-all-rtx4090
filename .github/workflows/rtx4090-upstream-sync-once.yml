@@ -47,8 +47,9 @@ jobs:
           git ls-files --error-unmatch src/models/dspine/drafter.cpp > /dev/null
           git ls-files --error-unmatch src/ops/softmax_attention/dense/causal_cache/fp8/prompt_fast.cuh > /dev/null
           git ls-files --error-unmatch docs/edge0.md > /dev/null
+          # GitHub Actions GITHUB_TOKEN cannot modify workflow files. Keep the fork's current workflows.
+          git restore --source=HEAD --staged --worktree .github/workflows
           git diff --cached --check
-          # One-shot CI helper is removed from the final merged tree.
-          git rm -f .github/workflows/rtx4090-upstream-sync-once.yml
+          # Remove the one-shot helper separately with the GitHub connector after a successful push.
           git commit -m "Merge pinned upstream iamwavecut/ninfer-all master into RTX4090 staging"
           git push origin HEAD:refs/heads/sync/upstream-2026-11-16
