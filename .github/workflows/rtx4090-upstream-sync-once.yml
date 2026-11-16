@@ -1,0 +1,54 @@
+name: One-shot upstream merge to RTX4090 sync branch
+on:
+  push:
+    branches:
+      - sync/upstream-2026-11-16
+    paths:
+      - .github/workflows/rtx4090-upstream-sync-once.yml
+permissions:
+  contents: write
+jobs:
+  merge-upstream:
+    if: github.repository == 'spk-c/ninfer-all-rtx4090'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Merge pinned upstream with conflict guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/iamwavecut/ninfer-all.git
+          git fetch --no-tags upstream master
+          upstream_sha=40d913db2e87e2211fce4089c0c7920480a5e7a0
+          test "$(git rev-parse refs/remotes/upstream/master)" = "$upstream_sha" || {
+            echo 'Upstream master moved; refusing an unpinned merge' >&2
+            exit 1
+          }
+          git merge --no-commit --no-ff -X ours "$upstream_sha" || {
+            echo 'Unresolved merge conflicts:' >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          }
+          test -z "$(git diff --name-only --diff-filter=U)" || {
+            echo 'Unresolved paths after merge' >&2
+            exit 1
+          }
+          # Preserve fork-specific SM89 release and tooling; do not overwrite them.
+          git ls-files --error-unmatch .github/workflows/rtx4090-auto-release.yml > /dev/null
+          git ls-files --error-unmatch scripts/build-rtx4090.ps1 > /dev/null
+          git ls-files --error-unmatch docs/rtx4090.md > /dev/null
+          # Require essential new upstream implementations before proceeding.
+          git ls-files --error-unmatch src/models/dspine/drafter.cpp > /dev/null
+          git ls-files --error-unmatch src/ops/softmax_attention/dense/causal_cache/prompt_fp8_fast.cuh > /dev/null
+          git ls-files --error-unmatch docs/edge0.md > /dev/null
+          git diff --cached --check
+          # One-shot CI helper is removed from the final merged tree.
+          git rm -f .github/workflows/rtx4090-upstream-sync-once.yml
+          git commit -m "Merge pinned upstream iamwavecut/ninfer-all master into RTX4090 staging"
+          git push origin HEAD:refs/heads/sync/upstream-2026-11-16
