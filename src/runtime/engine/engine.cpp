@@ -879,6 +879,21 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids, bool allow
         info, preparation, SamplingMode::Thinking, std::move(prepared)));
 }
 
+PreparedPrompt Engine::append_read_tokens(PreparedPrompt prompt,
+                                          std::span<const TokenId> tokens) const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (prompt.impl_ == nullptr) { throw std::invalid_argument("prepared prompt is empty"); }
+    const auto previous = prompt.impl_->summary.prompt_tokens;
+    if (previous > impl_->capacity() || tokens.size() > impl_->capacity() - previous) {
+        throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                           context_capacity_error(previous + tokens.size(), impl_->capacity()));
+    }
+    auto prepared = impl_->frontend().append_read_tokens(std::move(prompt.impl_->value), tokens);
+    prompt.impl_->summary = prepared.summary();
+    prompt.impl_->value   = std::move(prepared);
+    return prompt;
+}
+
 std::vector<TokenId> Engine::tokenize_text(std::string_view text, bool parse_special) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->frontend().tokenize_text(text, parse_special);
@@ -1178,6 +1193,15 @@ bool Engine::runs_branches() const {
     if (impl_->options.purpose != EnginePurpose::Generation) { return false; }
     if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek) { return true; }
     return impl_->active->program->runs_branched_reads();
+}
+
+bool Engine::read_endpoints_need_drafting() const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::Generation || impl_->flash || impl_->gemma ||
+        impl_->flint || impl_->deepseek) {
+        return false;
+    }
+    return impl_->options.speculative.backend != SpeculativeBackend::None;
 }
 
 std::uint32_t Engine::branch_token_limit() const {

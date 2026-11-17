@@ -4,6 +4,7 @@
 // adapters normalize before this layer and render IDs, usage, and response events after it.
 
 #include "ninfer/engine.h"
+#include "product/media_acquire/acquire.h"
 #include "serve/branch_memo.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
@@ -170,6 +171,13 @@ struct BranchRead {
 // from parsed options to what the Engine is actually started with can be checked without a model.
 [[nodiscard]] ninfer::EngineOptions make_engine_options(const ServeOptions& options);
 
+// The acquisition policy of one request media source within the request's remaining media bytes.
+// A URL is fetched only when `url_max_bytes` (--media-urls) is not 0, and up to that many bytes;
+// otherwise it is refused with 400 `media_urls_disabled`. The server reads no local files.
+[[nodiscard]] ninfer::product::media_acquire::Policy
+media_acquire_policy(const ninfer::product::media_acquire::Source& source,
+                     std::size_t remaining_bytes, std::size_t url_max_bytes);
+
 class GenerationService {
 public:
     explicit GenerationService(
@@ -262,7 +270,9 @@ public:
     // Qwen3.5-core Engine runs the last prompt chunks of short ones in one shared prefill pass.
     [[nodiscard]] std::vector<PreparedRequest> submit_group(std::vector<StagedRequest> staged) const;
     // stage() of a read's request, its prompt continued by the read's tokens and its readout
-    // replaced by the read's.
+    // replaced by the read's. It drafts only when its request does, its prompt is not continued
+    // and the Engine publishes a read's endpoint only for a drafting request
+    // (read_endpoints_need_drafting): the reads that continue its prompt resume from it.
     [[nodiscard]] StagedRequest stage_read(const BranchRead& read,
                                            ninfer::GenerationObservationOptions observation,
                                            std::function<bool()> is_cancelled,
@@ -281,6 +291,14 @@ public:
                                                   const ContextCacheHints& context_cache) const;
 
     [[nodiscard]] bool runs_branches() const { return engine_->runs_branches(); }
+    // ninfer::Engine::read_endpoints_need_drafting.
+    [[nodiscard]] bool read_endpoints_need_drafting() const {
+        return engine_->read_endpoints_need_drafting();
+    }
+
+    // Snapshot each decision source once, before fanout, under the normal acquisition controls.
+    void acquire_read_media(std::span<ContentPart*> media, std::size_t maximum_bytes,
+                            std::function<bool()> is_cancelled) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 

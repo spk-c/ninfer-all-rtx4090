@@ -2427,6 +2427,48 @@ int test_low_image_detail(const Frontend& frontend) {
     return failures;
 }
 
+int test_read_continuation(const Frontend& frontend) {
+    auto input = image_text_input(block_ppm(128, 96, 91), "Locate the button.", "read.ppm");
+    input.options.speculative_drafting = false;
+    auto prompt                        = frontend.prepare(std::move(input));
+    const auto before                  = FrontendFactory::inspect(prompt);
+    const auto suffix                  = frontend.tokenize_text("01", false);
+    prompt                             = frontend.append_read_tokens(std::move(prompt), suffix);
+    const auto& after                  = FrontendFactory::inspect(prompt);
+    const auto old_size                = before.token_ids.size();
+    const auto size                    = old_size + suffix.size();
+    int failures =
+        check(after.token_ids.size() == size && after.has_media() &&
+                  after.media_payloads == before.media_payloads &&
+                  after.rope_delta == before.rope_delta &&
+                  after.vision_items.front().content_digest ==
+                      before.vision_items.front().content_digest &&
+                  after.lora_key == before.lora_key &&
+                  after.context_cache.retention == before.context_cache.retention &&
+                  after.context_cache.opportunities == before.context_cache.opportunities &&
+                  after.ngram_archive_sources.empty() && !after.ngram_index,
+              "a label continuation discarded its image or cache identity");
+    bool positions = true;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        for (std::size_t i = 0; i < old_size; ++i) {
+            positions &= after.positions[axis * size + i] == before.positions[axis * old_size + i];
+        }
+        for (std::size_t i = old_size; i < size; ++i) {
+            positions &=
+                after.positions[axis * size + i] == static_cast<int>(i) + before.rope_delta &&
+                after.token_types[i] == 0 && after.token_ids[i] == suffix[i - old_size];
+        }
+    }
+    failures += check(positions, "a label continuation lost image mRoPE positions");
+    bool refused = false;
+    try {
+        const std::vector<ninfer::TokenId> invalid{-1};
+        (void)frontend.append_read_tokens(std::move(prompt), invalid);
+    } catch (const std::out_of_range&) { refused = true; }
+    failures += check(refused, "a label continuation accepted an invalid token");
+    return failures;
+}
+
 int test_video_prepare(const Frontend& frontend) {
     ninfer::MessagePart video;
     video.kind              = ninfer::MessagePartKind::Media;
@@ -2565,6 +2607,47 @@ int test_same_token_stop_priority(const Frontend& frontend) {
     const auto output   = session.commit_preview();
     failures += check(output.empty(),
                       "same-token stops did not prefer the earliest byte and declaration order");
+    return failures;
+}
+
+// A one-token read whose first token is a stop token: a raw session publishes the token and keeps
+// its logprob record with the readout; a decoded session leaves both out.
+int test_raw_stop_token_record(const Frontend& frontend) {
+    auto prompt = frontend.prepare_tokens({0});
+    ninfer::runtime::RawTokenLogprob raw;
+    raw.id      = 6;
+    raw.logprob = -0.25F;
+    raw.top_ids.fill(-1);
+    raw.top_ids[0]        = 6;
+    raw.top_values[0]     = -0.25F;
+    raw.top_ids[1]        = 1;
+    raw.top_values[1]     = -2.0F;
+    raw.readout_count     = 2;
+    raw.readout_values[0] = -2.0F;
+    raw.readout_values[1] = -4.5F;
+    int failures          = 0;
+    for (const bool raw_output : {false, true}) {
+        auto session = frontend.make_output_session(prompt, {},
+                                                    ninfer::OutputOptions{.raw = raw_output});
+        const auto decision =
+            session.preview_model(std::array<ninfer::TokenId, 1>{6}, 1,
+                                  ninfer::FinishReason::OutputLimit, std::span(&raw, 1));
+        failures += check(decision.finish_reason == ninfer::FinishReason::StopToken,
+                          "the default stop token did not end the read");
+        const auto output = session.commit_preview();
+        const std::vector<ninfer::TokenLogprob> records = session.take_content_logprobs();
+        if (raw_output) {
+            failures += check(channel_text(output, ninfer::OutputChannel::Content) == "<eos>",
+                              "a raw session did not publish the stop token");
+            failures += check(records.size() == 1 && records[0].id == 6 &&
+                                  records[0].top_ids[0] == 6 &&
+                                  records[0].readout == std::vector<float>{-2.0F, -4.5F},
+                              "a raw session lost the stop token's logprob record");
+        } else {
+            failures += check(output.empty() && records.empty(),
+                              "a decoded session published the stop token or its record");
+        }
+    }
     return failures;
 }
 
@@ -4607,10 +4690,12 @@ int main() {
     failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
     failures += test_attention_pairs_are_diagnostic(frontend);
     failures += test_low_image_detail(frontend);
+    failures += test_read_continuation(frontend);
     failures += test_video_prepare(frontend);
     failures += test_cross_round_stop(frontend);
     failures += test_stop_hold_in_one_round(frontend);
     failures += test_same_token_stop_priority(frontend);
+    failures += test_raw_stop_token_record(frontend);
     failures += test_terminal_flush(frontend);
     failures += test_structured_tool_output();
     failures += test_open_reasoning_tool_recovery();

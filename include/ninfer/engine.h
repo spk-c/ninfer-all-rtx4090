@@ -107,6 +107,11 @@ public:
                    bool anchor_prompt_end = false, bool speculative_drafting = true,
                    const std::optional<std::vector<LoraScale>>& lora = std::nullopt) const;
 
+    // Extend a prepared label read without discarding its media, positions, cache markers or LoRA.
+    // The result is for non-drafting reads; no GPU state is acquired here.
+    [[nodiscard]] PreparedPrompt append_read_tokens(PreparedPrompt prompt,
+                                                    std::span<const TokenId> tokens) const;
+
     // Artifact-tokenizer raw-text encoding. No chat template or implicit special token is added;
     // special-token text in `text` encodes as that token unless `parse_special` is false.
     [[nodiscard]] std::vector<TokenId> tokenize_text(std::string_view text,
@@ -172,6 +177,11 @@ public:
     // pass's columns on a Qwen3.5-core model, unbounded on Gemma 4, Flint and Flash-Next, which
     // run a branch in prompt chunks; 0 when runs_branches() is false.
     [[nodiscard]] std::uint32_t branch_token_limit() const;
+    // Whether a one-token request leaves its prompt's endpoint in the context cache only while it
+    // drafts (ExecutionOptions::speculative_drafting): true on a Qwen3.5-core Engine with a
+    // speculative drafter, whose drafter state would stop short of the endpoint; the other
+    // families publish it either way. A read whose prompt later reads continue drafts there.
+    [[nodiscard]] bool read_endpoints_need_drafting() const;
 
     // The largest requested_output_tokens for this prompt whose admission entitlement -- Main KV
     // plus any MTP/DFlash backend KV, draft window included -- fits one lane's share of each pool,
