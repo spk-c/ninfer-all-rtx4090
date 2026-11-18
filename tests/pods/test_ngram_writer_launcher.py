@@ -30,11 +30,23 @@ def test_launcher_probes_before_running_conversion(tmp_path, probe_result, modul
     writer.parent.mkdir()
     # The converter fails if invoked: unavailable CUDA must bypass its imports entirely.
     writer.write_text("raise SystemExit(23)\n")
-    binary = tmp_path / "probe"
-    binary.write_text(f"#!{sys.executable}\nimport sys\n"
-                      "assert sys.argv[1:] == ['ninfer_qwen4_exp_ngram_component_test', '--check-cuda']\n"
-                      f"raise SystemExit({probe_result})\n")
-    binary.chmod(0o755)
+    if sys.platform == "win32":
+        # Windows cannot execute POSIX shebang scripts directly. A .cmd probe
+        # exercises the same executable+arguments contract as ninfer.exe.
+        binary = tmp_path / "probe.cmd"
+        binary.write_text(
+            "@echo off\n"
+            'if not "%~1"=="ninfer_qwen4_exp_ngram_component_test" exit /b 90\n'
+            'if not "%~2"=="--check-cuda" exit /b 90\n'
+            'if not "%~3"=="" exit /b 90\n'
+            f"exit /b {probe_result}\n"
+        )
+    else:
+        binary = tmp_path / "probe"
+        binary.write_text(f"#!{sys.executable}\nimport sys\n"
+                          "assert sys.argv[1:] == ['ninfer_qwen4_exp_ngram_component_test', '--check-cuda']\n"
+                          f"raise SystemExit({probe_result})\n")
+        binary.chmod(0o755)
     # -S removes site packages, matching the toolchain without pytest or CPU PyTorch.
     result = subprocess.run([sys.executable, "-S", str(launcher), str(binary)],
                             capture_output=True, text=True)
