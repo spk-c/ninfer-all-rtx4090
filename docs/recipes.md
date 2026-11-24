@@ -48,7 +48,7 @@ is `true`):
 | `--vision`, `--vision-residency`, `--vision-max-merged` | image and video input, where the tower lives (`overlay` borrows device memory per image), and the merged-token budget of one item |
 | `--max-concurrency` | requests admitted at once, 1 to 8 |
 | `--devices` | one pipeline stage per listed GPU (Linux) |
-| `--expert-residency`, `--expert-cache-mib` | native Qwen MoE, Gemma 4, Qwen3.8-Flash-Next, Flint and DeepSeek-V4.1-Flash: where the routed experts live and their persistent device cache budget ([expert residency](cli.md#common-options)) |
+| `--expert-residency`, `--expert-cache-mib` | native Qwen MoE, Gemma 4, Qwen3.8-Flash-Next, Flint, DeepSeek-V4.1-Flash and Inkling 2: where the routed experts live and their persistent device cache budget ([expert residency](cli.md#common-options)) |
 | `--ngram-table`, `--ngram-residency` | Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash: the n-gram (Engram) table's file and where its rows live |
 | `--disk-kv-path`, `--disk-kv-gib`, `--disk-kv-restore` | the disk tier of the context cache |
 
@@ -218,6 +218,20 @@ python -m tools.convert --model models/gemma4/hf --recipe gemma4_gguf --componen
 ninfer-serve --config configs/gemma4-26b-a4b.ini
 ```
 
+## Gemma 4 31B
+
+The dense 31B from the same QAT release ([Gemma 4 31B](gemma4.md#gemma-4-31b)); its 16.4 GiB of
+weights need a 24 GB card and run on one GPU.
+
+```bash
+hf download WaveCut/gemma-4-31B-it-QAT-Q4_0-MTP-NInfer-v3 gemma-4-31B-it-QAT-Q4_0-MTP-ninfer-v3.ninfer \
+  --local-dir models
+
+# One request over a 56K-token context, two drafts a round, images and video (59,392 tokens
+# is the longest with both on an RTX 3090).
+ninfer-serve --config configs/gemma4-31b.ini
+```
+
 ## Flint
 
 Unsloth's UD-Q4_K_XL GGUF as one artifact ([Flint](flint.md)); 23.4 GiB of weights fit a 32 GB card.
@@ -258,6 +272,45 @@ ISTA-DASLab's expert-pruned Coder build reads the same table; its routed experts
 hf download WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-NInfer-v3 \
   DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-ninfer-v3.ninfer --local-dir models
 ninfer-serve --config configs/deepseek-v4.1-flash-coder-host.ini
+```
+
+## Inkling 2 Mini
+
+Unsloth's UD-IQ4_XS GGUF with the release's vision tower and DSpark drafter as one artifact
+([Inkling 2 Mini](inkling2.md)); 15.0 GiB of weights with the drafter.
+
+```bash
+hf download WaveCut/Inkling-2-Mini-UD-IQ4_XS-NInfer-v3 Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer \
+  --local-dir models
+
+# A 24 GB GPU: one request over a 64K-token context with images, drafted by DSpark; an RTX 3090
+# keeps 3.1 GiB free and decodes 137 tok/s.
+ninfer-serve --config configs/inkling2-mini.ini
+
+# Less GPU memory: the experts in 13.1 GiB of pinned host memory, the most used cached on the GPU,
+# a 32K-token context; on an RTX 3090 the cache holds all of them and decodes 123 tok/s.
+ninfer-serve --config configs/inkling2-mini-host.ini
+
+# 8 GB, with a 12K-token context: the CLI with these settings on an RTX 5060 cached 2.2 GiB of
+# experts and decoded the essay at 33.6 tok/s, 8.8 with --expert-residency disk.
+ninfer-serve --config configs/inkling2-mini-host.ini --max-context 12288
+```
+
+IsValorum's APEX-I MiniPlus V2.1 (12.8 GiB, IQ3 experts, its Q8_0 vision tower) takes the same
+configs with its path on the command line, which wins over the file's `model`:
+
+```bash
+hf download WaveCut/Inkling-2-Mini-APEX-I-MiniPlus-V2.1-NInfer-v3 \
+  Inkling-2-Mini-APEX-I-MiniPlus-V2.1-ninfer-v3.ninfer --local-dir models
+
+# 16 GB: every expert on the GPU, images and DSpark over an 8K-token context, 14.7 GiB planned
+# (no 16 GB card has run it).
+ninfer-serve models/Inkling-2-Mini-APEX-I-MiniPlus-V2.1-ninfer-v3.ninfer \
+  --config configs/inkling2-mini.ini --max-context 8192
+
+# Less: the experts in 10.9 GiB of pinned host memory.
+ninfer-serve models/Inkling-2-Mini-APEX-I-MiniPlus-V2.1-ninfer-v3.ninfer \
+  --config configs/inkling2-mini-host.ini
 ```
 
 ## Qwen3.6-35B-A3B NVFP4

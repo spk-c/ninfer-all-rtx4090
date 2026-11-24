@@ -9,6 +9,7 @@
 #include "product/rope_yarn_options.h"
 #include "product/tensor_split_options.h"
 #include "product/speculative_options.h"
+#include "text/bad_words.h"
 
 #include <cerrno>
 #include <cmath>
@@ -115,6 +116,7 @@ float parse_float(const char* text, std::string_view label, float minimum, float
 
 KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "bf16") { return KvCacheStorage::BFloat16; }
+    if (text == "fp16") { return KvCacheStorage::Float16; }
     if (text == "int8") { return KvCacheStorage::Int8Group64; }
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     // RotorQuant rk8v4: rotated INT8 keys with a packed signed int4 value plane. Opt-in.
@@ -129,6 +131,8 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     // bf16p: BF16 rows packed losslessly into 392 bytes (bf16p_codec.cuh). Opt-in.
     if (text == "bf16p") { return KvCacheStorage::Bf16Packed; }
+    // mxfp8: E4M3 values over a power-of-two scale per 32 (Inkling 2, its default).
+    if (text == "mxfp8") { return KvCacheStorage::Mxfp8; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -239,7 +243,9 @@ std::string usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  bf16 (default), int8, fp8, rk8v4, rk4v4,\n"
-           "                                rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p\n" +
+           "                                rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p;\n"
+           "                                fp16: Flash-Next, Gemma 4 and Flint; mxfp8:\n"
+           "                                Inkling 2 (its default)\n" +
            std::string(product::kKvResidentHelp) +
            "\n"
            "SPECULATIVE DECODING\n"
@@ -250,20 +256,27 @@ std::string usage_text(const char* argv0) {
            "                                3 for those over pipeline stages or with only the\n"
            "                                MTP block, for Edge0 device experts serving one\n"
            "                                request at a time and for Gemma 4 host or disk\n"
-           "                                experts whose artifact has the drafter, else\n"
-           "                                none; dspark: DeepSeek-V4.1's DSpark drafter;\n"
+           "                                experts whose artifact has the drafter, dspark\n"
+           "                                with 3 adapting for Inkling 2 serving one\n"
+           "                                request at a time whose artifact has its\n"
+           "                                drafter, else none; dspark: the release's\n"
+           "                                DSpark drafter\n"
+           "                                (DeepSeek-V4.1, Inkling 2);\n"
            "                                dspine: the DSpine drafter --draft-model names)\n"
            "  --draft-model PATH            dspine: the DSpine drafter artifact, trained for\n"
            "                                this model\n"
            "  --draft-tokens N              drafts per round, 1..15 (Flash-Next dflash2: 1..7;\n"
-           "                                dspark: up to its block of 5, the default; dspine:\n"
+           "                                dspark: up to its block of 5, the default, 7 for\n"
+           "                                Inkling 2; dspine:\n"
            "                                up to its block less one, 7 for Gemma 4, Flint\n"
            "                                and DeepSeek-V4.1)\n"
            "  --draft-min-p P               confidence floor 0..1 of Flash-Next MTP, DFlash2\n"
-           "                                or DSpine, and of DSpine on Gemma 4, Flint or\n"
-           "                                DeepSeek-V4.1 (default 0 with --spec, 0.5 when\n"
-           "                                the engine chooses MTP, 0.7 when it chooses\n"
-           "                                DFlash2)\n"
+           "                                or DSpine, of DSpine on Gemma 4, Flint or\n"
+           "                                DeepSeek-V4.1 and of DSpark on Inkling 2: a round\n"
+           "                                ends after its first draft at or below P\n"
+           "                                (default 0 with --spec, 0.5 when\n"
+           "                                the engine chooses MTP or Inkling 2's DSpark,\n"
+           "                                0.7 when it chooses DFlash2)\n"
            "  --draft-confidence C          dspark: verify drafts while their confidence is\n"
            "                                at least C, 0..1 (default 0.5; 0 keeps every draft)\n"
            "  --draft-experts N             dspark: each drafter block keeps its N most routed\n"
@@ -371,6 +384,8 @@ std::string usage_text(const char* argv0) {
            "OUTPUT\n"
            "  --json                        constrain the answer to a JSON object\n"
            "  --json-schema FILE            enforce a supported JSON schema\n"
+           "  --bad-word TEXT               never write this text anywhere in the reply\n"
+           "                                (vLLM's bad_words); repeatable\n"
            "  --raw-output                  print the raw generated text without framing\n"
            "  --print-token-ids             also print the generated token ids\n"
            "\n"
@@ -410,6 +425,7 @@ Options parse_arguments(const std::vector<std::string>& arguments,
     bool device_explicit      = false;
     bool ngram_width_explicit       = false;
     bool spec_explicit              = false;
+    bool kv_dtype_explicit          = false;
     bool vision_max_merged_explicit = false;
     std::optional<std::size_t> kv_headroom_mib;
 
@@ -510,7 +526,8 @@ Options parse_arguments(const std::vector<std::string>& arguments,
         } else if (product::parse_kv_resident_option(arg, options.kv_resident_positions,
                                                      [&] { return value(arg); })) {
         } else if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_cache(value(arg));
+            options.kv_cache   = parse_kv_cache(value(arg));
+            kv_dtype_explicit  = true;
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
             spec_explicit               = true;
@@ -663,6 +680,8 @@ Options parse_arguments(const std::vector<std::string>& arguments,
                 throw std::invalid_argument("--stop-token-id exceeds the token domain");
             }
             options.stop_token_ids.push_back(static_cast<TokenId>(token));
+        } else if (arg == "--bad-word") {
+            options.bad_words.push_back(value(arg));
         } else if (arg == "--stop" || arg == "--reasoning-stop") {
             std::string text = value(arg);
             if (text.empty()) {
@@ -764,6 +783,7 @@ Options parse_arguments(const std::vector<std::string>& arguments,
     }
     product::apply_default_ngram_draft_tokens(options.speculative, ngram_width_explicit);
     product::apply_automatic_speculation(options.speculative, spec_explicit);
+    options.kv_cache_automatic = !kv_dtype_explicit;
     product::validate_speculative_cli_options(options.speculative);
     if (options.vision_residency != VisionResidency::Resident && !options.enable_vision) {
         throw product::OptionConflict({"vision-residency", "vision"},
@@ -773,6 +793,13 @@ Options parse_arguments(const std::vector<std::string>& arguments,
     // pixels) keeps one to a few seconds.
     if (options.vision_residency == VisionResidency::Cpu && !vision_max_merged_explicit) {
         options.vision_max_merged_tokens = 256;
+    }
+    if (!options.bad_words.empty()) {
+        try {
+            (void)text::normalize_bad_words(options.bad_words);
+        } catch (const std::invalid_argument& e) {
+            throw std::invalid_argument(std::string("--bad-word: ") + e.what());
+        }
     }
     if (options.structured_output.kind != StructuredOutputKind::None) {
         if (options.raw_output || !options.stop_strings.empty() ||

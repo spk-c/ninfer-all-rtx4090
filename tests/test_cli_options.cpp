@@ -44,6 +44,11 @@ int launch_configuration_tests() {
         std::ofstream(path) << text;
         return path.string();
     };
+    const auto half =
+        write("fp16.json", R"({"model":"model.ninfer","prompt":"hello","kv-dtype":"fp16"})");
+    failures +=
+        check(parse({"ninfer", "--config", half}).kv_cache == ninfer::KvCacheStorage::Float16,
+              "flat JSON did not preserve native FP16 selection");
     const std::string base = write("base.ini", "; a launch profile\n"
                                                "model = from-file.ninfer\n"
                                                "prompt = \"from file\"\n"
@@ -199,19 +204,22 @@ int run_tests() {
                      "--draft-min-p", "0.3"});
     }), "CLI accepted draft confidence without MTP");
     {
-        // DeepSeek's DSpark drafter: its whole block without --draft-tokens, no copy drafts beside
-        // it unless asked, and neither a proposal head nor MTP's confidence floor.
+        // The DSpark drafter: its whole block without --draft-tokens, no copy drafts beside it
+        // unless asked, no proposal head, and a floor the family's Engine core accepts or refuses
+        // (Inkling 2 takes one, DeepSeek does not).
         const auto block = parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--spec", "dspark"});
         const auto three = parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--spec", "dspark",
                                   "--draft-tokens", "3"});
+        const auto floor = parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--spec", "dspark",
+                                  "--draft-min-p", "0.3"});
         failures += check(block.speculative.backend == ninfer::SpeculativeBackend::DSpark &&
                               block.speculative.draft_tokens == 0 &&
                               block.speculative.ngram_draft_tokens == 0 &&
-                              three.speculative.draft_tokens == 3,
+                              three.speculative.draft_tokens == 3 &&
+                              floor.speculative.draft_min_p == 0.3F,
                           "CLI did not preserve --spec dspark");
         for (const std::vector<std::string> tail :
-             {std::vector<std::string>{"--lm-head-draft"}, {"--draft-min-p", "0.3"},
-              {"--draft-tokens", "16"}}) {
+             {std::vector<std::string>{"--lm-head-draft"}, {"--draft-tokens", "16"}}) {
             std::vector<std::string> args{"ninfer-cli", "model.ninfer", "--prompt", "x", "--spec", "dspark"};
             args.insert(args.end(), tail.begin(), tail.end());
             failures += check(rejects([&] { (void)parse(args); }),
@@ -332,6 +340,13 @@ int run_tests() {
                               fixed_after.hybrid_experts.dma_share == 0.5F,
                           "CLI did not preserve an automatic hybrid DMA share");
     }
+    failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--expert-residency",
+                             "host", "--expert-host-mib", "0"}).hybrid_experts.host_bytes == 0ULL &&
+                          rejects([&] {
+                              (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x",
+                                           "--expert-host-mib", "-1"});
+                          }),
+                      "CLI did not parse --expert-host-mib");
     for (const auto* share : {"-0.1", "1.1", "nan", "inf", "0.5x", "Auto"}) {
         failures += check(rejects([&] {
             (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--expert-dma-share", share});
@@ -561,6 +576,26 @@ int run_tests() {
                                    "dflash2", "--draft-tokens", std::to_string(k)});
                   }),
                   "CLI accepted an unsupported DFlash2 draft count");
+    }
+    failures += check(
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "fp16"}).kv_cache ==
+            ninfer::KvCacheStorage::Float16,
+        "--kv-dtype fp16 did not select native FP16 KV");
+    failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"}).kv_cache ==
+                          ninfer::KvCacheStorage::BFloat16,
+                      "CLI default KV storage changed");
+    // Without --kv-dtype the Engine chooses (Inkling 2: MXFP8); with it, the named storage.
+    failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"}).kv_cache_automatic,
+                      "CLI without --kv-dtype did not leave the storage to the Engine");
+    {
+        const ninfer::cli::Options mxfp8 =
+            parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "mxfp8"});
+        failures += check(mxfp8.kv_cache == ninfer::KvCacheStorage::Mxfp8 && !mxfp8.kv_cache_automatic,
+                          "--kv-dtype mxfp8 did not select MXFP8 KV explicitly");
+        failures += check(!parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype",
+                                  "bf16"})
+                               .kv_cache_automatic,
+                          "--kv-dtype bf16 left the storage to the Engine");
     }
     const ninfer::cli::Options nvfp4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4"});
@@ -881,6 +916,10 @@ int run_tests() {
             (void)parse({"ninfer", "model.ninfer", "--prompt", "x", "--json", "--raw-output"});
         }),
         "raw JSON output should be rejected");
+    const auto banned = parse({"ninfer", "model.ninfer", "--prompt", "x", "--bad-word", "<message",
+                               "--bad-word", " <think"});
+    failures += check(banned.bad_words == std::vector<std::string>{"<message", " <think"},
+                      "CLI --bad-word collects its words in order");
     failures += launch_configuration_tests();
     return failures == 0 ? 0 : 1;
 }

@@ -54,10 +54,15 @@ inactive cache 的保留而丢失完成能力。
 （`Qwen4ExpForCausalLM`，`models/qwen4_exp`）是第二个显式模型族：它有自己的 load、executor 和
 Engine core（`runtime/engine/qwen4_exp_core`），共享 Qwen3.5 的 Frontend 与 Vision tower，并通过同一个
 公共 `ninfer::Engine` 服务请求。Gemma 4 26B-A4B（`Gemma4ForCausalLM`，`models/gemma4`）、Flint
-（`FlintForCausalLM`，`models/flint`）与 DeepSeek-V4.1-Flash（`DeepseekV41ForCausalLM`，
-`models/deepseek_v41`）是另外三个显式模型族：各自拥有 load、executor 与 Engine core
-（`runtime/engine/gemma4_core`、`flint_core`、`deepseek_v41_core`），以各自的方言共享 Qwen3.5 的
-Frontend，只在一个 GPU 上运行。
+（`FlintForCausalLM`，`models/flint`）、DeepSeek-V4.1-Flash（`DeepseekV41ForCausalLM`，
+`models/deepseek_v41`）与 Inkling 2 Mini（`Inkling2ForCausalLM`，`models/inkling2`，引擎中第一个
+循环 Transformer：24 个存储层按 48 次访问执行）是另外四个显式模型族：各自拥有 load、executor 与
+Engine core（`runtime/engine/gemma4_core`、`flint_core`、`deepseek_v41_core`、`inkling2_core`），
+以各自的方言共享 Qwen3.5 的 Frontend，只在一个 GPU 上运行。
+这五个 Engine core 的上下文缓存共用 `runtime/engine/context_image_store.h`：序列整体状态在 pinned
+host 内存中的 image、磁盘层、prefix cache 文件和长消息内的 checkpoint，executor 只提供
+`image_bytes`、`save_image`、`load_image`；会话 slot 的保存、恢复与清除在
+`runtime/engine/session_slots.h`，由 worker 在两步之间执行。
 
 V3 artifact 保存配置、物理对象、逻辑参数的 Binding、使用位置的 Use，以及 Frontend 资源。
 Converter 负责源映射、量化或保值导入、融合存储、packing 和 layout 转换；loader 根据实际绑定
@@ -595,7 +600,7 @@ live KV 与 State 的 lane；未启用时每个 prefill unit 只多一次 relaxe
 的状态都由更早的有限 logits 担保。prompt 末尾的第一个 token 非有限时没有这样的担保（该次 prefill
 写入的 KV、State 与途中采集的前缀快照都可能已被污染），Program 抛出 `runtime::NumericalFault`，worker
 走与 out-of-memory 相同的恢复并以 `NumericalFailure` 完成 active 请求；context transaction 期间的
-decode 行失败也走这条路。GGUF 家族的 core（Flash-Next、Gemma 4、Flint、DeepSeek）没有 Engine 级
+decode 行失败也走这条路。GGUF 家族的 core（Flash-Next、Gemma 4、Flint、DeepSeek、Inkling 2）没有 Engine 级
 恢复：它们只结束该请求，并在 prompt 阶段失败时丢弃所有是该 prompt 前缀的已存前缀映像。验证接缝
 `arm_decode_numerical_faults(N)` 与 `arm_prefill_numerical_faults(N)` 位于同一头文件。
 
@@ -684,7 +689,8 @@ checkpoint catalog。
 | Program 规划、存储与事务 | `src/models/qwen3_5/program/` |
 | Frontend 与模型状态布局 | `src/models/qwen3_5/frontend/`, `state/` |
 | Qwen3.8-Flash-Next 模型族与其 Engine core | `src/models/qwen4_exp/`, `src/runtime/engine/qwen4_exp_core.*` |
-| Gemma 4、Flint、DeepSeek-V4.1-Flash 模型族与其 Engine core | `src/models/gemma4/`, `src/models/flint/`, `src/models/deepseek_v41/`, `src/runtime/engine/{gemma4,flint,deepseek_v41}_core.*` |
+| Gemma 4、Flint、DeepSeek-V4.1-Flash、Inkling 2 模型族与其 Engine core | `src/models/gemma4/`, `src/models/flint/`, `src/models/deepseek_v41/`, `src/models/inkling2/`, `src/runtime/engine/{gemma4,flint,deepseek_v41,inkling2}_core.*` |
+| 这五个模型族的上下文缓存与会话 slot | `src/runtime/engine/context_image_store.h`, `src/runtime/engine/session_slots.h` |
 | 每卡 route profile 与 calibration | `src/runtime/engine/device_profile.*`, `src/calibration/`, `src/ops/common/device_route.*` |
 | device primitives, tensors/views, checked layouts, arenas, graph RAII, physical KV, raw transfers | `src/core/` |
 | generic `.ninfer` framing, descriptors, binding primitives, materialization | `src/artifact/` |

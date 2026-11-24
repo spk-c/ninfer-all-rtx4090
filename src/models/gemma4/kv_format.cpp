@@ -9,7 +9,9 @@ KvFormat kv_format(KvCacheStorage storage) {
     const auto rot   = [](KvCoding c) { return KvPlane{c, true}; };
     const auto plain = [](KvCoding c) { return KvPlane{c, false}; };
     switch (storage) {
-    case KvCacheStorage::BFloat16: return {storage, f16, f16, f16};
+    // The unquantized cache is F16, which --kv-dtype fp16 names and bf16 (the default) selects.
+    case KvCacheStorage::BFloat16:
+    case KvCacheStorage::Float16: return {storage, f16, f16, f16};
     case KvCacheStorage::Int8Group64:
         return {storage, rot(KvCoding::Int8G64), plain(KvCoding::Int8G64), plain(KvCoding::Int8G64)};
     case KvCacheStorage::Fp8E4M3Row256:
@@ -30,6 +32,8 @@ KvFormat kv_format(KvCacheStorage storage) {
         // bf16p packs BF16 rows; Gemma's unquantized cache holds FP16.
         throw std::invalid_argument(
             "gemma4: --kv-dtype bf16p packs BF16 rows, and Gemma's unquantized KV cache is FP16");
+    case KvCacheStorage::Mxfp8:
+        throw std::invalid_argument("gemma4: --kv-dtype mxfp8 is Inkling 2's KV storage");
     }
     throw std::invalid_argument("gemma4: unknown KV-cache storage");
 }

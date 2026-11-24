@@ -9,7 +9,6 @@
 #include "core/host_worker_pool.h"
 #include "core/layout.h"
 #include "core/linear_attention_state.h"
-#include "core/mapped_host_copy.h"
 #include "core/paged_kv_view.h"
 #include "core/paged_kv_storage.h"
 #include "core/pinned_memory.h"
@@ -134,12 +133,14 @@ Projection make_projection(const Model& model, std::initializer_list<WeightId> i
     return make_projection(inputs);
 }
 
-std::size_t projection_workspace(const Projection& p, std::int32_t tokens) {
+std::size_t projection_workspace(const Projection& p, std::int32_t tokens, bool fp32_out = false) {
     std::size_t bytes = 0;
     for (const auto& piece : p.pieces) {
         std::size_t need = ops::linear_workspace_capacity_bytes(
             piece.weight.weight.qtype, piece.rows, p.k, piece.weight.policy, 1, tokens);
-        if (p.pieces.size() > 1) { need += round_up(std::uint64_t(piece.rows) * tokens * 2); }
+        if (p.pieces.size() > 1) {
+            need += round_up(std::uint64_t(piece.rows) * tokens * (fp32_out ? 4 : 2));
+        }
         bytes = std::max(bytes, need);
     }
     return bytes;
@@ -156,12 +157,13 @@ void project(const Projection& p, const Tensor& x, Tensor& out, WorkspaceArena& 
     }
     for (const auto& piece : p.pieces) {
         auto scope  = workspace.scope();
-        Tensor part = workspace.alloc(DType::BF16, {piece.rows, tokens});
+        const auto element_bytes = dtype_size(out.dtype);
+        Tensor part              = workspace.alloc(out.dtype, {piece.rows, tokens});
         ops::linear(x, piece.weight.weight, part, piece.weight.policy, workspace, stream);
-        CUDA_CHECK(cudaMemcpy2DAsync(static_cast<std::byte*>(out.data) + std::size_t(piece.row) * 2,
-                                     std::size_t(p.rows) * 2, part.data,
-                                     std::size_t(piece.rows) * 2, std::size_t(piece.rows) * 2,
-                                     tokens, cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            static_cast<std::byte*>(out.data) + std::size_t(piece.row) * element_bytes,
+            std::size_t(p.rows) * element_bytes, part.data, std::size_t(piece.rows) * element_bytes,
+            std::size_t(piece.rows) * element_bytes, tokens, cudaMemcpyDeviceToDevice, stream));
     }
 }
 
@@ -193,8 +195,13 @@ void project_together(std::span<const ProjectionInto> list, const Tensor& x,
             throw std::invalid_argument("projections of one input read its width");
         }
         for (const auto& piece : into.projection->pieces) {
-            products.push_back(
-                {.weight = &piece.weight.weight, .out = into.out, .row = piece.row});
+            products.push_back({.weight   = &piece.weight.weight,
+                                .out      = into.out,
+                                .row      = piece.row,
+                                .f32      = into.out->dtype == DType::FP32
+                                                ? static_cast<float*>(into.out->data)
+                                                : nullptr,
+                                .f32_rows = into.out->dtype == DType::FP32 ? into.out->ne[0] : 0});
         }
     }
     ops::detail::gguf_project(x, products, workspace, stream);
@@ -202,11 +209,14 @@ void project_together(std::span<const ProjectionInto> list, const Tensor& x,
 
 // The workspace project_together needs for these projections at up to `tokens` columns.
 std::size_t projections_workspace(std::initializer_list<const Projection*> list,
-                                  std::int32_t tokens) {
+                                  std::int32_t tokens,
+                                  std::span<const Projection* const> fp32_outputs = {}) {
     std::size_t bytes = 0;
     std::vector<ops::detail::GgufShape> shapes;
     for (const Projection* p : list) {
-        bytes = std::max(bytes, projection_workspace(*p, tokens));
+        const bool fp32 =
+            std::find(fp32_outputs.begin(), fp32_outputs.end(), p) != fp32_outputs.end();
+        bytes = std::max(bytes, projection_workspace(*p, tokens, fp32));
         if (!gguf_projection(*p)) { continue; }
         for (const auto& piece : p->pieces) {
             shapes.push_back({piece.weight.weight.qtype, piece.rows, p->k});
@@ -287,9 +297,13 @@ qwen3_5::execution::VisionParameters vision_parameters_for(const Model& model,
 
 struct HcPlan {
     Tensor norm;
-    ops::HyperConnectionMatrix down, up, inject;
+    ops::HyperConnectionMatrix down, up, inject, prefill_inject;
+    bool unit_offset = true;
 
-    [[nodiscard]] ops::HyperConnectionWeights weights() const { return {&norm, down, up, inject}; }
+    [[nodiscard]] ops::HyperConnectionWeights weights(bool prefill = false) const {
+        return {&norm, down, up, prefill && prefill_inject.data ? prefill_inject : inject,
+                unit_offset};
+    }
 };
 
 // A hyper-connection matrix as stored: ggml Q8_0 blocks, or BF16 words.
@@ -306,11 +320,16 @@ HcPlan make_hc(const Model& model, const HyperConnectionWeights& w, const TextCo
     const auto width = static_cast<std::int32_t>(c.hc_count * c.hidden_size);
     const auto low   = static_cast<std::int32_t>(c.hc_lowrank);
     HcPlan out;
-    out.norm = direct(model, w.norm, {width});
+    out.norm        = direct(model, w.norm, {width}, c.fp32_direct ? DType::FP32 : DType::BF16);
+    out.unit_offset = c.norm_unit_offset;
     out.down = hc_matrix(model, w.down, {width, low});
     out.up   = hc_matrix(model, w.up, {low, width});
     if (w.inject) {
         out.inject = hc_matrix(model, *w.inject, {width, static_cast<std::int32_t>(c.hc_count)});
+    }
+    if (w.prefill_inject) {
+        out.prefill_inject =
+            hc_matrix(model, *w.prefill_inject, {width, static_cast<std::int32_t>(c.hc_count)});
     }
     return out;
 }
@@ -348,8 +367,7 @@ struct ExpertTable {
 
     // A null entry (another rank's expert) is never read.
     void seal() {
-        aligned16 = row_bytes % 16 == 0 &&
-                    std::any_of(pointers.begin(), pointers.end(),
+        aligned16 = std::any_of(pointers.begin(), pointers.end(),
                                 [](const void* pointer) { return pointer != nullptr; }) &&
                     std::all_of(pointers.begin(), pointers.end(), [](const void* pointer) {
                         return reinterpret_cast<std::uintptr_t>(pointer) % 16 == 0;
@@ -519,6 +537,7 @@ struct LatentPlan {
 
 struct MoePlan {
     Tensor router, shared_gate;
+    Tensor expert_scales;
     ExpertTable gate, up, down, shared_gate_table, shared_up_table, shared_down_table;
     std::optional<NativeMoePlan> native;
     std::optional<LatentPlan> latent;
@@ -544,7 +563,8 @@ struct MoePlan {
                 static_cast<std::int32_t>(gate.pointers.size()),
                 device_resident,
                 shared_gate_table.rows > 0 ? shared_gate_table.rows : 640,
-                iq1m_matrix};
+                iq1m_matrix,
+                static_cast<const float*>(expert_scales.data)};
     }
     // The latent call over `routed`'s routed and shared tables (banks(), pooled() or cached()).
     [[nodiscard]] ops::GgufLatentWeights latent_banks(const ops::GgufMoeWeights& routed) const {
@@ -583,9 +603,9 @@ struct MoePlan {
     // staged misses' first stage): every entry it reads is a cache slot's plane, as in pooled().
     [[nodiscard]] ops::GgufMoeWeights cached() const {
         ops::GgufMoeWeights out = banks();
-        out.gate.aligned16      = gate.row_bytes % 16 == 0;
-        out.up.aligned16        = up.row_bytes % 16 == 0;
-        out.down.aligned16      = down.row_bytes % 16 == 0;
+        out.gate.aligned16      = true;
+        out.up.aligned16        = true;
+        out.down.aligned16      = true;
         out.device_resident     = true;
         return out;
     }
@@ -929,6 +949,12 @@ struct Executor::Impl {
     // A pass of `forward`: a prompt chunk, whose tensor-parallel exchanges take the prompt
     // partials (ExecutorOptions::tensor_parallel_prompt_partials).
     bool prompt_pass = false;
+
+    [[nodiscard]] DType scalar_dtype() const {
+        return config.fp32_direct ? DType::FP32 : DType::BF16;
+    }
+
+    [[nodiscard]] bool prompt_weights() const { return prompt_pass || branch_origin != nullptr; }
     // A prompt pass that leaves no logits and whose final stacks nothing reads (kv_only_allowed):
     // its last layer, a sparse-attention one, runs only what the sequence keeps -- the KV append
     // and the indexer's append -- and neither its attention, its experts nor the head run.
@@ -1162,11 +1188,17 @@ struct Executor::Impl {
     // Each chunk's MoE input and hyper-connection injection between a layer's two phases.
     DeviceBuffer span_mixed, span_inject;
     std::size_t span_row_bytes = 0; // n-gram rows of one token
-    // A span's expert phase runs up to kGroupTokens of consecutive chunks in one wide call, whose
-    // matrix products then take wider column tiles: the group's routes and output. span_group is
-    // the chunks a group takes, 1 when groups are off.
-    static constexpr std::uint32_t kGroupTokens = 4096;
+    // A span's expert phase runs consecutive chunks in one wide call, whose matrix products then
+    // take wider column tiles: the group's routes and output. A group is the whole span while its
+    // call's workspace takes at most 1 / kGroupShare of the memory free when the executor starts,
+    // else kSpanChunks, else kGroupTokens' worth (planned_group_chunks). span_group is the chunks a
+    // group takes, 1 when groups are off. The workspace that only these calls reach (rank 0's from
+    // group_workspace_from on) is a cache slot between prompts, as the span's stack is.
+    static constexpr std::uint32_t kGroupTokens = 6144;
+    static constexpr std::size_t kGroupShare    = 4;
     std::uint32_t span_group = 1;
+    std::size_t start_free_bytes                = 0;
+    std::size_t group_workspace_from            = 0;
     DeviceBuffer span_ids, span_weights, span_shared, span_y;
     // A span's expert call that a wider call of the same layer follows: the pool keeps that
     // layer's experts.
@@ -1503,9 +1535,9 @@ struct Executor::Impl {
         RankBinding bind(device, model.head_rank());
         const auto h = static_cast<std::int32_t>(config.hidden_size);
         MtpPlan plan;
-        plan.embedding_norm = direct(model, w.embedding_norm, {h});
-        plan.hidden_norm =
-            direct(model, w.hidden_norm, {static_cast<std::int32_t>(config.hc_count) * h});
+        plan.embedding_norm = direct(model, w.embedding_norm, {h}, scalar_dtype());
+        plan.hidden_norm = direct(model, w.hidden_norm,
+                                  {static_cast<std::int32_t>(config.hc_count) * h}, scalar_dtype());
         plan.fc_embedding = make_projection(model, {w.fc_embedding});
         plan.fc_hidden    = make_projection(model, {w.fc_hidden});
         const auto& weights = model.weights();
@@ -1621,11 +1653,13 @@ struct Executor::Impl {
             const auto channels = static_cast<std::int32_t>(gdn.qkv.rows);
             gdn.convolution =
                 direct(model, g->convolution,
-                       {channels, static_cast<std::int32_t>(config.linear_conv_kernel_dim)});
+                       {channels, static_cast<std::int32_t>(config.linear_conv_kernel_dim)},
+                       scalar_dtype());
             gdn.a_log   = direct(model, g->a_log, {gdn.value_heads}, DType::FP32);
             gdn.dt_bias = direct(model, g->dt_bias, {gdn.value_heads}, DType::FP32);
             gdn.norm =
-                direct(model, g->norm, {static_cast<std::int32_t>(config.linear_value_head_dim)});
+                direct(model, g->norm, {static_cast<std::int32_t>(config.linear_value_head_dim)},
+                       scalar_dtype());
             plan.gdn = std::move(gdn);
         } else if (const auto* sparse = std::get_if<SparseAttentionWeights>(&lw.mixer)) {
             const auto& a = *sparse;
@@ -1641,10 +1675,10 @@ struct Executor::Impl {
             qsa.output           = make_projection(model, {a.output});
             const auto d         = static_cast<std::int32_t>(config.head_dim);
             const auto di        = static_cast<std::int32_t>(config.indexer_head_dim);
-            qsa.query_norm       = direct(model, a.query_norm, {d});
-            qsa.key_norm         = direct(model, a.key_norm, {d});
-            qsa.index_query_norm = direct(model, a.index_query_norm, {di});
-            qsa.index_key_norm   = direct(model, a.index_key_norm, {di});
+            qsa.query_norm       = direct(model, a.query_norm, {d}, scalar_dtype());
+            qsa.key_norm         = direct(model, a.key_norm, {d}, scalar_dtype());
+            qsa.index_query_norm = direct(model, a.index_query_norm, {di}, scalar_dtype());
+            qsa.index_key_norm   = direct(model, a.index_key_norm, {di}, scalar_dtype());
             plan.qsa             = std::move(qsa);
         }
         // Without the n-gram table the injection adds nothing (an all-zero embedding projects
@@ -1654,18 +1688,22 @@ struct Executor::Impl {
             ple.key          = make_projection(model, {lw.ple->key});
             ple.value        = make_projection(model, {lw.ple->value});
             const auto width = static_cast<std::int32_t>(config.hc_count * config.hidden_size);
-            ple.norm_key     = direct(model, lw.ple->norm_key, {width});
-            ple.norm_query   = direct(model, lw.ple->norm_query, {width});
-            ple.norm_conv    = direct(model, lw.ple->norm_conv, {width});
-            ple.convolution =
-                direct(model, lw.ple->convolution,
-                       {static_cast<std::int32_t>(config.ple_conv_kernel_size), width});
+            ple.norm_key     = direct(model, lw.ple->norm_key, {width}, scalar_dtype());
+            ple.norm_query   = direct(model, lw.ple->norm_query, {width}, scalar_dtype());
+            ple.norm_conv    = direct(model, lw.ple->norm_conv, {width}, scalar_dtype());
+            ple.convolution  = direct(
+                model, lw.ple->convolution,
+                {static_cast<std::int32_t>(config.ple_conv_kernel_size), width}, scalar_dtype());
             plan.ple = std::move(ple);
         }
         const auto h    = static_cast<std::int32_t>(config.hidden_size);
         plan.moe.router = direct(model, lw.moe.router, {h, static_cast<std::int32_t>(experts)});
         plan.moe.shared_gate = direct(model, lw.moe.shared_score, {h});
         plan.moe.iq1m_matrix = options.iq1m_matrix;
+        if (lw.moe.expert_scales) {
+            plan.moe.expert_scales = direct(model, *lw.moe.expert_scales,
+                                            {3, static_cast<std::int32_t>(experts)}, DType::FP32);
+        }
         if (banks != nullptr) {
             plan.moe.share           = true;
             plan.moe.expert_begin    = share.expert_begin;
@@ -1784,24 +1822,24 @@ struct Executor::Impl {
         segments = std::move(pieces);
     }
 
-    [[nodiscard]] std::size_t workspace_bytes(std::size_t rank) const {
+    // The workspace of `rank`'s calls; without `group`, of all but a span's wide expert calls.
+    [[nodiscard]] std::size_t workspace_bytes(std::size_t rank, bool group = true) const {
         const std::int32_t t = static_cast<std::int32_t>(options.prefill_chunk);
+        const std::uint32_t chunks = group && rank == 0 ? planned_group_chunks() : 1;
         std::size_t bytes    = ops::hyper_connection_read_workspace_bytes(
             static_cast<std::int32_t>(config.hc_count),
             static_cast<std::int32_t>(config.hidden_size),
             static_cast<std::int32_t>(config.hc_lowrank), t);
         bytes = std::max(
-            {bytes, ops::moe_experts_gguf_workspace_bytes(t),
+            {bytes, ops::moe_experts_gguf_workspace_bytes(t, config.expert_output_scales),
              ops::moe_route_workspace_bytes(t, static_cast<std::int32_t>(config.num_experts))});
         if (tensor()) {
             // A rank's experts' fixed-point part, held beside the part's own workspace.
-            bytes = std::max(bytes, ops::moe_experts_gguf_part_workspace_bytes(t) +
-                                        round_up(std::uint64_t(config.hidden_size) * t * 8));
+            bytes = std::max(
+                bytes, ops::moe_experts_gguf_part_workspace_bytes(t, config.expert_output_scales) +
+                           round_up(std::uint64_t(config.hidden_size) * t * 8));
         }
-        if (const std::uint32_t group = planned_group_chunks(); group > 1 && rank == 0) {
-            bytes = std::max(bytes, ops::moe_experts_gguf_workspace_bytes(
-                                        static_cast<std::int32_t>(group) * t));
-        }
+        if (chunks > 1) { bytes = std::max(bytes, group_workspace(group_tokens(chunks))); }
         std::vector<const LayerPlan*> planned;
         for (const auto& plan : layers) {
             if (plan.rank == rank) { planned.push_back(&plan); }
@@ -1838,9 +1876,8 @@ struct Executor::Impl {
             if (plan.moe.latent) {
                 // The staged misses take a whole chunk; a single call, a span group's included,
                 // a slice of at most kGgufLatentSliceTokens.
-                const std::int32_t group =
-                    rank == 0 ? static_cast<std::int32_t>(planned_group_chunks()) * t : t;
-                const std::int32_t call  = std::min(group, ops::kGgufLatentSliceTokens);
+                const std::int32_t call =
+                    std::min(static_cast<std::int32_t>(chunks) * t, ops::kGgufLatentSliceTokens);
                 const auto& latent       = *plan.moe.latent;
                 bytes = std::max({bytes,
                                   ops::moe_latent_gguf_workspace_bytes(t, latent.width, latent.groups),
@@ -1866,12 +1903,16 @@ struct Executor::Impl {
                                         true, 1, t));
             }
             if (plan.qsa) {
-                bytes = std::max({bytes,
-                                  projections_workspace({&plan.qsa->query, &plan.qsa->gate,
-                                                         &plan.qsa->key, &plan.qsa->value,
-                                                         &plan.qsa->index},
-                                                        t),
-                                  projection_workspace(plan.qsa->output, t)});
+                std::array<const Projection*, 2> fp32_outputs{};
+                if (options.kv_cache == KvCacheStorage::Float16) {
+                    fp32_outputs = {&plan.qsa->key, &plan.qsa->value};
+                }
+                bytes = std::max(
+                    {bytes,
+                     projections_workspace({&plan.qsa->query, &plan.qsa->gate, &plan.qsa->key,
+                                            &plan.qsa->value, &plan.qsa->index},
+                                           t, fp32_outputs),
+                     projection_workspace(plan.qsa->output, t)});
                 bytes = std::max({bytes,
                                   ops::qsa_indexer_select_workspace_bytes(
                                       t, static_cast<std::int32_t>(pooled_slots)),
@@ -1947,6 +1988,8 @@ struct Executor::Impl {
                             options.tensor_parallel_prompt_partials == TensorParallelPartials::Fp32;
         const std::uint64_t h     = config.hidden_size;
         const std::uint64_t width = std::uint64_t(config.hc_count) * h;
+        // Flash-Next FP32 K/V plus BF16 index projections occupy 5,376 bytes/column;
+        // even the 6,144-row BF16 floor below covers them and the FP32 key-norm plane.
         const std::uint64_t plane = std::max<std::uint64_t>(width, 6144); // widest BF16 plane rows
         const std::uint64_t row_b = options.ngram ? ops::ngram_row_bytes(options.ngram->format) : 0;
         if (tensor()) {
@@ -2013,6 +2056,9 @@ struct Executor::Impl {
                 rank.mixer_out = nullptr;
             }
             rank.workspace = std::make_unique<DeviceArena>(workspace_bytes(r));
+            if (r == 0 && planned_group_chunks() > 1) {
+                group_workspace_from = round_up(workspace_bytes(r, false));
+            }
             std::vector<std::int32_t> identity(std::max<std::uint32_t>(pages, options.sequences));
             std::iota(identity.begin(), identity.end(), 0);
             rank.block_table = DeviceBuffer(std::size_t(pages) * 4);
@@ -2761,14 +2807,7 @@ struct Executor::Impl {
             memory.ranks[r].expert_cache_bytes += bytes[r];
         }
         if (profile) { cache->seed(*profile); }
-        if (staged) {
-            allocate_misses();
-            // Where a device's copies queue behind one another whatever their streams
-            // (serialized_copy_queue), a replayed layer's device-side wait for the misses can hold
-            // the copies its graph queued after it ahead of the service's own copies, which end
-            // that wait. Eager passes wait on the host and queue nothing behind the wait.
-            if (serialized_copy_queue()) { options.cuda_graphs = false; }
-        }
+        if (staged) { allocate_misses(); }
     }
 
     // A text layer's call of more than eight tokens over GGUF host experts runs from device memory
@@ -2826,6 +2865,13 @@ struct Executor::Impl {
                                           layer.latent_scales.size() * sizeof(float),
                                           cudaMemcpyDeviceToHost));
                 }
+            }
+            if (plan->moe.expert_scales.data != nullptr) {
+                RankBinding bind(device, plan->rank);
+                layer.expert_scales.resize(std::size_t(plan->moe.expert_scales.numel()));
+                CUDA_CHECK(cudaMemcpy(layer.expert_scales.data(), plan->moe.expert_scales.data,
+                                      layer.expert_scales.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
             }
             layer.gate_table = static_cast<const void* const*>(plan->moe.gate.table.p);
             // The text layers' slots follow their misses; the MTP block's keep the cache's own
@@ -3494,13 +3540,15 @@ struct Executor::Impl {
 
     [[nodiscard]] static bool gguf_only(const Projection& p) { return gguf_projection(p); }
 
-    // The parts' columns of `out` (BF16 [p.rows, *]) <- p's projection of those of `x` (BF16
+    // The parts' columns of `out` (output_type [p.rows, *]) <- p's projection of those of `x` (BF16
     // [p.k, *]), a call per group of projection_groups.
     static void project_columns(const Projection& p, void* x, void* out,
-                                std::span<const Part> parts, WorkspaceArena& ws, cudaStream_t s) {
+                                std::span<const Part> parts, WorkspaceArena& ws, cudaStream_t s,
+                                DType output_type = DType::BF16) {
         for (const ColumnRun& group : projection_groups(parts, gguf_only(p))) {
             const Tensor in(columns(x, p.k, group.column, 2), DType::BF16, {p.k, group.count});
-            Tensor o(columns(out, p.rows, group.column, 2), DType::BF16, {p.rows, group.count});
+            Tensor o(columns(out, p.rows, group.column, dtype_size(output_type)), output_type,
+                     {p.rows, group.count});
             project(p, in, o, ws, s);
         }
     }
@@ -3513,6 +3561,7 @@ struct Executor::Impl {
     struct ColumnsInto {
         const Projection* projection = nullptr;
         void* out                    = nullptr;
+        DType dtype                  = DType::BF16;
     };
     static void project_columns(std::initializer_list<ColumnsInto> list, void* x,
                                 std::span<const Part> parts, WorkspaceArena& ws, cudaStream_t s) {
@@ -3526,7 +3575,7 @@ struct Executor::Impl {
             } else if (into.projection->pieces.size() == 1) {
                 single.push_back(&into);
             } else {
-                project_columns(*into.projection, x, into.out, parts, ws, s);
+                project_columns(*into.projection, x, into.out, parts, ws, s, into.dtype);
             }
         }
         if (!single.empty()) {
@@ -3544,8 +3593,8 @@ struct Executor::Impl {
                         throw std::invalid_argument("projections of one input read its width");
                     }
                     const std::int32_t rows = c->projection->rows;
-                    outs.push_back(Tensor(columns(c->out, rows, group.column, 2), DType::BF16,
-                                          {rows, group.count}));
+                    outs.push_back(Tensor(columns(c->out, rows, group.column, dtype_size(c->dtype)),
+                                          c->dtype, {rows, group.count}));
                 }
                 for (std::size_t i = 0; i < outs.size(); ++i) {
                     const auto& operand = single[i]->projection->pieces.front().weight;
@@ -3567,8 +3616,8 @@ struct Executor::Impl {
             into.clear();
             for (const ColumnsInto* c : gguf) {
                 const std::int32_t rows = c->projection->rows;
-                outs.push_back(Tensor(columns(c->out, rows, group.column, 2), DType::BF16,
-                                      {rows, group.count}));
+                outs.push_back(Tensor(columns(c->out, rows, group.column, dtype_size(c->dtype)),
+                                      c->dtype, {rows, group.count}));
             }
             for (std::size_t i = 0; i < outs.size(); ++i) {
                 into.push_back({gguf[i]->projection, &outs[i]});
@@ -3642,7 +3691,7 @@ struct Executor::Impl {
             gb(columns(p.b, nv, span.column, 2), DType::BF16, {nv, span.count});
         Tensor gate(p.gate + at, DType::FP32, {nv, span.count}),
             beta(p.beta + at, DType::FP32, {nv, span.count});
-        ops::gdn_gating(ga, gb, g.a_log, g.dt_bias, gate, beta, s);
+        ops::gdn_gating(ga, gb, g.a_log, g.dt_bias, gate, beta, s, config.gdn_a_is_log);
     }
 
     void gdn_part(const LayerPlan& plan, std::size_t index, LayerState& state, RankState& rank,
@@ -3795,10 +3844,15 @@ struct Executor::Impl {
         void* attention = nullptr;
     };
 
+    [[nodiscard]] DType kv_input_type() const {
+        return options.kv_cache == KvCacheStorage::Float16 ? DType::FP32 : DType::BF16;
+    }
+
     [[nodiscard]] QsaPlanes qsa_planes(const QsaPlan& a, const RankState& rank, std::int32_t t,
                                        void* index) const {
         const std::uint64_t kv_bytes =
-            round_up(std::uint64_t(config.head_dim) * std::uint64_t(a.kv_heads) * std::uint64_t(t) * 2);
+            round_up(std::uint64_t(config.head_dim) * std::uint64_t(a.kv_heads) * std::uint64_t(t) *
+                     dtype_size(kv_input_type()));
         auto* kv = static_cast<std::byte*>(rank.c);
         return {.q         = rank.a,
                 .gate      = rank.b,
@@ -3829,22 +3883,25 @@ struct Executor::Impl {
         const auto d         = static_cast<std::int32_t>(config.head_dim);
         const auto nk        = a.kv_heads;
         const auto nq        = query_heads(a);
+        const auto kv_type   = kv_input_type();
+        const auto kv_bytes  = dtype_size(kv_type);
         project_columns({{&a.query, p.q},
                          {&a.gate, p.gate},
-                         {&a.key, p.k},
-                         {&a.value, p.v},
+                         {&a.key, p.k, kv_type},
+                         {&a.value, p.v, kv_type},
                          {&a.index, p.index}},
                         rank.mixed, parts, ws, s);
         // The parts' columns; a media prompt's three-axis positions hold every column of the pass.
         const ColumnRun span = mrope ? ColumnRun{.column = 0, .count = t} : covered(parts);
         Tensor q3(columns(p.q, d * nq, span.column, 2), DType::BF16, {d, nq, span.count});
-        Tensor k3(columns(p.k, d * nk, span.column, 2), DType::BF16, {d, nk, span.count});
+        Tensor k3(columns(p.k, d * nk, span.column, kv_bytes), kv_type, {d, nk, span.count});
         Tensor qo(columns(p.qo, d * nq, span.column, 2), DType::BF16, {d, nq, span.count});
-        Tensor ko(columns(p.ko, d * nk, span.column, 2), DType::BF16, {d, nk, span.count});
+        Tensor ko(columns(p.ko, d * nk, span.column, kv_bytes), kv_type, {d, nk, span.count});
         const ops::RopeYarn& yarn = options.rope_yarn;
         // A tensor-parallel share of the heads leaves the fused norm and rotation's head counts.
         const bool share = nk != static_cast<std::int32_t>(config.num_key_value_heads);
-        if (mrope || yarn.active() || share) {
+        if (mrope || yarn.active() || share || config.fp32_direct || !config.norm_unit_offset ||
+            kv_type == DType::FP32) {
             // A media prompt: the three-axis positions of its images and video, each pair of
             // rotated dimensions on axis i % 3 (the interleaved MRoPE sections). Under YaRN, text
             // too: the fused norm and rotation fixes the unscaled one, so the rotation is its own
@@ -3853,11 +3910,14 @@ struct Executor::Impl {
             const Tensor line(const_cast<std::int32_t*>(rope) + span.column, DType::I32,
                               {span.count});
             const int rotary = static_cast<int>(float(d) * config.partial_rotary_factor);
-            ops::rmsnorm(q3, a.query_norm, config.rms_norm_eps, true, qo, s);
-            ops::rmsnorm(k3, a.key_norm, config.rms_norm_eps, true, ko, s);
+            ops::rmsnorm(q3, a.query_norm, config.rms_norm_eps, config.norm_unit_offset, qo, s);
+            ops::rmsnorm(k3, a.key_norm, config.rms_norm_eps, config.norm_unit_offset, ko, s);
             if (yarn.active()) {
                 ops::rope(mrope ? axes : line, rotary, config.rope_theta, yarn, qo, s);
                 ops::rope(mrope ? axes : line, rotary, config.rope_theta, yarn, ko, s);
+            } else if (kv_type == DType::FP32) {
+                ops::rope(mrope ? axes : line, rotary, config.rope_theta, qo, s);
+                ops::rope(mrope ? axes : line, rotary, config.rope_theta, ko, s);
             } else {
                 ops::rope(mrope ? axes : line, rotary, config.rope_theta, qo, ko, s);
             }
@@ -3881,8 +3941,10 @@ struct Executor::Impl {
         const auto nk        = a.kv_heads;
         const auto nq        = query_heads(a);
         const Tensor qo(columns(p.qo, d * nq, column, 2), DType::BF16, {d, nq, n});
-        const Tensor ko(columns(p.ko, d * nk, column, 2), DType::BF16, {d, nk, n});
-        const Tensor v3(columns(p.v, d * nk, column, 2), DType::BF16, {d, nk, n});
+        const auto kv_type  = kv_input_type();
+        const auto kv_bytes = dtype_size(kv_type);
+        const Tensor ko(columns(p.ko, d * nk, column, kv_bytes), kv_type, {d, nk, n});
+        const Tensor v3(columns(p.v, d * nk, column, kv_bytes), kv_type, {d, nk, n});
         Tensor index(in.index != nullptr ? in.index : columns(p.index, a.index.rows, column, 2),
                      DType::BF16, {a.index.rows, n});
         auto* const part_positions = const_cast<std::int32_t*>(in.positions);
@@ -3906,7 +3968,8 @@ struct Executor::Impl {
         Tensor pooled(state.pooled.p, DType::FP32, {di, static_cast<std::int32_t>(pooled_slots)});
         Tensor tail(in.tail, DType::FP32,
                     {di, static_cast<std::int32_t>(config.indexer_compress_ratio - 1)});
-        const ops::QsaIndexerWeights iw{&a.index_query_norm, &a.index_key_norm};
+        const ops::QsaIndexerWeights iw{&a.index_query_norm, &a.index_key_norm,
+                                        config.norm_unit_offset};
         // The call's first position is the part's first staged one, read on the device.
         const Tensor first(part_positions, DType::I32, {1});
         if (kv_only) {
@@ -4061,7 +4124,7 @@ struct Executor::Impl {
                        {width, static_cast<std::int32_t>((config.ple_conv_kernel_size - 1) *
                                                          config.ngram.ngram_size)});
         const ops::PleInjectWeights weights{&p.norm_key, &p.norm_query, &p.norm_conv,
-                                            &p.convolution};
+                                            &p.convolution, config.norm_unit_offset};
         auto scope = ws.scope();
         if (verifying) {
             // The history stays; commit() advances it over the kept positions' recorded input.
@@ -4418,12 +4481,13 @@ struct Executor::Impl {
             {
                 auto scope = rank.workspace->scope();
                 if (pending) {
-                    ops::hyper_connection_write_read(stack, moe_out, inject, plan.attn_hc.weights(),
-                                                     config.rms_norm_eps, *rank.workspace, mixed,
-                                                     &inject, rank.stream);
+                    ops::hyper_connection_write_read(
+                        stack, moe_out, inject, plan.attn_hc.weights(prompt_weights()),
+                        config.rms_norm_eps, *rank.workspace, mixed, &inject, rank.stream);
                 } else {
-                    ops::hyper_connection_read(stack, plan.attn_hc.weights(), config.rms_norm_eps,
-                                               *rank.workspace, mixed, &inject, rank.stream);
+                    ops::hyper_connection_read(stack, plan.attn_hc.weights(prompt_weights()),
+                                               config.rms_norm_eps, *rank.workspace, mixed, &inject,
+                                               rank.stream);
                 }
                 pending = false;
             }
@@ -4435,9 +4499,10 @@ struct Executor::Impl {
             if (kv_only) { break; }
             {
                 auto scope = rank.workspace->scope();
-                ops::hyper_connection_write_read(
-                    stack, Tensor(rank.y, DType::BF16, {h, t}), inject, plan.mlp_hc.weights(),
-                    config.rms_norm_eps, *rank.workspace, mixed, &inject, rank.stream);
+                ops::hyper_connection_write_read(stack, Tensor(rank.y, DType::BF16, {h, t}), inject,
+                                                 plan.mlp_hc.weights(prompt_weights()),
+                                                 config.rms_norm_eps, *rank.workspace, mixed,
+                                                 &inject, rank.stream);
             }
             run_moe(plan, rank, t, i);
             pending = true;
@@ -4707,12 +4772,13 @@ struct Executor::Impl {
                     }
                     auto scope = rank.workspace->scope();
                     if (write_read) {
-                        ops::hyper_connection_write_read(stack, moe_out, inject,
-                                                         plan.attn_hc.weights(), config.rms_norm_eps,
-                                                         *rank.workspace, mixed, &inject, rank.stream);
+                        ops::hyper_connection_write_read(
+                            stack, moe_out, inject, plan.attn_hc.weights(prompt_weights()),
+                            config.rms_norm_eps, *rank.workspace, mixed, &inject, rank.stream);
                     } else {
-                        ops::hyper_connection_read(stack, plan.attn_hc.weights(), config.rms_norm_eps,
-                                                   *rank.workspace, mixed, &inject, rank.stream);
+                        ops::hyper_connection_read(stack, plan.attn_hc.weights(prompt_weights()),
+                                                   config.rms_norm_eps, *rank.workspace, mixed,
+                                                   &inject, rank.stream);
                     }
                 });
             }
@@ -4751,8 +4817,8 @@ struct Executor::Impl {
                     auto scope    = rank.workspace->scope();
                     ops::hyper_connection_write_read(
                         stack, Tensor(rank.y, DType::BF16, {h, t}), inject,
-                        plan_of(r, i).mlp_hc.weights(), config.rms_norm_eps, *rank.workspace, mixed,
-                        &inject, rank.stream);
+                        plan_of(r, i).mlp_hc.weights(prompt_weights()), config.rms_norm_eps,
+                        *rank.workspace, mixed, &inject, rank.stream);
                 });
             }
             exchange_step(n, TensorParallelSum::StoreFp32,
@@ -4957,12 +5023,13 @@ struct Executor::Impl {
                                 if (pending) {
                                     ops::hyper_connection_write_read(
                                         stack, moe_out_of(rank, run), inject,
-                                        plan.attn_hc.weights(), config.rms_norm_eps,
+                                        plan.attn_hc.weights(prompt_weights()), config.rms_norm_eps,
                                         *rank.workspace, mixed, &inject, rank.stream);
                                 } else {
-                                    ops::hyper_connection_read(stack, plan.attn_hc.weights(),
-                                                               config.rms_norm_eps, *rank.workspace,
-                                                               mixed, &inject, rank.stream);
+                                    ops::hyper_connection_read(
+                                        stack, plan.attn_hc.weights(prompt_weights()),
+                                        config.rms_norm_eps, *rank.workspace, mixed, &inject,
+                                        rank.stream);
                                 }
                             }
                             run_mixer(
@@ -4998,13 +5065,14 @@ struct Executor::Impl {
                     {
                         auto scope = rank.workspace->scope();
                         if (write_read) {
-                            ops::hyper_connection_write_read(
-                                stack, moe_out_of(rank, run), inject, plan.attn_hc.weights(),
-                                config.rms_norm_eps, *rank.workspace, mixed, &inject, rank.stream);
+                            ops::hyper_connection_write_read(stack, moe_out_of(rank, run), inject,
+                                                             plan.attn_hc.weights(prompt_weights()),
+                                                             config.rms_norm_eps, *rank.workspace,
+                                                             mixed, &inject, rank.stream);
                         } else {
-                            ops::hyper_connection_read(stack, plan.attn_hc.weights(),
-                                                       config.rms_norm_eps, *rank.workspace, mixed,
-                                                       &inject, rank.stream);
+                            ops::hyper_connection_read(
+                                stack, plan.attn_hc.weights(prompt_weights()), config.rms_norm_eps,
+                                *rank.workspace, mixed, &inject, rank.stream);
                         }
                     }
                     if (partial == nullptr) { return; }
@@ -5025,8 +5093,9 @@ struct Executor::Impl {
                                auto scope = rank.workspace->scope();
                                ops::hyper_connection_write_read(
                                    stack, mixer_out_of(rank, run), inject,
-                                   plan_of(r, i).mlp_hc.weights(), config.rms_norm_eps,
-                                   *rank.workspace, mixed, &inject, rank.stream);
+                                   plan_of(r, i).mlp_hc.weights(prompt_weights()),
+                                   config.rms_norm_eps, *rank.workspace, mixed, &inject,
+                                   rank.stream);
                            }
                            run_moe_share(plan_of(r, i), rank, i, partial, run);
                        });
@@ -5192,7 +5261,8 @@ struct Executor::Impl {
         const bool host_free = !stream || misses;
         // A K/V-only pass runs eagerly: the decode graphs end in the head.
         const bool decode_graph = options.cuda_graphs && t == 1 && host_free && !verifying &&
-                                  branch_origin == nullptr && !kv_only_pass;
+                                  branch_origin == nullptr && !kv_only_pass &&
+                                  !(config.hc_prefill_inject && prompt_pass);
         const bool verify_graph = options.cuda_graphs && verifying && parts.size() == 1 &&
                                   host_free && t <= kVectorTokens && branch_origin == nullptr;
         if (misses) { misses->keep_alive(); }
@@ -5293,9 +5363,15 @@ struct Executor::Impl {
         return tokens > options.prefill_chunk ? tokens : 0;
     }
 
-    // The chunks a span takes (span_chunks), before anything is sized by it.
+    // The chunks a span takes (span_chunks), before anything is sized by it, and the memory the
+    // device has free then.
     void plan_span_chunks() {
         span_chunks = kSpanChunks;
+        {
+            RankBinding bind(device, 0);
+            std::size_t total = 0;
+            CUDA_CHECK(cudaMemGetInfo(&start_free_bytes, &total));
+        }
         const std::uint64_t further =
             std::uint64_t(kLoneSpanChunks - kSpanChunks) * options.prefill_chunk;
         if (options.sequences != 1 ||
@@ -5306,19 +5382,47 @@ struct Executor::Impl {
         const std::uint64_t token_bytes =
             std::uint64_t(config.hc_count) * config.hidden_size * 4 + config.hidden_size * 2 +
             config.hc_count * 4;
-        RankBinding bind(device, 0);
-        std::size_t free_bytes = 0, total = 0;
-        CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total));
-        if (further * token_bytes <= free_bytes / kLoneSpanShare) { span_chunks = kLoneSpanChunks; }
+        if (further * token_bytes <= start_free_bytes / kLoneSpanShare) {
+            span_chunks = kLoneSpanChunks;
+        }
     }
 
-    // The chunks one expert call of a span's expert phase takes: as many as kGroupTokens holds,
-    // with host experts, whose groups run from the pool.
+    // The chunks one expert call of a span's expert phase takes, with host experts, whose groups
+    // run from the pool (see kGroupShare). Latent experts run a group's call in slices, so their
+    // groups stay at kGroupTokens' worth: whole spans prefilled Edge0-120B 1% slower.
     [[nodiscard]] std::uint32_t planned_group_chunks() const {
         if (planned_span_tokens() == 0 || model.options().experts != ExpertResidency::Host) {
             return 1;
         }
-        return std::clamp<std::uint32_t>(kGroupTokens / options.prefill_chunk, 1, kSpanChunks);
+        const std::uint32_t c     = options.prefill_chunk;
+        const std::uint32_t least = std::clamp<std::uint32_t>(kGroupTokens / c, 1, span_chunks);
+        if (!gguf_experts()) { return least; }
+        for (const std::uint32_t g : {span_chunks, kSpanChunks}) {
+            if (g > least && group_workspace(group_tokens(g)) <= start_free_bytes / kGroupShare) {
+                return g;
+            }
+        }
+        return least;
+    }
+
+    // The most tokens a group of `chunks` chunks holds: a span holds no more than its planes do.
+    [[nodiscard]] std::uint32_t group_tokens(std::uint32_t chunks) const {
+        return std::min(chunks * options.prefill_chunk, planned_span_tokens());
+    }
+
+    // Whether a text layer's routed experts are GGUF experts (not latent or native).
+    [[nodiscard]] bool gguf_experts() const {
+        return std::any_of(layers.begin(), layers.end(), [](const LayerPlan& plan) {
+            return !plan.moe.latent && !plan.moe.native;
+        });
+    }
+
+    // The workspace of a group's wide expert call of `tokens` tokens: none past the other calls'
+    // for latent experts, whose calls run in slices.
+    [[nodiscard]] std::size_t group_workspace(std::uint32_t tokens) const {
+        return gguf_experts() ? ops::moe_experts_gguf_workspace_bytes(
+                                    static_cast<std::int32_t>(tokens), config.expert_output_scales)
+                              : 0;
     }
 
     void allocate_span() {
@@ -5347,7 +5451,7 @@ struct Executor::Impl {
         }
         span_group = planned_group_chunks();
         if (span_group > 1) {
-            const std::size_t group = std::size_t(span_group) * options.prefill_chunk;
+            const std::size_t group = group_tokens(span_group);
             const std::size_t pairs = group * config.num_experts_per_tok;
             span_ids     = DeviceBuffer(pairs * 4);
             span_weights = DeviceBuffer(pairs * 4);
@@ -5747,7 +5851,7 @@ struct Executor::Impl {
                     if (plan.ple) { run_ple(plan, state, rank, part); }
                     {
                         auto scope = rank.workspace->scope();
-                        ops::hyper_connection_read(stack, plan.attn_hc.weights(),
+                        ops::hyper_connection_read(stack, plan.attn_hc.weights(true),
                                                    config.rms_norm_eps, *rank.workspace, mixed,
                                                    &inject, st);
                     }
@@ -5762,10 +5866,10 @@ struct Executor::Impl {
                     }
                     if (!kv_only) {
                         auto scope = rank.workspace->scope();
-                        ops::hyper_connection_write_read(
-                            stack, Tensor(rank.y, DType::BF16, {h, t}), inject,
-                            plan.mlp_hc.weights(), config.rms_norm_eps, *rank.workspace, mixed,
-                            &inject, st);
+                        ops::hyper_connection_write_read(stack, Tensor(rank.y, DType::BF16, {h, t}),
+                                                         inject, plan.mlp_hc.weights(true),
+                                                         config.rms_norm_eps, *rank.workspace,
+                                                         mixed, &inject, st);
                     }
                     // The layer's state at the cut, before the next chunk moves it on.
                     if (cut.state != nullptr && k + 1 == cut.chunk) {
@@ -6273,6 +6377,12 @@ struct Executor::Impl {
             if (span_stack.p != nullptr) {
                 loans.push_back({.rank = 0, .base = span_stack.p, .bytes = span_stack.bytes});
             }
+            if (group_workspace_from > 0 && ranks[0].workspace->capacity() > group_workspace_from) {
+                loans.push_back({.rank  = 0,
+                                 .base  = static_cast<std::byte*>(ranks[0].workspace->base()) +
+                                          group_workspace_from,
+                                 .bytes = ranks[0].workspace->capacity() - group_workspace_from});
+            }
             if (!loans.empty()) {
                 lent_ranks.assign(device.size(), 0);
                 for (const auto& loan : loans) { lent_ranks[loan.rank] = 1; }
@@ -6622,12 +6732,12 @@ struct Executor::Impl {
         embed_cells(ids, n, rank.mixed, media);
         Tensor embedded(rank.mixed, DType::BF16, {h, n});
         Tensor embedded_norm(rank.d, DType::BF16, {h, n});
-        ops::rmsnorm(embedded, mtp->embedding_norm, eps, true, embedded_norm, s);
+        ops::rmsnorm(embedded, mtp->embedding_norm, eps, config.norm_unit_offset, embedded_norm, s);
         Tensor token(rank.e, DType::BF16, {h, n});
         project(mtp->fc_embedding, embedded_norm, token, ws, s);
         Tensor hidden(rank.a, DType::BF16, {hc * h, n});
         Tensor hidden_norm(rank.b, DType::BF16, {hc * h, n});
-        ops::rmsnorm(hidden, mtp->hidden_norm, eps, true, hidden_norm, s);
+        ops::rmsnorm(hidden, mtp->hidden_norm, eps, config.norm_unit_offset, hidden_norm, s);
         Tensor streams(rank.c, DType::BF16, {h, hc * n});
         project(mtp->fc_hidden, Tensor(rank.b, DType::BF16, {h, hc * n}), streams, ws, s);
         Tensor stack(rank.stack, DType::FP32, {h, hc, n});
@@ -6638,7 +6748,8 @@ struct Executor::Impl {
         Tensor inject(rank.inject, DType::FP32, {hc, n});
         {
             auto scope = ws.scope();
-            ops::hyper_connection_read(stack, plan.attn_hc.weights(), eps, ws, mixed, &inject, s);
+            ops::hyper_connection_read(stack, plan.attn_hc.weights(!drafting), eps, ws, mixed,
+                                       &inject, s);
         }
         // The target pass's rotation state, which the cells' replaces until their attention ends.
         const bool target_axes          = std::exchange(mrope, axes);
@@ -6672,7 +6783,8 @@ struct Executor::Impl {
         {
             auto scope = ws.scope();
             ops::hyper_connection_write_read(stack, Tensor(rank.y, DType::BF16, {h, n}), inject,
-                                             plan.mlp_hc.weights(), eps, ws, mixed, &inject, s);
+                                             plan.mlp_hc.weights(!drafting), eps, ws, mixed,
+                                             &inject, s);
         }
         if (drafting) {
             run_moe(plan, rank, n, layers.size());
@@ -7238,7 +7350,8 @@ struct Executor::Impl {
                               {di, static_cast<std::int32_t>(pooled_slots)});
                 Tensor tail(state.tail.p, DType::FP32,
                             {di, static_cast<std::int32_t>(config.indexer_compress_ratio - 1)});
-                const ops::QsaIndexerWeights iw{&a.index_query_norm, &a.index_key_norm};
+                const ops::QsaIndexerWeights iw{&a.index_query_norm, &a.index_key_norm,
+                                                config.norm_unit_offset};
                 ops::qsa_indexer_append(projection, first, iw, config.rms_norm_eps,
                                         options.rope_yarn, pooled, tail, rank.stream);
             }
@@ -7777,7 +7890,6 @@ std::string Executor::expert_execution_profile() const {
 }
 
 bool Executor::hybrid_experts() const noexcept { return impl_->hybrid != nullptr; }
-bool Executor::cuda_graphs() const noexcept { return impl_->options.cuda_graphs; }
 std::string Executor::expert_cpu_description() const {
     return impl_->misses ? impl_->misses->cpu_description() : std::string();
 }

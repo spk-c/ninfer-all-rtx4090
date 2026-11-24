@@ -19,10 +19,12 @@ spelling and defaults.
 | [Weight conversion](weight-conversion.md) | official recipes, custom formats and sources, conversion methods, optional components and artifact output |
 | [GGUF block formats](gguf.md) | GGUF releases with a ggml type per tensor: the twenty block formats, their products, serving and measurements |
 | [Qwen3.8-Flash-Next](qwen3-8-flash-next.md) | converting the GSQ-RCO GGUF releases and their n-gram table; experts on one or several GPUs, in host memory or on disk; measurements |
+| [Native Flash-Next with DFlash2](flash-next-native-dflash2.md) | GGUF text and NVIDIA FP8 PLE sources, explicit operand-preservation choices, Q8PLE and DFlash2 attachment |
 | [Edge0](edge0.md) | Edge0-145B and Edge0-120B, latent-MoE models on the Flash-Next skeleton: converting the release folders, placements, tensor parallelism by groups, what differs from Flash-Next |
-| [Gemma 4 26B-A4B](gemma4.md) | converting Google's QAT GGUF release with its MTP assistant and vision tower, what runs, speculative decoding, images and video, the defaults, measurements against llama.cpp and the numerical checks |
+| [Gemma 4 26B-A4B and 31B](gemma4.md) | converting Google's QAT GGUF releases with their MTP assistants and vision tower, what runs, speculative decoding, images and video, the defaults, measurements against llama.cpp and the numerical checks |
 | [Flint](flint.md) | converting a GGUF of Recursive's Flint, what runs, reasoning and GLM-4.7 tool calls, expert residency, measurements against llama.cpp and the numerical checks |
 | [DeepSeek-V4.1-Flash](deepseek-v41.md) | converting the GSQ-RCO IQ1_M and Coder GGUFs and their Engram table, what runs, reasoning and DSML tool calls, host and disk experts, the Engram table's residency, measurements and the numerical checks |
+| [Inkling 2 Mini](inkling2.md) | converting a GGUF of Thinking Machines' looped Inkling 2 Mini with its vision tower and DSpark drafter, what runs, the looped state's kernels, tool-call blocks, expert residency, measurements against llama.cpp and the numerical checks |
 | [Disk expert reads](expert-disk-reads.md) | disk experts striped over a second drive (`--expert-mirror`) and written by the drive straight into device memory (`--expert-direct`, NInfer's kernel modules) |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
 | [Device profiles](device-profiles.md) | per-GPU route profiles: the built-in RTX 3090/4090/5090/PRO 6000/TITAN RTX/Tesla V100 table, calibration at first start, `ninfer-calibrate` |
@@ -34,7 +36,7 @@ spelling and defaults.
 
 The artifacts converted for this engine (Ternary Bonsai 2, the GSQ-RCO and Flash-Next conversions,
 the Qwen3.8-27B fine-tunes, Qwen3.6-35B-A3B NVFP4 and the Qwen3.8-27B DSpine drafter) are in the
-README's [artifact table](../README.md#artifacts); their cards live on Hugging Face. The official NInfer
+README's [Supported Models](../README.md#supported-models); their cards live on Hugging Face. The official NInfer
 artifacts load as well; their cards on Hugging Face give upstream's requirements and its
 measurements on one RTX 5090. The `groupwise-int` artifacts run on every supported card. The
 `nvfp4` ones run on the FP4 tensor cores of a `120a` build and, on cards without them, through

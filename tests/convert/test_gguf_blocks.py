@@ -457,6 +457,29 @@ def test_a_bf16_output_head_keeps_its_exact_words(tmp_path):
         assert all(u["activation_policy"] == "A16Only" and "auxiliaries" not in u for u in uses)
 
 
+def test_a_bf16_expert_bank_is_read_by_its_flattened_rows(tmp_path):
+    from tools.convert.sources.gguf import TYPE_BF16
+
+    experts, rows, columns = 3, 4, 16
+    words = np.random.default_rng(7).integers(0, 1 << 16, size=(experts, rows, columns),
+                                              dtype=np.uint16)
+    path = tmp_path / "bank.gguf"
+    write_gguf(path, {"general.architecture": "inkling2"},
+               [("blk.0.ffn_gate_up_exps.weight", (experts, rows, columns), TYPE_BF16,
+                 words.tobytes())])
+    flat = words.reshape(experts * rows, columns)
+    with GGUFFile(path) as gguf:
+        source = gguf_blocks.bf16_source(gguf, "blk.0.ffn_gate_up_exps.weight",
+                                         (experts * rows, columns))
+        assert source.read_encoded is None
+        # A run across two experts' matrices, then the last expert's rows.
+        for first, last in ((2, 7), (8, 12)):
+            got = source.rows(first, last).view(torch.int16).numpy().view(np.uint16)
+            assert np.array_equal(got, flat[first:last])
+        with pytest.raises(ValueError, match="expected BF16"):
+            gguf_blocks.bf16_source(gguf, "blk.0.ffn_gate_up_exps.weight", (experts, columns))
+
+
 def test_a_block_output_head_stays_stored_blocks(tmp_path):
     path, blocks = _q8_0_file(tmp_path, 4, 64, 13, "output.weight")
     with GGUFFile(path) as gguf:
@@ -464,3 +487,38 @@ def test_a_block_output_head_stays_stored_blocks(tmp_path):
         rows = source.read_encoded(0, 4)
     assert stored_blocks and rows.format == "gguf_q8_0" and rows.input_columns is None
     assert torch.equal(rows.codes, torch.from_numpy(blocks.reshape(4, -1)))
+
+
+def _mxfp4_values(blocks: np.ndarray) -> np.ndarray:
+    """Independent ggml MXFP4 dequantization (ggml-quants.c): an E8M0 byte e, then value j is
+    kvalues_mxfp4[code] * 2^(e - 128), the code the low nibble of byte j for j < 16, else the high
+    nibble of byte j - 16."""
+
+    kvalues = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12]
+    out = np.empty((blocks.shape[0], blocks.shape[1] * 32), dtype=np.float64)
+    for r, row in enumerate(blocks):
+        for b, block in enumerate(row):
+            scale = 2.0 ** (int(block[0]) - 128)
+            for j in range(16):
+                out[r, b * 32 + j] = kvalues[block[1 + j] & 15] * scale
+                out[r, b * 32 + 16 + j] = kvalues[block[1 + j] >> 4] * scale
+    return out
+
+
+def test_mxfp4_blocks_become_q8_0_blocks_of_the_same_values():
+    generator = np.random.default_rng(39)
+    blocks = generator.integers(0, 256, size=(3, 4, 17), dtype=np.uint8)
+    blocks[..., 0] = generator.integers(104, 144, size=(3, 4))
+    blocks[0, 0, 0], blocks[0, 1, 0] = 104, 143  # 2^-24 and 2^15, the binary16 ends
+    q8 = gguf_blocks.mxfp4_as_q8_0(blocks.reshape(3, -1))
+    assert q8.shape == (3, 4 * 34)
+    np.testing.assert_array_equal(_q8_0_values(q8.reshape(3, 4, 34)), _mxfp4_values(blocks))
+    np.testing.assert_array_equal(gguf_blocks.dequantize_mxfp4(blocks.reshape(3, -1)), _mxfp4_values(blocks))
+
+
+@pytest.mark.parametrize("exponent", [103, 144])
+def test_an_mxfp4_scale_outside_binary16_is_refused(exponent):
+    blocks = np.zeros((1, 17), dtype=np.uint8)
+    blocks[0, 0] = exponent
+    with pytest.raises(ValueError, match="leave binary16"):
+        gguf_blocks.mxfp4_as_q8_0(blocks)

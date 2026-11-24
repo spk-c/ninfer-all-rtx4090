@@ -50,6 +50,7 @@ using qwen3_5::WeightUseId;
 struct HyperConnectionWeights {
     WeightId norm, down, up;
     std::optional<WeightId> inject; // absent for the final mixer
+    std::optional<WeightId> prefill_inject; // distinct original operand, when stored
 };
 
 struct SparseAttentionWeights {
@@ -74,6 +75,7 @@ struct LatentWeights {
 
 struct MoeWeights {
     WeightId router, shared_score;
+    std::optional<WeightId> expert_scales;
     // Edge0's latent experts: then each expert's gate and up are [640, width], its down [width, 640].
     std::optional<LatentWeights> latent;
     // One per expert; empty when the experts stay in the files, which `located` then describes.
@@ -162,6 +164,9 @@ struct LoadOptions {
     std::size_t ranks = 1;
     std::vector<std::uint32_t> stage_layers;
     ExpertResidency experts = ExpertResidency::Device;
+    // Host experts: at most this many bytes pinned, the rest read from the artifact's files
+    // (--expert-host-mib); unset, as many as the host can pin.
+    std::optional<std::uint64_t> expert_host_bytes;
     // Loads the Vision tower the artifact carries (its `vision` component, the Qwen3.5 tower) onto
     // the first stage's device, beside the token embedding its output joins.
     bool vision = false;

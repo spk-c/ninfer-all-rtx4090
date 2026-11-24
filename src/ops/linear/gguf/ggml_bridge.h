@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops::gguf {
 
@@ -87,6 +88,20 @@ struct VectorOutput {
 void vector_product(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
                     const void* activation, int columns, const VectorOutput& out,
                     cudaStream_t stream);
+
+// One of vector_products' products: `rows` rows of `weight` times `activation` into `out`.
+struct VectorJob {
+    const void* weight     = nullptr;
+    int rows               = 0;
+    const void* activation = nullptr;
+    VectorOutput out;
+};
+inline constexpr int kMaxVectorJobs = 4;
+
+// vector_product for up to kMaxVectorJobs weights of one block type, K and row size in one launch,
+// each with its own activation and output (the products of one layer's input).
+void vector_products(GgmlType type, std::int64_t row_bytes, int k,
+                     std::span<const VectorJob> products, int columns, cudaStream_t stream);
 
 // out[r, c] = act(gate_r . x_c) * (up_r . x_c) where gate row r and up row r are rows r and
 // rows + r of one parent of this type.
@@ -207,7 +222,7 @@ struct MoeTable {
     std::int64_t row_bytes     = 0;
     int rows                   = 0;
     int k                      = 0;
-    bool aligned16             = false;
+    bool aligned16             = false; // every expert's base pointer is 16-byte aligned
 };
 
 // Where a product over experts puts pair p's row r.

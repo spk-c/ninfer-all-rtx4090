@@ -39,10 +39,24 @@ int launch_configuration_tests() {
         std::ofstream(path) << text;
         return path.string();
     };
+    const auto half = write("fp16.json", R"({"model":"model.ninfer","kv-dtype":"fp16"})");
+    failures +=
+        check(parse({"ninfer-serve", "--config", half}).kv_cache == ninfer::KvCacheStorage::Float16,
+              "flat serving JSON did not preserve native FP16 selection");
+    failures += check(!parse({"ninfer-serve", "--config", half}).kv_cache_automatic,
+                      "a configured kv-dtype left the storage to the Engine");
+    {
+        const auto mxfp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "mxfp8"});
+        failures += check(mxfp8.kv_cache == ninfer::KvCacheStorage::Mxfp8 && !mxfp8.kv_cache_automatic,
+                          "--kv-dtype mxfp8 did not select MXFP8 KV explicitly");
+        failures += check(parse({"ninfer-serve", "model.ninfer"}).kv_cache_automatic,
+                          "serving without --kv-dtype did not leave the storage to the Engine");
+    }
     const std::string base = write("base.ini", "model = from-file.ninfer\n"
                                                "host = 0.0.0.0\n"
                                                "port = 9000\n"
                                                "api-key = do-not-log\n"
+                                               "admin-token = stop-secret\n"
                                                "max-context = 32768\n"
                                                "spec = mtp\n"
                                                "draft-tokens = 4\n"
@@ -53,7 +67,9 @@ int launch_configuration_tests() {
         parse({"ninfer-serve", "--config", base, "--port", "9100", "--spec", "none"});
     failures += check(layered.artifact_path == "from-file.ninfer" && layered.host == "0.0.0.0" &&
                           layered.port == 9100 && layered.max_context == 32768 &&
-                          layered.api_key == "do-not-log" && layered.device_profile == "off",
+                          layered.api_key == "do-not-log" &&
+                          layered.admin_token == "stop-secret" &&
+                          layered.device_profile == "off",
                       "a configuration file's options and artifact did not reach the server");
     failures += check(layered.speculative.backend == ninfer::SpeculativeBackend::None &&
                           layered.speculative.draft_tokens == 0 &&
@@ -62,11 +78,11 @@ int launch_configuration_tests() {
     bool secret_logged = false;
     bool redacted      = false;
     for (const std::string& argument : layered.effective_arguments) {
-        secret_logged = secret_logged || argument == "do-not-log";
+        secret_logged = secret_logged || argument == "do-not-log" || argument == "stop-secret";
         redacted      = redacted || argument == "<redacted>";
     }
     failures += check(!secret_logged && redacted,
-                      "the merged arguments must carry the API key redacted");
+                      "the merged arguments must carry the API key and admin token redacted");
     failures += check(layered.model_layers.size() == 2 &&
                           layered.model_layers[0].source == base &&
                           layered.model_layers[1].source == "command line",
@@ -198,6 +214,14 @@ int main() {
         failures += check(rejected, "server accepted an invalid --draft-confidence");
     }
     {
+        // Inkling 2's DSpark drafter takes the floor of its drafts' probabilities.
+        const auto spark = parse({"ninfer-serve", "model.ninfer", "--spec", "dspark",
+                                  "--draft-tokens", "2", "--draft-min-p", "0.3"}).speculative;
+        failures += check(spark.backend == ninfer::SpeculativeBackend::DSpark &&
+                              spark.draft_tokens == 2 && spark.draft_min_p == 0.3F,
+                          "server did not preserve --spec dspark --draft-min-p");
+    }
+    {
         // A DSpine drafter: the artifact --draft-model names beside --spec dspine, nowhere else.
         const auto spine = parse({"ninfer-serve", "model.ninfer", "--spec", "dspine",
                                   "--draft-model", "drafter.ninfer", "--draft-tokens", "7",
@@ -273,6 +297,17 @@ int main() {
                              "--expert-dma-share", "auto", "--expert-dma-share", "0.5",
                              "--expert-dma-share", "auto"}).hybrid_experts.dma_share.has_value() == false,
                       "server did not preserve an automatic hybrid DMA share");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--expert-residency", "host",
+                             "--expert-host-mib", "24576"}).hybrid_experts.host_bytes ==
+                          (24576ULL << 20) &&
+                          !parse({"ninfer-serve", "model.ninfer"}).hybrid_experts.host_bytes,
+                      "server did not preserve --expert-host-mib");
+    {
+        bool rejected = false;
+        try { (void)parse({"ninfer-serve", "model.ninfer", "--expert-host-mib", "1.5"}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "server accepted a fractional --expert-host-mib");
+    }
     const auto archive = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                 "5", "--ngram-draft-tokens", "63", "--ngram-archive-mib", "512",
                                 "--ngram-session-mib", "128", "--ngram-native-sessions"});
@@ -476,6 +511,9 @@ int main() {
 
     failures += check(!defaults.default_reasoning_effort,
                       "a reasoning effort is unexpectedly configured by default");
+    const ServeOptions fp16 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp16"});
+    failures += check(make_engine_options(fp16).kv_cache == ninfer::KvCacheStorage::Float16,
+                      "--kv-dtype fp16 did not reach the Engine as native FP16 KV");
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");
@@ -1051,6 +1089,13 @@ int main() {
                           !hybrid_minimal.context_cache.hybrid.tap_ladder_tokens &&
                           !hybrid_minimal.context_cache.hybrid.tap_min_gap_tokens,
                       "hybrid mode alone must size KV automatically and leave tuning derived");
+    // The option that named the hybrid cache reaches the server, which refuses it for a family
+    // without that cache; the default names none.
+    failures += check(parse({"ninfer-serve", "model.ninfer"}).hybrid_cache_flag.empty() &&
+                          hybrid.hybrid_cache_flag == "--use-alt-prefix-caching" &&
+                          parse({"ninfer-serve", "model.ninfer", "--cache-tap-ladder", "8192"})
+                                  .hybrid_cache_flag == "--cache-tap-ladder",
+                      "the option naming the hybrid prefix cache was not recorded");
     const ServeOptions hybrid_explicit_kv =
         parse({"ninfer-serve", "model.ninfer", "--use-alt-prefix-caching", "--max-context", "8192",
                "--kv-capacity", "16384", "--host-cache-mib", "0"});
@@ -1153,16 +1198,36 @@ int main() {
                                                {"--device-snapshot-slots", "2"},
                                                {"--cache-taps-per-request", "2"},
                                                {"--cache-tap-ladder", "2048"},
-                                               {"--cache-tap-min-gap", "64"}}) {
+                                               {"--cache-tap-min-gap", "64"},
+                                               {"--prefix-cache-file", "file.cache",
+                                                "--cache-tap-ladder", "2048"},
+                                               {"--cache-tap-ladder", "2048",
+                                                "--prefix-cache-file", "file.cache"}}) {
         std::vector<std::string> arguments{"ninfer-serve", "model.ninfer"};
         arguments.insert(arguments.end(), hybrid_flag.begin(), hybrid_flag.end());
         failures += check(parse(arguments).context_cache.mode == ninfer::ContextCacheMode::Hybrid,
                           "a hybrid prefix-cache flag did not keep the default hybrid cache");
+        // The cache file alone also serves the families with an Engine core of their own, whose
+        // caches the catalog's options configure: it parses beside them, the flags recorded for
+        // the server's refusal in the other families.
+        const bool file_alone = hybrid_flag.size() == 2 && hybrid_flag[0] == "--prefix-cache-file";
         for (const std::vector<std::string>& catalog_selector :
              std::vector<std::vector<std::string>>{{"--use-original-prefix-caching"},
-                                                   {"--host-kv-mib", "64"}}) {
+                                                   {"--host-kv-mib", "64"},
+                                                   {"--disk-kv-path", "kv"}}) {
             std::vector<std::string> mixed = arguments;
             mixed.insert(mixed.end(), catalog_selector.begin(), catalog_selector.end());
+            if (file_alone) {
+                const ServeOptions options = parse(std::move(mixed));
+                failures += check(
+                    options.context_cache.mode == ninfer::ContextCacheMode::Legacy &&
+                        options.hybrid_cache_flag == "--prefix-cache-file" &&
+                        options.catalog_cache_flag == catalog_selector[0] &&
+                        options.context_cache.hybrid.persistent_file ==
+                            (std::filesystem::current_path() / "file.cache").lexically_normal(),
+                    "--prefix-cache-file beside a catalog option was not kept for the server");
+                continue;
+            }
             bool rejected = false;
             try {
                 (void)parse(std::move(mixed));
@@ -1432,6 +1497,7 @@ int main() {
     // Every option the parser accepts is described in the grouped help.
     const std::string serve_help = serve_usage_text("ninfer-serve");
     for (const std::string_view flag : {"--adaptive-mtp",
+                                        "--admin-token",
                                         "--api-key",
                                         "--assistant-prefill",
                                         "--auto-long-anchors",
@@ -1520,6 +1586,7 @@ int main() {
                                         "--no-prefill-a8",
                                         "--no-prefill-cublas-projections",
                                         "--no-prefix-reuse",
+                                        "--no-structured-output-instruction",
                                         "--no-thinking",
                                         "--no-webui",
                                         "--pending-timeout-ms",
@@ -1640,9 +1707,17 @@ int main() {
                       "--kv-capacity auto did not select automatic sizing");
 
     const ServeOptions logged = parse({"ninfer-serve", "model.ninfer", "--request-log-jsonl",
-                                       "requests.jsonl", "--api-key", "do-not-log"});
+                                       "requests.jsonl", "--api-key", "do-not-log",
+                                       "--admin-token", "stop-secret"});
     failures += check(logged.request_log_jsonl == "requests.jsonl",
                       "--request-log-jsonl did not preserve its path");
+    failures += check(logged.admin_token == "stop-secret",
+                      "--admin-token did not reach the serving options");
+    bool admin_token_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--admin-token", ""});
+    } catch (const std::invalid_argument&) { admin_token_rejected = true; }
+    failures += check(admin_token_rejected, "--admin-token was accepted empty");
     failures += check(logged.request_log_max_mib == 0 && logged.request_log_keep == 4,
                       "request log rotation was not off by default");
     const ServeOptions rotated =
@@ -1662,11 +1737,11 @@ int main() {
     bool secret_present    = false;
     bool redaction_present = false;
     for (const std::string& argument : logged.startup_argv) {
-        secret_present    = secret_present || argument == "do-not-log";
+        secret_present    = secret_present || argument == "do-not-log" || argument == "stop-secret";
         redaction_present = redaction_present || argument == "<redacted>";
     }
-    failures += check(!secret_present, "startup argv retained the API key");
-    failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
+    failures += check(!secret_present, "startup argv retained the API key or admin token");
+    failures += check(redaction_present, "startup argv omitted the redaction marker");
 
     failures += check(!defaults.fast_prefill_kernel, "the fast prefill kernel must default off");
     failures += check(defaults.speculative.mtp_policy == ninfer::MtpDraftPolicy::Fixed &&
@@ -1678,6 +1753,10 @@ int main() {
                              "drafter.ninfer", "--draft-tokens", "15", "--adaptive-mtp"})
                               .speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
                       "--adaptive-mtp was refused with a masked drafter");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--spec", "dspark", "--draft-tokens",
+                             "7", "--adaptive-mtp"})
+                              .speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
+                      "--adaptive-mtp was refused with the DSpark drafter");
     bool adaptive_without_drafter_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--adaptive-mtp"});
@@ -2011,6 +2090,12 @@ int main() {
         } catch (const std::invalid_argument&) { unconstrained_with_structured_rejected = true; }
         failures += check(unconstrained_with_structured_rejected,
                           "--unconstrained-response-format was accepted with --structured-output");
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--structured-output"})
+                                  .structured_output_instruction &&
+                              !parse({"ninfer-serve", "model.ninfer", "--structured-output",
+                                      "--no-structured-output-instruction"})
+                                   .structured_output_instruction,
+                          "--no-structured-output-instruction was not an on-by-default switch");
         const ServeOptions headroom = parse({"ninfer-serve", "model.ninfer", "--kv-capacity",
                                              "auto", "--vram-headroom-mib", "512"});
         failures += check(headroom.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&

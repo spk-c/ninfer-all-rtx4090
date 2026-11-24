@@ -7,6 +7,7 @@
 #include "models/qwen3_5/frontend/deepseek_output.h"
 #include "models/qwen3_5/frontend/flint_output.h"
 #include "models/qwen3_5/frontend/gemma_output.h"
+#include "models/qwen3_5/frontend/inkling_output.h"
 #include "models/qwen3_5/frontend/media_cache.h"
 #include "models/qwen3_5/frontend/processor.h"
 #include "models/qwen3_5/frontend/steering.h"
@@ -16,6 +17,7 @@
 #include "models/qwen3_5/frontend/ngram_sources.h"
 #include "models/qwen3_5/program/prefix/block_keys.h"
 #include "text/unicode.h"
+#include "text/bad_words.h"
 #include "text/structured_output.h"
 #include <mutex>
 
@@ -51,7 +53,8 @@ constexpr std::string_view kThinkingControl =
     "\n\n Considering the limited time by the user, I have to give the solution based on the "
     "thinking directly now.\n</think>\n\n";
 static_assert(kThinkingControl.ends_with(fi::kCanonicalReasoningCloseSerialization));
-// DeepSeek-V4.1's early-close guidance, which its </think> token follows.
+// The early-close guidance of DeepSeek-V4.1, Flint and Gemma 4, which each one's close marker
+// follows (</think>, </think> and <channel|>).
 constexpr std::string_view kDeepSeekThinkingGuidance =
     "\n\nConsidering the limited time by the user, I have to give the solution based on the "
     "thinking directly now.";
@@ -273,6 +276,39 @@ fi::DeepSeekMediaOptions deepseek_media_options(const FrontendResources& resourc
     return out;
 }
 
+// Inkling 2's processor_config.json (the converter's description of the release's image
+// processing): patches of 20 merged 2 x 2, the cell budget of an image, padding -1, values
+// (x / 255 - 0.5) / 0.5.
+fi::InklingMediaOptions inkling_media_options(const FrontendResources& resources) {
+    constexpr std::string_view kResource = "processor_config.json";
+    const Json config = parse_resource_json(resources.processor_config_json, kResource);
+    const Json& image = require_object(config, "image_processor", kResource);
+    fi::InklingMediaOptions out;
+    const auto values = [&](const char* field, double expected) {
+        const Json& v = image.contains(field) ? image.at(field) : Json();
+        return v.is_array() && v.size() == 3 &&
+               std::all_of(v.begin(), v.end(), [&](const Json& x) {
+                   return x.is_number() && x.get<double>() == expected;
+               });
+    };
+    if (require_integer(image, "patch_size", kResource) != out.patch ||
+        require_integer(image, "merge_size", kResource) != out.merge ||
+        !image.contains("pad_value") || !image.at("pad_value").is_number() ||
+        image.at("pad_value").get<double>() != -1.0 || !values("image_mean", 0.5) ||
+        !values("image_std", 0.5) ||
+        image.value("image_token", std::string()) != fi::kInklingMediaPads.image) {
+        throw std::invalid_argument(
+            "processor_config.json does not match the compiled Inkling 2 image processing");
+    }
+    const std::uint64_t tokens =
+        positive_u64(require_integer(image, "max_image_tokens", kResource), "max_image_tokens");
+    if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("processor_config.json max_image_tokens is out of range");
+    }
+    out.max_tokens = static_cast<std::uint32_t>(tokens);
+    return out;
+}
+
 void validate_tokenizer_config(const FrontendResources& resources) {
     const Json tokenizer_config =
         parse_resource_json(resources.tokenizer_config_json, "tokenizer_config.json");
@@ -404,6 +440,7 @@ fi::ChatRenderOptions render_options(const PromptOptions& options, fi::ToolCallS
                                    .add_vision_id             = options.add_vision_id,
                                    .tool_jsons                = options.tool_jsons,
                                    .forced_tool_name          = options.forced_tool_name,
+                                   .open_answer               = options.open_answer,
                                    .tool_call_syntax          = syntax};
     rendered.cache_markers.assign(cache_markers.begin(), cache_markers.end());
     return rendered;
@@ -890,6 +927,29 @@ PreparedTapHints prepare_tap_hints(const ContextCacheHints& hints,
     return out;
 }
 
+// The control span that closes reasoning a model opened: the guidance (or
+// --thinking-budget-message, without its own spelling of the close) and the close marker's token.
+std::shared_ptr<const std::vector<TokenId>>
+model_close_control(const FrontendOptions& options, const fi::Tokenizer& tokenizer,
+                    const StopPolicy& defaults, std::string_view close_spelling, TokenId close) {
+    std::string guidance(kDeepSeekThinkingGuidance);
+    if (!options.thinking_budget_message.empty()) {
+        guidance = options.thinking_budget_message;
+        if (const auto at = guidance.find(close_spelling); at != std::string::npos) {
+            guidance.erase(at);
+        }
+    }
+    std::vector<TokenId> encoded = tokenizer.encode(guidance);
+    encoded.push_back(close);
+    for (const TokenId token : encoded) {
+        if (std::find(defaults.token_ids.begin(), defaults.token_ids.end(), token) !=
+            defaults.token_ids.end()) {
+            throw std::invalid_argument("thinking budget message contains a default terminal token");
+        }
+    }
+    return std::make_shared<const std::vector<TokenId>>(std::move(encoded));
+}
+
 } // namespace
 
 ModelSamplingDefaults default_sampling(Architecture architecture) {
@@ -899,6 +959,19 @@ ModelSamplingDefaults default_sampling(Architecture architecture) {
         sampling.thinking      = {.temperature       = 1.0F,
                                   .top_k             = 20,
                                   .top_p             = 0.95F,
+                                  .min_p             = 0.0F,
+                                  .presence_penalty  = 0.0F,
+                                  .frequency_penalty = 0.0F};
+        sampling.non_thinking  = sampling.thinking;
+        sampling.post_thinking = sampling.thinking;
+        return sampling;
+    }
+    if (architecture == Architecture::Inkling2) {
+        // Inkling 2's generation_config.json (temperature 1.0, no truncation), thinking or not,
+        // with top_k held at the 20 candidates the sampler keeps.
+        sampling.thinking      = {.temperature       = 1.0F,
+                                  .top_k             = 20,
+                                  .top_p             = 1.0F,
                                   .min_p             = 0.0F,
                                   .presence_penalty  = 0.0F,
                                   .frequency_penalty = 0.0F};
@@ -956,11 +1029,13 @@ public:
               compile_chat_template(resources, options.chat_template_path,
                                     options.architecture != Architecture::Gemma4 &&
                                         options.architecture != Architecture::Flint &&
-                                        options.architecture != Architecture::DeepSeekV41)),
+                                        options.architecture != Architecture::DeepSeekV41 &&
+                                        options.architecture != Architecture::Inkling2)),
           tokenizer(resources.tokenizer),
           processor(!options.vision_enabled                             ? fi::ProcessorOptions{}
                     : options.architecture == Architecture::Gemma4      ? fi::ProcessorOptions{}
                     : options.architecture == Architecture::DeepSeekV41 ? fi::ProcessorOptions{}
+                    : options.architecture == Architecture::Inkling2    ? fi::ProcessorOptions{}
                                                                         : processor_options(resources)),
           vision_enabled(options.vision_enabled), max_context(options.max_context),
           automatic_long_anchors(options.automatic_long_anchors),
@@ -974,7 +1049,13 @@ public:
         const bool gemma_media = options.architecture == Architecture::Gemma4 && vision_enabled;
         const bool deepseek_media =
             options.architecture == Architecture::DeepSeekV41 && vision_enabled;
-        if (deepseek_media) {
+        const bool inkling_media = options.architecture == Architecture::Inkling2 && vision_enabled;
+        if (inkling_media) {
+            fi::InklingMediaOptions& k = processor.inkling.emplace(inkling_media_options(resources));
+            if (options.vision_max_merged_tokens != 0) {
+                k.max_tokens = std::min(k.max_tokens, options.vision_max_merged_tokens);
+            }
+        } else if (deepseek_media) {
             fi::DeepSeekMediaOptions& d = processor.deepseek.emplace(deepseek_media_options(resources));
             if (options.vision_max_merged_tokens != 0) {
                 d.max_tokens = std::min(d.max_tokens, options.vision_max_merged_tokens);
@@ -997,13 +1078,16 @@ public:
         const std::uint64_t vision_tokens =
             std::min<std::uint64_t>(options.max_context, kMaximumPromptVisionTokens);
         // Raw patches per soft token and values per patch: Gemma 4 pools 3 x 3 patches of
-        // 3 x 16 x 16, DeepSeek-V4.1 merges 3 x 3 of 3 x 14 x 14, Qwen 2 x 2 of 2 x 3 x 16 x 16.
+        // 3 x 16 x 16, DeepSeek-V4.1 merges 3 x 3 of 3 x 14 x 14, Inkling 2 2 x 2 of 3 x 20 x 20,
+        // Qwen 2 x 2 of 2 x 3 x 16 x 16.
         const std::uint64_t patches_per_token =
-            deepseek_media ? std::uint64_t(processor.deepseek->merge) * processor.deepseek->merge
+            inkling_media    ? std::uint64_t(processor.inkling->merge) * processor.inkling->merge
+            : deepseek_media ? std::uint64_t(processor.deepseek->merge) * processor.deepseek->merge
             : gemma_media  ? std::uint64_t(processor.gemma->pooling) * processor.gemma->pooling
                            : kRawPatchesPerVisionToken;
         const std::uint64_t patch_features =
-            deepseek_media ? std::uint64_t(3) * processor.deepseek->patch * processor.deepseek->patch
+            inkling_media    ? std::uint64_t(3) * processor.inkling->patch * processor.inkling->patch
+            : deepseek_media ? std::uint64_t(3) * processor.deepseek->patch * processor.deepseek->patch
             : gemma_media  ? std::uint64_t(3) * processor.gemma->patch * processor.gemma->patch
                            : kPreparedVisionPatchFeatures;
         processor.max_vision_tokens = vision_tokens;
@@ -1043,17 +1127,57 @@ public:
             defaults.token_ids.push_back(token);
         }
         if (options.architecture == Architecture::Gemma4) {
-            // Gemma's reasoning channel has no early-close control: thinking budgets do not apply.
+            // Gemma opens its thought channel itself when thinking is on. A reached thinking
+            // budget (or --reasoning-loop conclude) closes it with the guidance (or
+            // --thinking-budget-message) and <channel|>, and the model answers.
             gemma = std::make_shared<const fi::GemmaMarkers>(fi::GemmaMarkers::from(*tokenizer));
+            if (gemma->channel_open >= 0 && gemma->channel_close >= 0) {
+                thinking_control_tokens = model_close_control(options, *tokenizer, defaults,
+                                                              "<channel|>", gemma->channel_close);
+            }
             return;
         }
         if (options.architecture == Architecture::Flint) {
-            // Flint opens its reasoning when it decides to, with no early-close control: thinking
-            // budgets do not apply either.
+            // Flint opens its reasoning when it decides to. A reached thinking budget (or
+            // --reasoning-loop conclude) closes it with the guidance (or --thinking-budget-message)
+            // and </think>, and the model answers.
             flint = std::make_shared<const fi::FlintMarkers>(fi::FlintMarkers::from(*tokenizer));
             if (flint->think_open < 0 || flint->think_close < 0) {
                 throw std::invalid_argument("Flint's tokenizer lacks its <think> markers");
             }
+            thinking_control_tokens = model_close_control(options, *tokenizer, defaults,
+                                                          kThinkClose, flint->think_close);
+            return;
+        }
+        if (options.architecture == Architecture::Inkling2) {
+            // Inkling opens its own <|content_thinking|> block and closes it with <|end_message|>.
+            // Early-close control (for --reasoning-loop conclude and --default-thinking-budget)
+            // injects concise conclusion guidance followed by <|end_message|> so Inkling exits
+            // reasoning cleanly and immediately emits either a text answer or a tool call.
+            inkling = std::make_shared<const fi::InklingMarkers>(fi::InklingMarkers::from(*tokenizer));
+            if (!inkling->complete()) {
+                throw std::invalid_argument("Inkling's tokenizer lacks its block markers");
+            }
+            std::string guidance =
+                "\n\nConsidering the limited time by the user, I have to act or give the solution "
+                "based on the thinking directly now.\n";
+            if (!options.thinking_budget_message.empty()) {
+                guidance = options.thinking_budget_message;
+                if (const auto close = guidance.find(fi::kInklingEnd); close != std::string::npos) {
+                    guidance.erase(close);
+                }
+            }
+            std::vector<TokenId> encoded = tokenizer->encode(guidance);
+            encoded.push_back(inkling->end);
+            for (const TokenId token : encoded) {
+                if (std::find(defaults.token_ids.begin(), defaults.token_ids.end(), token) !=
+                    defaults.token_ids.end()) {
+                    throw std::invalid_argument("thinking budget message contains a default "
+                                                "terminal token");
+                }
+            }
+            thinking_control_tokens =
+                std::make_shared<const std::vector<TokenId>>(std::move(encoded));
             return;
         }
         if (options.architecture == Architecture::DeepSeekV41) {
@@ -1065,25 +1189,8 @@ public:
             if (deepseek->think_close < 0) {
                 throw std::invalid_argument("DeepSeek-V4.1's tokenizer lacks its </think> marker");
             }
-            std::string guidance(kDeepSeekThinkingGuidance);
-            if (!options.thinking_budget_message.empty()) {
-                guidance = options.thinking_budget_message;
-                // The close is the token appended below, not the message's own spelling of it.
-                if (const auto close = guidance.find(kThinkClose); close != std::string::npos) {
-                    guidance.erase(close);
-                }
-            }
-            std::vector<TokenId> encoded = tokenizer->encode(guidance);
-            encoded.push_back(deepseek->think_close);
-            for (const TokenId token : encoded) {
-                if (std::find(defaults.token_ids.begin(), defaults.token_ids.end(), token) !=
-                    defaults.token_ids.end()) {
-                    throw std::invalid_argument("thinking budget message contains a default "
-                                                "terminal token");
-                }
-            }
-            thinking_control_tokens =
-                std::make_shared<const std::vector<TokenId>>(std::move(encoded));
+            thinking_control_tokens = model_close_control(options, *tokenizer, defaults,
+                                                          kThinkClose, deepseek->think_close);
             return;
         }
         std::string control_suffix(kThinkingControl);
@@ -1136,6 +1243,7 @@ public:
         return gemma      ? fi::ToolCallSyntax::Gemma
                : flint    ? fi::ToolCallSyntax::Flint
                : deepseek ? fi::ToolCallSyntax::DeepSeek
+               : inkling  ? fi::ToolCallSyntax::Inkling
                           : fi::ToolCallSyntax::Qwen;
     }
 
@@ -1150,6 +1258,8 @@ public:
 
     mutable std::mutex grammar_mutex;
     mutable std::unique_ptr<text::StructuredCompiler> grammar_compiler;
+    // The tokens as text for banned words (bad_words), made with the first request that bans any.
+    mutable std::unique_ptr<text::BadWordsVocabulary> bad_words_vocabulary;
     fi::CompiledChatTemplate chat_template;
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     fi::ProcessorOptions processor;
@@ -1160,6 +1270,7 @@ public:
     std::shared_ptr<const fi::GemmaMarkers> gemma; // the Gemma 4 dialect, null for Qwen
     std::shared_ptr<const fi::FlintMarkers> flint; // the Flint dialect, null for Qwen
     std::shared_ptr<const fi::DeepSeekMarkers> deepseek; // the DeepSeek dialect, null for Qwen
+    std::shared_ptr<const fi::InklingMarkers> inkling;   // the Inkling dialect, null for Qwen
     bool ngram_sources_enabled = false;
     bool ngram_archive_enabled = false;
     std::vector<TokenId> ngram_think_open, ngram_think_close;
@@ -1736,6 +1847,77 @@ PreparedPrompt Frontend::append_read_tokens(PreparedPrompt prompt,
     return prompt;
 }
 
+PreparedPrompt Frontend::continue_prompt(const PreparedPrompt& prompt,
+                                         std::span<const TokenId> generated,
+                                         const NgramArchive::Request* archive) const {
+    if (impl_ == nullptr) { throw std::logic_error("frontend is empty"); }
+    if (prompt.data_ == nullptr) { throw std::invalid_argument("prepared prompt is empty"); }
+    const PreparedPromptData& source = *prompt.data_;
+    const std::size_t previous       = source.token_ids.size();
+    if (previous > impl_->max_context || generated.size() > impl_->max_context - previous) {
+        throw_context_length_exceeded(impl_->max_context);
+    }
+    for (const TokenId token : generated) {
+        if (!impl_->tokenizer->is_valid_token(token)) {
+            throw std::out_of_range("generated token is outside the checkpoint vocabulary");
+        }
+    }
+    auto prepared                 = std::make_unique<PreparedPromptData>();
+    PreparedPromptData& data      = *prepared;
+    const std::size_t count       = previous + generated.size();
+    data.ngram_sources            = source.ngram_sources;
+    data.ngram_boundaries         = source.ngram_boundaries;
+    data.ngram_snapshot           = archive != nullptr ? archive->snapshot() : nullptr;
+    data.token_ids.reserve(count);
+    data.token_ids.assign(source.token_ids.begin(), source.token_ids.end());
+    data.token_ids.insert(data.token_ids.end(), generated.begin(), generated.end());
+    data.token_types = source.token_types;
+    data.token_types.resize(count, 0);
+    // Generated text continues at the media-adjusted cursor on every mRoPE axis.
+    data.positions.resize(count * 3);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        std::copy_n(source.positions.begin() + static_cast<std::ptrdiff_t>(axis * previous),
+                    previous, data.positions.begin() + static_cast<std::ptrdiff_t>(axis * count));
+        for (std::size_t index = previous; index < count; ++index) {
+            const auto position = static_cast<std::int64_t>(index) + source.rope_delta;
+            if (position < 0 || position > std::numeric_limits<std::int32_t>::max()) {
+                throw std::invalid_argument("generated position exceeds int32 range");
+            }
+            data.positions[axis * count + index] = static_cast<std::int32_t>(position);
+        }
+    }
+    data.rope_delta          = source.rope_delta;
+    data.media_payloads      = source.media_payloads;
+    data.vision_items        = source.vision_items;
+    data.identity            = source.identity;
+    data.context_cache       = source.context_cache;
+    data.tap_hints           = source.tap_hints;
+    data.tool_call_output    = source.tool_call_output;
+    data.starts_in_reasoning = source.starts_in_reasoning;
+    data.graft_name          = source.graft_name;
+    data.graft_frontier      = source.graft_frontier;
+    data.lora_scales         = source.lora_scales;
+    data.lora_key            = source.lora_key;
+    // A later rewind at or after this one resumes from the end of this prompt.
+    if (!generated.empty() && data.identity.reusable) {
+        const auto frontier = static_cast<std::uint32_t>(count - 1U);
+        data.context_cache.opportunities.push_back(
+            PreparedCacheOpportunity{.kind     = PromptCacheMarkerKind::PrivateLongAnchor,
+                                     .evidence = SharedCandidateEvidence::EngineStructural,
+                                     .frontier = frontier});
+        data.tap_hints.hints.push_back(runtime::prefix_cache::TapHint{
+            .position = frontier, .kind = runtime::prefix_cache::TapHintKind::GenerationOpener});
+    }
+    // A copy without generated tokens shares the source's index build.
+    if (source.ngram_index && generated.empty()) {
+        data.ngram_index = source.ngram_index;
+    } else if (source.ngram_index) {
+        build_ngram_index(data);
+    }
+    detail::prompt_block_keys(data, data.block_hashes, data.block_extras);
+    return PreparedPrompt(std::move(prepared));
+}
+
 std::vector<TokenId> Frontend::tokenize_text(std::string_view text, bool parse_special) const {
     if (impl_ == nullptr) { throw std::logic_error("frontend is empty"); }
     return impl_->tokenizer->encode(text, {.parse_added_tokens = parse_special});
@@ -1769,7 +1951,8 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                             const StopPolicy& caller_stop,
                                             const OutputOptions& output,
                                             const ThinkingControlOptions& thinking,
-                                            const StructuredOutputOptions& structured) const {
+                                            const StructuredOutputOptions& structured,
+                                            std::span<const std::string> bad_words) const {
     if (prompt.data_ == nullptr) { throw std::invalid_argument("prepared prompt is empty"); }
     StopPolicy policy = merge_stop_policy(*impl_->tokenizer, caller_stop);
     std::shared_ptr<text::GrammarState> grammar;
@@ -1777,14 +1960,15 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
     const auto& tools       = prompt.data_->tool_call_output;
     const bool strict_tools = tools && fi::has_strict_tools(*tools);
     if (strict_tools && (impl_->gemma || impl_->flint)) {
-        throw std::invalid_argument("strict tool arguments need Qwen's or DeepSeek's tool-call "
-                                    "syntax, which " +
+        throw std::invalid_argument("strict tool arguments need Qwen's, DeepSeek's or Inkling's "
+                                    "tool-call syntax, which " +
                                     std::string(impl_->gemma ? "Gemma 4" : "Flint") +
                                     " does not use");
     }
     if (structured.kind != StructuredOutputKind::None && tools && impl_->flint) {
-        throw std::invalid_argument("structured output beside tool calls needs Qwen's or "
-                                    "DeepSeek's tool-call syntax, which Flint does not use");
+        throw std::invalid_argument("structured output beside tool calls needs Qwen's, "
+                                    "DeepSeek's or Inkling's tool-call syntax, which Flint does "
+                                    "not use");
     }
     if (structured.kind != StructuredOutputKind::None || strict_tools) {
         if (structured.kind != StructuredOutputKind::None &&
@@ -1796,7 +1980,21 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
         }
         text::StructuredOutputEnvelope envelope;
         if (prompt.data_->starts_in_reasoning) { envelope.reasoning_close = "</think>"; }
-        if (structured.kind != StructuredOutputKind::None && tools) {
+        if (impl_->inkling) {
+            // Inkling writes its blocks' headers and any thinking blocks before a text block's
+            // opener, then the response; beside tools, call blocks before it or a turn of calls
+            // instead of it.
+            envelope.reasoning_close = std::string(fi::kInklingText);
+            if (tools) {
+                envelope.reasoning_format            = fi::inkling_blocks_before_text_format(*tools);
+                envelope.response_alternative_format = fi::inkling_calls_turn_format(*tools);
+            } else {
+                envelope.reasoning_format =
+                    Json{{"type", "any_text"},
+                         {"excludes", Json::array({fi::kInklingText, fi::kInklingCallOpen})}}
+                        .dump();
+            }
+        } else if (structured.kind != StructuredOutputKind::None && tools) {
             envelope.alternative_format = impl_->deepseek
                                               ? fi::deepseek_structured_tool_call_format(*tools)
                                               : fi::structured_tool_call_format(*tools);
@@ -1804,9 +2002,17 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
         std::lock_guard lock(impl_->grammar_mutex);
         if (!impl_->grammar_compiler) {
             std::vector<std::string> vocab(impl_->tokenizer->vocab_size());
+            const auto markup = [&](std::size_t id) {
+                const auto token = static_cast<std::int32_t>(id);
+                return impl_->inkling && (token == impl_->inkling->header ||
+                                          token == impl_->inkling->thinking ||
+                                          token == impl_->inkling->text ||
+                                          token == impl_->inkling->call ||
+                                          token == impl_->inkling->end);
+            };
             for (std::size_t id = 0; id < vocab.size(); ++id) {
                 if (impl_->tokenizer->is_valid_token(id) &&
-                    (!impl_->tokenizer->is_special_token(id) ||
+                    (!impl_->tokenizer->is_special_token(id) || markup(id) ||
                      impl_->tokenizer->decode_token_bytes(id, false) == "</think>")) {
                     vocab[id] = impl_->tokenizer->decode_token_bytes(id, false);
                 }
@@ -1814,18 +2020,46 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
             impl_->grammar_compiler = std::make_unique<text::StructuredCompiler>(
                 std::move(vocab), impl_->tokenizer->default_stop_token_ids());
         }
+        // Inkling's call blocks come anywhere in the turn, so its calls' format holds the whole
+        // turn, with no reasoning close.
         grammar = structured.kind != StructuredOutputKind::None
                       ? impl_->grammar_compiler->compile(structured, envelope)
-                      : impl_->grammar_compiler->compile_format(
-                            impl_->deepseek ? fi::deepseek_tool_call_text_format(*tools)
-                                            : fi::tool_call_text_format(*tools),
-                            envelope);
+                  : impl_->inkling ? impl_->grammar_compiler->compile_format(
+                                         fi::inkling_tool_call_text_format(*tools))
+                                   : impl_->grammar_compiler->compile_format(
+                                         impl_->deepseek ? fi::deepseek_tool_call_text_format(*tools)
+                                                         : fi::tool_call_text_format(*tools),
+                                         envelope);
+    }
+    std::shared_ptr<const text::BadWordsFilter> filter;
+    if (!bad_words.empty()) {
+        const std::vector<std::string> words = text::normalize_bad_words(bad_words);
+        const text::BadWordsVocabulary* vocabulary = nullptr;
+        {
+            std::lock_guard lock(impl_->grammar_mutex);
+            if (!impl_->bad_words_vocabulary) {
+                // A special token has no text: it separates the text around it.
+                std::vector<std::string> text(impl_->tokenizer->vocab_size());
+                for (std::size_t id = 0; id < text.size(); ++id) {
+                    if (impl_->tokenizer->is_valid_token(static_cast<int>(id)) &&
+                        !impl_->tokenizer->is_special_token(static_cast<int>(id))) {
+                        text[id] = impl_->tokenizer->decode_token_bytes(static_cast<int>(id), false);
+                    }
+                }
+                impl_->bad_words_vocabulary =
+                    std::make_unique<text::BadWordsVocabulary>(std::move(text));
+            }
+            vocabulary = impl_->bad_words_vocabulary.get();
+        }
+        filter  = vocabulary->filter(words);
+        grammar = text::GrammarState::with_bad_words(std::move(grammar), filter);
     }
     if (output.raw) { policy.publish_stop_token = true; }
     return OutputSession(impl_->tokenizer, std::move(policy), output,
                          prompt.data_->starts_in_reasoning, thinking,
                          impl_->thinking_control_tokens, prompt.data_->tool_call_output,
-                         std::move(grammar), impl_->gemma, impl_->flint, impl_->deepseek);
+                         std::move(grammar), impl_->gemma, impl_->flint, impl_->deepseek,
+                         impl_->inkling, std::move(filter));
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }

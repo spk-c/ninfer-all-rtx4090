@@ -26,12 +26,16 @@
 #include "runtime/contract/lookup_draft.h"
 #include "runtime/contract/mtp_adaptive.h"
 #include "runtime/contract/rope_scaling.h"
+#include "runtime/engine/bad_words_rewind.h"
+#include "runtime/engine/context_image_store.h"
+#include "runtime/engine/session_slots.h"
 #include "runtime/engine/diagnostics.h"
 #include "runtime/engine/worker_fault.h"
 #include "runtime/engine/worker_recovery.h"
 #include "runtime/engine/effective_thinking_budget.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/host_memory.h"
+#include "runtime/engine/pinned_block.h"
 #include "runtime/engine/model_instance.h"
 #include "text/structured_output.h"
 
@@ -98,13 +102,30 @@ bool request_error(const std::exception_ptr& error) {
 // [begin, begin + count) and a key of what they encode, the item's digest, modality, grid and
 // timestamps and the unit's index. Media tokens are placeholders, so a prefix is the same only
 // with the same units; the context cache stores them beside the tokens (16 bytes each on disk).
-struct MediaMark {
-    std::uint32_t begin = 0, count = 0;
-    std::uint64_t key   = 0;
+using MediaMark = ContextMediaMark;
 
-    friend bool operator==(const MediaMark&, const MediaMark&) = default;
+// An image's n-gram context and whether the drafter followed its state cross a record beside its
+// position.
+struct FlashNextImageHeader {
+    static void write(const models::qwen4_exp::SequenceImage& header,
+                      std::vector<std::byte>& extra) {
+        const std::uint32_t follows = header.drafter_follows ? 1U : 0U;
+        const auto& previous        = header.context.previous;
+        extra.resize(4 + 4 * previous.size());
+        std::memcpy(extra.data(), &follows, 4);
+        std::memcpy(extra.data() + 4, previous.data(), 4 * previous.size());
+    }
+
+    static bool read(std::span<const std::byte> extra, models::qwen4_exp::SequenceImage& header) {
+        if (extra.size() < 4 || extra.size() % 4 != 0) { return false; }
+        std::uint32_t follows = 0;
+        std::memcpy(&follows, extra.data(), 4);
+        header.drafter_follows = follows != 0;
+        header.context.previous.resize((extra.size() - 4) / 4);
+        std::memcpy(header.context.previous.data(), extra.data() + 4, extra.size() - 4);
+        return true;
+    }
 };
-static_assert(sizeof(MediaMark) == 16);
 
 std::uint64_t unit_key(const models::qwen3_5::VisionItem& item, std::size_t unit) {
     std::uint64_t key = 1469598103934665603ULL; // FNV-1a
@@ -281,6 +302,7 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     load.ranks        = device.size();
     load.stage_layers = options.stage_layers;
     load.experts      = options.expert_residency;
+    load.expert_host_bytes = options.hybrid_experts.host_bytes;
     load.vision       = options.enable_vision;
     load.mtp          = mtp;
     load.dflash2      = dflash2;
@@ -391,7 +413,8 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
         // branched read at its shared prefix, is sized now, beside its other state.
         instance->snapshots.resize(executor.sequences);
         for (auto& snapshot : instance->snapshots) { instance->executor->size_snapshot(snapshot); }
-        if (options.context_cache.enabled) {
+        // A stop string's hold (context cache) or a banned word's (structured output) keeps one.
+        if (options.context_cache.enabled || options.structured_output) {
             instance->holds.resize(executor.sequences);
             for (auto& hold : instance->holds) { instance->executor->size_snapshot(hold); }
         }
@@ -416,14 +439,23 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
                           ? "hot rows in RAM (" + resident + "), the rest read from " + file + io
                           : "read from " + file + io + ", row cache capacity " + resident;
     }
+    // Host experts the pinned block could not all hold run as disk experts, each copied from its
+    // pinned bytes where the block holds it.
+    std::string expert_place = options.expert_residency == ExpertResidency::Host ? "host memory"
+                             : options.expert_residency == ExpertResidency::Disk
+                                 ? "the artifact's files"
+                                 : "device memory";
+    if (const auto& stored = model->storage_stats(); stored.files_bytes > 0) {
+        expert_place = "pinned host memory (" + std::to_string(stored.pinned_bytes >> 20) +
+                       " MiB) and the artifact's files (" +
+                       std::to_string(stored.files_bytes >> 20) + " MiB)" +
+                       pinned_block_end_note(stored) + ", read as disk experts";
+    }
     publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
                        "Qwen3.8-Flash-Next: %zu stage(s), prompt chunks of %u tokens, experts in "
                        "%s, n-gram table %s, state %.0f MiB, workspace %.0f MiB, expert "
                        "cache %.0f MiB, CUDA Graphs %.0f MiB",
-                       model->stages().stages(), executor.prefill_chunk,
-                       options.expert_residency == ExpertResidency::Host   ? "host memory"
-                       : options.expert_residency == ExpertResidency::Disk ? "the artifact's files"
-                                                                           : "device memory",
+                       model->stages().stages(), executor.prefill_chunk, expert_place.c_str(),
                        table_place.c_str(),
                        double(instance->executor->memory().state_bytes) / 1048576.0,
                        double(instance->executor->memory().workspace_bytes) / 1048576.0,
@@ -463,11 +495,6 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
                            "(%.0f MiB), %.0f MiB of its blocks on the device",
                            double(memory.host_kv_bytes) / 1048576.0,
                            double(memory.kv_bytes) / 1048576.0);
-    }
-    if (options.use_cuda_graph && !instance->executor->cuda_graphs()) {
-        publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
-                           "Qwen3.8-Flash-Next: CUDA Graphs off: under WDDM the staged misses of "
-                           "GGUF host experts run in eager passes");
     }
     if (const std::string cpu = instance->executor->expert_cpu_description(); !cpu.empty()) {
         const std::string share =
@@ -600,6 +627,8 @@ struct Qwen4ExpCore::Request {
     // cache on, the state at each goes to the store for them, where a prompt step ends or, with
     // layer-major spans, as a step passes (prompt_step).
     std::vector<std::uint32_t> shared_at;
+    // The checkpoint of the prompt's last messages among them (MessageCheckpoint), 0 for none.
+    std::uint32_t checkpoint_at = 0;
 
     // The worker's progress with an admitted request.
     std::uint32_t slot      = 0;
@@ -622,6 +651,17 @@ struct Qwen4ExpCore::Request {
     bool hold_wanted = false;
     bool stop_rewind = false;
     std::optional<std::uint32_t> commit_tokens;
+    // Banned words (bad_words) with rewinds: the tokens its sequence had read before the generated
+    // token where a banned word's hold begins, and the purpose of the draw that took that token,
+    // whose logits the slot's hold_logits keep. The hold takes the slot's hold snapshot before a
+    // stop string's (words_wanted: the next step keeps it first, as hold_wanted does).
+    // words_rewind: a rewind to that generated token which a speculative round completes once it
+    // commits; redrawing: the deferred draw is the rewind's.
+    std::optional<std::size_t> words_fed;
+    std::int32_t words_purpose = 0;
+    bool words_wanted          = false;
+    std::optional<std::uint32_t> words_rewind;
+    bool redrawing = false;
     std::int32_t awaiting_purpose = 0;
     // Its last accepted token, which the progress watchdog measures a decoding request from.
     Clock::time_point progress;
@@ -633,6 +673,9 @@ struct Qwen4ExpCore::Request {
     std::vector<TokenId> generated;
     std::optional<GenerationBudget> budget;
     Clock::time_point admitted, prefill_start, prefill_end, first_token, last_token;
+    // The prompt tokens and the prompt time the stats hold so far (count_prefill).
+    std::uint32_t prefill_counted = 0;
+    Clock::time_point prefill_counted_at;
     SpeculativeStats speculative; // MTP rounds, an Engine with drafts only
     runtime::MtpAdaptiveSignal mtp_signal; // how far its drafts survive, with --adaptive-mtp
 };
@@ -650,6 +693,9 @@ struct Qwen4ExpCore::Impl {
         std::size_t lookup_lag = 0;
         std::vector<MediaMark> media, anchor_media;
         models::qwen4_exp::SequenceSnapshot snapshot;
+        // What `anchor` is: the prompt's turn closure, or its end where a next turn keeps it
+        // (the rewrite checkpoint's response replay).
+        PrefixReusePath anchor_path = PrefixReusePath::PrivateTurnClosure;
         // The sequence's state after its first hold_tokens tokens, where a stop string's match
         // began in the request it serves (0: none): the visible text of a turn the stop string
         // ends continues that state, not the live one, which has read the tokens the cut removed.
@@ -718,6 +764,8 @@ struct Qwen4ExpCore::Impl {
     // A row's logits kept while its grammar mask is late (one per sequence), and those of the rows
     // sampled together afterwards, side by side.
     DeviceBuffer saved_logits, deferred_logits;
+    // The logits that drew the token where a banned word's hold begins, one row per sequence.
+    DeviceBuffer hold_logits;
     std::size_t vocab_rows = 0; // logits per row
     // The logprob gather of a sampling call whose rows ask for it: [kLogprobTopK, rows] ids and
     // values, [rows] log-sum-exps and the gather's enabling flag, with the host copy.
@@ -735,45 +783,31 @@ struct Qwen4ExpCore::Impl {
         spec_accepted, spec_anchors, spec_columns, counts_backup;
     std::unique_ptr<PinnedHostBuffer> host_spec;
 
-    // The context cache past the sequences: images of the prefixes they give up (the state a
-    // turn closed at, and where a sequence ended), in host memory up to a budget; the least
-    // recently used go to files under the disk path when it is set (where a restart finds them)
-    // or are dropped. A prompt resumes from the longest stored prefix when no free sequence
-    // serves more of it.
-    struct Stored {
-        std::vector<TokenId> tokens;
-        std::vector<MediaMark> media;
-        models::qwen4_exp::SequenceImage header;
-        PrefixReusePath path = PrefixReusePath::PrivateEndpoint;
-        std::vector<std::byte*> pages; // slices of host_chunks; empty while only on disk
-        std::filesystem::path file;    // empty unless on disk
-        std::uint64_t bytes     = 0;
-        std::uint64_t last_used = 0;
-    };
-
+    // The context cache past the sequences (context_image_store.h): images of the prefixes they
+    // give up (the state a turn closed at, and where a sequence ended), of shared prefixes and of
+    // the checkpoint of a prompt's last messages, in host pages within a budget; the least
+    // recently used go to the disk tier when there is one. A prompt resumes from the longest
+    // stored prefix when no free sequence serves more of it.
+    //
+    // The pages stay pinned once the store has needed them: pinning is slow where the experts and
+    // the page cache fill the host's memory (1.1 s for the image of a 32K-token prompt on an RTX
+    // 4090 host, while the next prompt waited; pageable memory faulted in as slowly, and huge
+    // pages took minutes), so later images reuse the pages of those the store let go. Startup
+    // pins a reserve; while the worker has nothing to run, the store pins more a chunk at a time,
+    // up to its budget (pin_ahead), so later requests seldom pin their own. Pinning starts once
+    // the worker has been idle for the grace period, so a client that sends its next request at
+    // once does not wait.
+    using Store = ContextImageStore<models::qwen4_exp::SequenceImage, FlashNextImageHeader>;
+    Store store;
+    // Session slots (session_slots.h).
+    SessionSlots session;
     // Shorter prefixes prefill faster than their recurrent state (about 114 MB) copies back.
     static constexpr std::size_t kMinStoredTokens = 128;
-    std::vector<Stored> stored;
-    // The images live in pinned pages that stay pinned once the store has needed them: pinning is
-    // slow where the experts and the page cache fill the host's memory (1.1 s for the image of a
-    // 32K-token prompt on an RTX 4090 host, while the next prompt waited; pageable memory faulted
-    // in as slowly, and huge pages took minutes), so later images reuse the pages of those the
-    // store let go. host_used counts the pages images hold, within host_budget. Startup pins
-    // host_reserve of free pages; while the worker has nothing to run, it pins them back up to
-    // host_reserve a chunk at a time (pin_ahead), so the next request seldom pins its own.
-    static constexpr std::size_t kHostPageBytes = std::size_t(8) << 20;
-    std::vector<std::unique_ptr<HostPages>> host_chunks;
-    std::vector<std::byte*> free_pages;
-    std::uint64_t host_budget = 0, host_used = 0, host_reserve = 0;
-    // A chunk pinned while idle: a request that arrives meanwhile waits for it to finish. Pinning
-    // starts once the worker has been idle for the grace period, so a client that sends its next
-    // request at once does not wait. A failed pin ends idle pinning; take_pages still pins.
-    static constexpr std::size_t kPinAheadPages = 8;
-    static constexpr auto kPinAheadGrace        = std::chrono::milliseconds(50);
-    bool pin_ahead_failed                       = false;
-    std::filesystem::path disk_dir;
-    std::uint64_t disk_budget = 0, disk_used = 0;
-    bool disk_restore = false;
+    static constexpr auto kPinAheadGrace          = std::chrono::milliseconds(50);
+    // --prefix-cache-file: the store written at a clean stop and read at startup.
+    std::filesystem::path cache_file;
+    std::string cache_identity;
+    PrefixCacheSaveControl cache_save;
 
     std::thread worker;
 
@@ -816,6 +850,7 @@ struct Qwen4ExpCore::Impl {
             vocab_rows      = static_cast<std::size_t>(i.executor->logits(1).ne[0]);
             saved_logits    = DeviceBuffer(rows * vocab_rows * sizeof(__nv_bfloat16));
             deferred_logits = DeviceBuffer(rows * vocab_rows * sizeof(__nv_bfloat16));
+            hold_logits     = DeviceBuffer(rows * vocab_rows * sizeof(__nv_bfloat16));
         }
         sample_config   = DeviceBuffer(rows * sizeof(ops::SamplingConfig));
         sample_position = DeviceBuffer(rows * sizeof(std::int32_t));
@@ -875,25 +910,28 @@ struct Qwen4ExpCore::Impl {
                 cache, options.enable_vision ? std::uint64_t(options.media_cache_bytes) +
                                                    options.media_live_bytes
                                              : 0U);
-            host_budget = sized.host_cache_budget_bytes.value_or(cache.host_kv_capacity_bytes);
+            const std::uint64_t budget =
+                sized.host_cache_budget_bytes.value_or(cache.host_kv_capacity_bytes);
             // The pages of two images of a whole context (where a prompt's turn closed and where
             // its sequence ended, what a new request stores first), within a quarter of the
             // budget, pinned now rather than while the request that displaces them waits. Without
             // the memory, the store pins its pages as it needs them.
-            host_reserve = std::min<std::uint64_t>(
-                host_budget / 4 / kHostPageBytes * kHostPageBytes,
-                2 * page_rounded(i.executor->image_bytes(max_context)));
+            const std::uint64_t reserve = std::min<std::uint64_t>(
+                budget / 4, 2 * Store::page_rounded(i.executor->image_bytes(max_context)));
+            const std::string profile = profile_name(options);
+            auto* executor            = i.executor.get();
+            store.configure(
+                context_image_store_options(cache, budget, reserve, profile), profile,
+                [executor](std::uint32_t position) { return executor->image_bytes(position); },
+                {});
             try {
-                pin_pages(static_cast<std::size_t>(host_reserve / kHostPageBytes));
-            } catch (const std::exception&) { pin_ahead_failed = true; }
-            if (!cache.disk_kv_path.empty()) {
-                disk_dir     = cache.disk_kv_path / profile_name(options);
-                disk_budget  = cache.disk_kv_capacity_bytes != 0 ? cache.disk_kv_capacity_bytes
-                                                                 : (64ULL << 30);
-                disk_restore = cache.disk_kv_restore;
-                std::filesystem::create_directories(disk_dir);
-                if (disk_restore) { scan_disk(); }
-            }
+                store.pin_reserve();
+            } catch (const std::exception&) { store.stop_pinning_ahead(); }
+            cache_file     = cache.hybrid.persistent_file;
+            cache_identity = cache.hybrid.persistent_identity;
+            cache_save     = cache.hybrid.persistent_save;
+            restore_prefix_cache(store, cache_file, cache_identity, diagnostics);
+            stats.host_kv_occupied_bytes = store.host_used();
         }
         worker = std::thread([this] {
             const DeviceWaitWatch watched(device, "Qwen3.8-Flash-Next worker");
@@ -924,14 +962,30 @@ struct Qwen4ExpCore::Impl {
     // Starts the mask of a structured-output request's next token, from its grammar's state now.
     void schedule_mask(Request& r) {
         const auto grammar = r.output.grammar_state();
+        if (grammar) { allow_rewinds(r); }
         r.mask = grammar ? runtime::GrammarMaskJob::start(*grammar, mask_words()) : nullptr;
+    }
+
+    // Banned words: whether the request may take its output back to where a banned word began
+    // (OutputSession::allow_bad_words_rewind): its sequence still stands there, or the slot's hold
+    // snapshot keeps that state; a hold that begins takes the snapshot.
+    void allow_rewinds(Request& r) {
+        bool can = holds_ready && !r.branches;
+        if (can && r.decoding && r.words_fed) {
+            const Slot& slot = slots[r.slot];
+            can = r.words_wanted || slot.fed.size() == *r.words_fed ||
+                  slot.hold_tokens == *r.words_fed;
+        }
+        r.output.allow_bad_words_rewind(can);
     }
 
     // After a structured request's accepted tokens: one that decodes plainly starts its next mask
     // now, a step ahead; one that speculates fills its round's columns during the verification.
+    // A request whose token waits for a rewind's draw needs that token's mask.
     void next_mask(const std::shared_ptr<Request>& request) {
         Request& r = *request;
-        if (r.constrained && active(request) && !(drafts > 0 && r.mask_cost.speculates())) {
+        if (r.constrained && active(request) &&
+            (r.awaiting_sample || !(drafts > 0 && r.mask_cost.speculates()))) {
             schedule_mask(r);
         } else {
             r.mask.reset();
@@ -1054,14 +1108,18 @@ struct Qwen4ExpCore::Impl {
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex);
-                const auto ready = [&] { return stopping || !pending.empty() || any_active(); };
-                if (!ready() && pins_ahead() && !queue_cv.wait_for(lock, kPinAheadGrace, ready)) {
+                const auto ready = [&] {
+                    return stopping || !pending.empty() || any_active() || session.tasks.pending();
+                };
+                if (!ready() && store.pins_ahead() &&
+                    !queue_cv.wait_for(lock, kPinAheadGrace, ready)) {
                     lock.unlock();
-                    pin_ahead();
+                    store.pin_ahead();
                     continue;
                 }
                 queue_cv.wait(lock, ready);
                 if (stopping) {
+                    session.tasks.close(lock);
                     auto waiting = std::move(pending);
                     pending.clear();
                     lock.unlock();
@@ -1071,13 +1129,17 @@ struct Qwen4ExpCore::Impl {
                     for (auto& slot : slots) {
                         if (slot.request) { complete(std::exchange(slot.request, {}), unavailable); }
                     }
+                    persist();
                     publish_stats();
                     return;
                 }
+                session.tasks.run_queued(lock);
             }
             bool worked = true;
             try {
-                admit();
+                // An admitted prompt shows as running while its first step computes, which
+                // can take as long as the whole prompt.
+                if (admit()) { publish_stats(); }
                 worked = step();
                 check_progress();
             } catch (const ops::CpuExpertCancelled&) {
@@ -1121,6 +1183,7 @@ struct Qwen4ExpCore::Impl {
 
     // Every request gauge, from the worker, which owns the slots and the executor.
     void publish_stats() {
+        publish_slot_states(*this);
         const NgramTableStats ngram = instance.executor->ngram_stats();
         const auto cache            = instance.executor->expert_cache_stats();
         const ExpertResidencyStats experts{.routes            = cache.routes,
@@ -1156,23 +1219,27 @@ struct Qwen4ExpCore::Impl {
 
     // Drops every stored image of a prefix of the request's prompt.
     void drop_stored_prefixes(const Request& r) {
-        for (std::size_t i = stored.size(); i-- > 0;) {
-            const std::vector<TokenId>& tokens = stored[i].tokens;
-            if (tokens.size() > r.prompt_tokens.size() ||
-                !std::equal(tokens.begin(), tokens.end(), r.prompt_tokens.begin())) {
-                continue;
-            }
-            give_back(stored[i]);
-            if (!stored[i].file.empty()) {
-                std::error_code ignored;
-                const auto bytes = std::filesystem::file_size(stored[i].file, ignored);
-                disk_used -= std::min<std::uint64_t>(disk_used, ignored ? 0 : bytes);
-                std::filesystem::remove(stored[i].file, ignored);
-            }
-            stored.erase(stored.begin() + static_cast<std::ptrdiff_t>(i));
-        }
+        store.drop_if([&](const Store::Image& image) {
+            return image.tokens.size() <= r.prompt_tokens.size() &&
+                   std::equal(image.tokens.begin(), image.tokens.end(), r.prompt_tokens.begin());
+        });
         std::lock_guard lock(stats_mutex);
-        stats.host_kv_occupied_bytes = host_used;
+        stats.host_kv_occupied_bytes = store.host_used();
+    }
+
+    // A clean stop: what the sequences hold goes to the store, the store to the prefix cache file,
+    // and what only host pages hold to the disk tier. A failed Engine writes nothing.
+    void persist() noexcept {
+        if (failed || !store.enabled() || (cache_file.empty() && !store.has_disk_tier())) {
+            return;
+        }
+        try {
+            for (std::uint32_t s = 0; s < slots.size(); ++s) { retire(s); }
+            if (!cache_file.empty()) {
+                save_prefix_cache(store, cache_file, cache_identity, cache_save, diagnostics);
+            }
+            spill_to_disk_tier(store, diagnostics);
+        } catch (...) {}
     }
 
     // Ends one request whose logits came out non-finite, or whose sampled or licensed token lies
@@ -1227,6 +1294,13 @@ struct Qwen4ExpCore::Impl {
         return static_cast<std::uint32_t>(held.size());
     }
 
+    // The reuse path of an anchor at the request's anchor_at: its turn closure before the prompt's
+    // end, else the end, which the template keeps for a next turn.
+    static PrefixReusePath anchor_path(const Request& r) {
+        return r.anchor_at < r.prompt_tokens.size() ? PrefixReusePath::PrivateTurnClosure
+                                                   : PrefixReusePath::PrivateResponseReplay;
+    }
+
     [[nodiscard]] std::uint32_t reuse(const Slot& slot, const Request& prompt) const {
         if (!reuse_prefixes) { return 0; }
         return std::max(prefix_reuse(slot.fed, slot.media, prompt),
@@ -1246,7 +1320,7 @@ struct Qwen4ExpCore::Impl {
             std::snprintf(hex, sizeof(hex), "%02x", std::to_integer<unsigned>(b));
             id += hex;
         }
-        return "qwen4_exp-image1-" + id + "-kv" +
+        return "qwen4_exp-image2-" + id + "-kv" +
                std::to_string(static_cast<int>(options.kv_cache)) +
                (options.speculative.backend == SpeculativeBackend::DFlash2 ? "-dflash2" : "") +
                (instance.model->dspine() != nullptr
@@ -1263,235 +1337,14 @@ struct Qwen4ExpCore::Impl {
                "-experts-" + instance.executor->expert_execution_profile();
     }
 
-    struct FileHeader {
-        char magic[8]                = {'N', 'F', 'N', 'X', 'I', 'M', 'G', '1'};
-        std::uint32_t position       = 0;
-        std::uint32_t drafter_follows = 0;
-        std::uint32_t context_tokens = 0;
-        std::uint32_t prompt_tokens  = 0;
-        std::uint32_t path           = 0;
-        std::uint32_t media_units    = 0; // the marks after the prompt tokens
-        std::uint64_t bytes          = 0;
-    };
-
-    static std::string file_name(const std::vector<TokenId>& tokens,
-                                 const std::vector<MediaMark>& media) {
-        std::uint64_t hash = 1469598103934665603ULL; // FNV-1a over the token ids and media units
-        const auto mix     = [&](std::uint64_t value, int bytes) {
-            for (int i = 0; i < bytes; ++i) {
-                hash ^= (value >> (8 * i)) & 0xffU;
-                hash *= 1099511628211ULL;
-            }
-        };
-        for (const TokenId token : tokens) { mix(std::uint32_t(token), 4); }
-        for (const MediaMark& mark : media) {
-            mix(mark.begin, 4);
-            mix(mark.count, 4);
-            mix(mark.key, 8);
-        }
-        char name[40];
-        std::snprintf(name, sizeof(name), "%016llx-%u.img", static_cast<unsigned long long>(hash),
-                      static_cast<unsigned>(tokens.size()));
-        return name;
-    }
-
-    // Reads the headers of the images a previous run left in the disk tier.
-    void scan_disk() {
-        std::uint64_t order = 0;
-        for (const auto& entry : std::filesystem::directory_iterator(disk_dir)) {
-            if (entry.path().extension() != ".img") { continue; }
-            std::ifstream file(entry.path(), std::ios::binary);
-            FileHeader header;
-            if (!file.read(reinterpret_cast<char*>(&header), sizeof(header)) ||
-                std::memcmp(header.magic, FileHeader{}.magic, 8) != 0 ||
-                header.bytes != instance.executor->image_bytes(header.position)) {
-                continue;
-            }
-            Stored image;
-            image.header.position    = header.position;
-            image.header.drafter_follows = header.drafter_follows != 0;
-            image.header.context.previous.resize(header.context_tokens);
-            image.tokens.resize(header.prompt_tokens);
-            image.media.resize(header.media_units);
-            if (!file.read(reinterpret_cast<char*>(image.header.context.previous.data()),
-                           std::streamsize(header.context_tokens) * 4) ||
-                !file.read(reinterpret_cast<char*>(image.tokens.data()),
-                           std::streamsize(header.prompt_tokens) * 4) ||
-                !file.read(reinterpret_cast<char*>(image.media.data()),
-                           std::streamsize(header.media_units) * sizeof(MediaMark))) {
-                continue;
-            }
-            image.path      = static_cast<PrefixReusePath>(header.path);
-            image.file      = entry.path();
-            image.bytes     = header.bytes;
-            image.last_used = ++order;
-            disk_used += entry.file_size();
-            stored.push_back(std::move(image));
-        }
-    }
-
     // The stored prefix that serves the most of `prompt`: its index and length. A drafting
     // request takes only a state its MTP block followed.
     [[nodiscard]] std::pair<std::size_t, std::uint32_t>
     find_stored(const Request& prompt, bool drafting, bool whole) const {
-        std::pair<std::size_t, std::uint32_t> best{0, 0};
-        for (std::size_t i = 0; i < stored.size(); ++i) {
-            if (stored[i].pages.empty() && !disk_restore) { continue; }
-            if (drafting && !stored[i].header.drafter_follows) { continue; }
-            const std::uint32_t length =
-                prefix_reuse(stored[i].tokens, stored[i].media, prompt, whole);
-            if (length > best.second) { best = {i, length}; }
-        }
-        return best;
-    }
-
-    void drop_dead() {
-        std::erase_if(stored, [](const Stored& image) {
-            return image.pages.empty() && image.file.empty();
+        return store.best([&](const Store::Image& image) -> std::uint32_t {
+            if (drafting && !image.header.drafter_follows) { return 0; }
+            return prefix_reuse(image.tokens, image.media, prompt, whole);
         });
-    }
-
-    // Writes an image held in host memory to the disk tier, making room by deleting the least
-    // recently used files; entries left with neither copy are dropped by the caller.
-    void write_file(Stored& image) {
-        if (disk_dir.empty() || !image.file.empty() || image.pages.empty()) { return; }
-        const std::uint64_t size = sizeof(FileHeader) +
-                                   4 * (image.header.context.previous.size() + image.tokens.size()) +
-                                   sizeof(MediaMark) * image.media.size() + image.bytes;
-        if (size > disk_budget) { return; }
-        while (disk_used + size > disk_budget) {
-            Stored* oldest = nullptr;
-            for (Stored& other : stored) {
-                if (!other.file.empty() &&
-                    (oldest == nullptr || other.last_used < oldest->last_used)) {
-                    oldest = &other;
-                }
-            }
-            if (oldest == nullptr) { return; }
-            std::error_code ignored;
-            const auto bytes = std::filesystem::file_size(oldest->file, ignored);
-            disk_used -= std::min<std::uint64_t>(disk_used, ignored ? 0 : bytes);
-            std::filesystem::remove(oldest->file, ignored);
-            oldest->file.clear();
-        }
-        FileHeader header;
-        header.position       = image.header.position;
-        header.drafter_follows = image.header.drafter_follows ? 1 : 0;
-        header.context_tokens = static_cast<std::uint32_t>(image.header.context.previous.size());
-        header.prompt_tokens  = static_cast<std::uint32_t>(image.tokens.size());
-        header.path           = static_cast<std::uint32_t>(image.path);
-        header.media_units    = static_cast<std::uint32_t>(image.media.size());
-        header.bytes          = image.bytes;
-        const auto path       = disk_dir / file_name(image.tokens, image.media);
-        const auto temporary  = std::filesystem::path(path).concat(".tmp");
-        {
-            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-            file.write(reinterpret_cast<const char*>(&header), sizeof(header));
-            file.write(reinterpret_cast<const char*>(image.header.context.previous.data()),
-                       std::streamsize(header.context_tokens) * 4);
-            file.write(reinterpret_cast<const char*>(image.tokens.data()),
-                       std::streamsize(header.prompt_tokens) * 4);
-            file.write(reinterpret_cast<const char*>(image.media.data()),
-                       std::streamsize(header.media_units) * sizeof(MediaMark));
-            for (std::uint64_t at = 0; at < image.bytes; at += kHostPageBytes) {
-                file.write(reinterpret_cast<const char*>(image.pages[at / kHostPageBytes]),
-                           std::streamsize(std::min<std::uint64_t>(kHostPageBytes,
-                                                                   image.bytes - at)));
-            }
-            if (!file) {
-                std::error_code ignored;
-                std::filesystem::remove(temporary, ignored);
-                return;
-            }
-        }
-        std::error_code failed;
-        std::filesystem::rename(temporary, path, failed);
-        if (failed) { return; }
-        image.file = path;
-        disk_used += size;
-    }
-
-    [[nodiscard]] static std::uint64_t page_rounded(std::uint64_t bytes) {
-        return (bytes + kHostPageBytes - 1) / kHostPageBytes * kHostPageBytes;
-    }
-
-    // Pins `count` more free pages in one allocation.
-    void pin_pages(std::size_t count) {
-        if (count == 0) { return; }
-        auto chunk = std::make_unique<HostPages>(count * kHostPageBytes);
-        chunk->pin();
-        auto* base = static_cast<std::byte*>(chunk->data());
-        for (std::size_t i = count; i-- > 0;) { free_pages.push_back(base + i * kHostPageBytes); }
-        host_chunks.push_back(std::move(chunk));
-    }
-
-    // Whether the idle worker pins another chunk: the free pages hold less than host_reserve and
-    // one more chunk stays within the budget.
-    [[nodiscard]] bool pins_ahead() const noexcept {
-        const std::uint64_t free_bytes = std::uint64_t(free_pages.size()) * kHostPageBytes;
-        return !pin_ahead_failed && free_bytes < host_reserve &&
-               host_used + free_bytes + kPinAheadPages * kHostPageBytes <= host_budget;
-    }
-
-    void pin_ahead() {
-        try {
-            pin_pages(kPinAheadPages);
-        } catch (const std::exception&) { pin_ahead_failed = true; }
-    }
-
-    // Pages for an image of `bytes`, pinning more when the free ones fall short; the caller has
-    // made room for them (make_host_room), so the pinned pages stay within the budget. Empty when
-    // more pages cannot be pinned: registering them also takes device memory on every card for
-    // their page tables (2 MiB per GiB), which the expert cache may already hold.
-    std::vector<std::byte*> take_pages(std::uint64_t bytes) {
-        const auto count = static_cast<std::size_t>(page_rounded(bytes) / kHostPageBytes);
-        if (free_pages.size() < count) {
-            try {
-                pin_pages(count - free_pages.size());
-            } catch (const std::exception&) {
-                return {};
-            }
-        }
-        std::vector<std::byte*> pages(free_pages.end() - std::ptrdiff_t(count), free_pages.end());
-        free_pages.resize(free_pages.size() - count);
-        host_used += count * kHostPageBytes;
-        return pages;
-    }
-
-    void give_back(Stored& image) {
-        host_used -= image.pages.size() * kHostPageBytes;
-        free_pages.insert(free_pages.end(), image.pages.begin(), image.pages.end());
-        image.pages.clear();
-    }
-
-    // Brings the images in host pages within the budget with `bytes` more (whole pages): the
-    // least recently used go to the disk tier, or are dropped without one. False when the budget
-    // cannot hold `bytes` at all. Entries may be dropped, so indices into `stored` change.
-    bool make_host_room(std::uint64_t bytes) {
-        if (bytes > host_budget) { return false; }
-        while (host_used + bytes > host_budget) {
-            std::optional<std::size_t> oldest;
-            for (std::size_t i = 0; i < stored.size(); ++i) {
-                if (!stored[i].pages.empty() &&
-                    (!oldest || stored[i].last_used < stored[*oldest].last_used)) {
-                    oldest = i;
-                }
-            }
-            if (!oldest) { return false; }
-            write_file(stored[*oldest]);
-            give_back(stored[*oldest]);
-            drop_dead();
-        }
-        drop_dead();
-        return true;
-    }
-
-    [[nodiscard]] std::optional<std::size_t>
-    stored_index(const std::vector<TokenId>& tokens, const std::vector<MediaMark>& media) const {
-        for (std::size_t i = 0; i < stored.size(); ++i) {
-            if (stored[i].tokens == tokens && stored[i].media == media) { return i; }
-        }
-        return std::nullopt;
     }
 
     // Keeps the state of sequence `s` up to `tokens`, with the media units `media` among them
@@ -1500,35 +1353,20 @@ struct Qwen4ExpCore::Impl {
     void store_image(std::uint32_t s, const std::vector<TokenId>& tokens,
                      const std::vector<MediaMark>& media,
                      const models::qwen4_exp::SequenceSnapshot* at, PrefixReusePath path) {
-        if (tokens.size() < kMinStoredTokens || host_budget == 0) { return; }
-        if (const auto known = stored_index(tokens, media)) {
-            stored[*known].last_used = ++use_clock;
-            return;
-        }
+        if (tokens.size() < kMinStoredTokens || !store.enabled()) { return; }
         auto& executor      = *instance.executor;
         const auto position = at != nullptr ? at->position : executor.position(s);
         if (position != tokens.size()) { return; } // the state holds other tokens
-        const std::uint64_t bytes = executor.image_bytes(position);
-        if (!make_host_room(page_rounded(bytes))) { return; }
-        Stored image;
-        image.tokens = tokens;
-        image.media  = media;
-        image.path   = path;
-        image.bytes  = bytes;
-        image.pages  = take_pages(bytes);
-        if (image.pages.empty()) { return; }
-        try {
-            image.header = executor.save_image(s, at, image.pages, kHostPageBytes);
-        } catch (...) {
-            give_back(image);
-            throw;
-        }
-        image.last_used = ++use_clock;
-        stored.push_back(std::move(image));
+        const auto bytes = store.put(
+            tokens, media, path, position,
+            [&](std::span<std::byte* const> pages, std::size_t page_bytes) {
+                return executor.save_image(s, at, pages, page_bytes);
+            });
+        if (!bytes) { return; }
         std::lock_guard lock(stats_mutex);
         stats.state_d2h_count += 1;
-        stats.state_d2h_bytes += bytes;
-        stats.host_kv_occupied_bytes = host_used;
+        stats.state_d2h_bytes += *bytes;
+        stats.host_kv_occupied_bytes = store.host_used();
     }
 
     // Keeps what sequence `s` holds before its state goes: the prefix its last prompt's turn
@@ -1539,7 +1377,7 @@ struct Qwen4ExpCore::Impl {
                               std::equal(slot.anchor.begin(), slot.anchor.end(), slot.fed.begin());
         if (anchored) {
             store_image(s, slot.anchor, slot.anchor_media, &slot.snapshot,
-                        PrefixReusePath::PrivateTurnClosure);
+                        slot.anchor_path);
         }
         if (slot.fed != slot.anchor && !slot.disposable) {
             store_image(s, slot.fed, slot.media, nullptr, PrefixReusePath::PrivateEndpoint);
@@ -1550,51 +1388,49 @@ struct Qwen4ExpCore::Impl {
     // tier when it is only there; false when the store no longer holds it.
     bool restore_stored(std::uint32_t s, const std::vector<TokenId>& tokens,
                         const std::vector<MediaMark>& media) {
-        auto index = stored_index(tokens, media);
-        if (!index) { return false; }
-        if (stored[*index].pages.empty()) {
-            if (!make_host_room(page_rounded(stored[*index].bytes)) ||
-                !(index = stored_index(tokens, media))) {
-                return false;
-            }
-            Stored& image = stored[*index];
-            image.pages   = take_pages(image.bytes);
-            if (image.pages.empty()) { return false; }
-            std::ifstream in(image.file, std::ios::binary);
-            in.seekg(std::streamoff(sizeof(FileHeader) +
-                                    4 * (image.header.context.previous.size() + tokens.size()) +
-                                    sizeof(MediaMark) * media.size()));
-            for (std::uint64_t at = 0; in && at < image.bytes; at += kHostPageBytes) {
-                in.read(reinterpret_cast<char*>(image.pages[at / kHostPageBytes]),
-                        std::streamsize(std::min<std::uint64_t>(kHostPageBytes, image.bytes - at)));
-            }
-            if (!in) {
-                give_back(image);
-                return false;
-            }
-        }
-        Stored& image = stored[*index];
-        instance.executor->load_image(s, image.header, image.pages, kHostPageBytes);
-        image.last_used           = ++use_clock;
-        const std::uint64_t bytes = image.bytes;
-        // Within the budget again, the image just read in being the most recently used.
-        (void)make_host_room(0);
+        auto& executor   = *instance.executor;
+        const auto bytes = store.load(
+            tokens, media,
+            [&](const models::qwen4_exp::SequenceImage& header, std::span<std::byte* const> pages,
+                std::size_t page_bytes) { executor.load_image(s, header, pages, page_bytes); });
+        if (!bytes) { return false; }
         std::lock_guard lock(stats_mutex);
         stats.state_h2d_count += 1;
-        stats.state_h2d_bytes += bytes;
-        stats.host_kv_occupied_bytes = host_used;
+        stats.state_h2d_bytes += *bytes;
+        stats.host_kv_occupied_bytes = store.host_used();
         return true;
     }
 
+    // Sequence `s` resumes from the stored image of `tokens` and `media`, as a request would;
+    // false when the store no longer holds it.
+    bool resume_stored(std::uint32_t s, const std::vector<TokenId>& tokens,
+                       const std::vector<MediaMark>& media) {
+        if (!restore_stored(s, tokens, media)) { return false; }
+        Slot& slot = slots[s];
+        forget(slot);
+        slot.fed   = tokens;
+        slot.media = media;
+        slot.disposable = false;
+        return true;
+    }
+
+    // Sequence `s` holds nothing.
+    void clear_session(std::uint32_t s) {
+        instance.executor->reset(s);
+        forget(slots[s]);
+    }
+
     // Moves queued requests into free sequences, oldest first: each into the free sequence whose
-    // cached state serves the most of its prompt, else the least recently used.
-    void admit() {
+    // cached state serves the most of its prompt, else the least recently used. Returns whether
+    // a request left the queue.
+    bool admit() {
+        bool moved = false;
         for (;;) {
             std::optional<std::uint32_t> best;
             std::shared_ptr<Request> request;
             {
                 std::lock_guard lock(queue_mutex);
-                if (pending.empty()) { return; }
+                if (pending.empty()) { return moved; }
                 for (std::uint32_t s = 0; s < slots.size(); ++s) {
                     if (slots[s].request) { continue; }
                     if (!best) {
@@ -1608,9 +1444,10 @@ struct Qwen4ExpCore::Impl {
                         best = s;
                     }
                 }
-                if (!best) { return; }
+                if (!best) { return moved; }
                 request = std::move(pending.front());
                 pending.pop_front();
+                moved = true;
             }
             if (Clock::now() > request->deadline) {
                 complete(request, std::make_exception_ptr(
@@ -1667,9 +1504,9 @@ struct Qwen4ExpCore::Impl {
                     : prefix_reuse(slot.anchor, slot.anchor_media, r, whole);
             const auto [image, from_store] = find_stored(r, drafting, whole);
             if (from_store > std::max(live, anchored)) {
-                const std::vector<TokenId> tokens   = stored[image].tokens;
-                const std::vector<MediaMark> media = stored[image].media;
-                const PrefixReusePath path          = stored[image].path;
+                const std::vector<TokenId> tokens  = store.images()[image].tokens;
+                const std::vector<MediaMark> media = store.images()[image].media;
+                const PrefixReusePath path         = store.images()[image].path;
                 retire(s);
                 if (restore_stored(s, tokens, media)) {
                     forget(slot);
@@ -1679,12 +1516,15 @@ struct Qwen4ExpCore::Impl {
                     r.reuse_path = path;
                 }
             } else if (anchored > live) {
-                retire(s);
+                if (slot.fed != slot.anchor && !slot.disposable &&
+                    slot.anchor_path != PrefixReusePath::PrivateResponseReplay) {
+                    store_image(s, slot.fed, slot.media, nullptr, PrefixReusePath::PrivateEndpoint);
+                }
                 executor.restore(s, slot.snapshot);
                 slot.fed     = slot.anchor;
                 slot.media   = slot.anchor_media;
                 reused       = anchored;
-                r.reuse_path = PrefixReusePath::PrivateTurnClosure;
+                r.reuse_path = slot.anchor_path;
             } else if (live > 0) {
                 reused       = live;
                 r.reuse_path = PrefixReusePath::PrivateEndpoint;
@@ -2113,7 +1953,13 @@ struct Qwen4ExpCore::Impl {
             result.timings.generation_wall_seconds = seconds(r.first_token, r.last_token);
         }
         result.timings.total_seconds = r.prepare_seconds + seconds(r.submitted, now);
-        slots.at(r.slot).request = nullptr;
+        Slot& held   = slots.at(r.slot);
+        held.request = nullptr;
+        // The session the sequence keeps, which /slots lists under this slot.
+        if (!held.fed.empty()) {
+            result.slot           = static_cast<std::int32_t>(r.slot);
+            result.session_digest = session_digest(held.fed);
+        }
         complete(request, std::move(result));
     }
 
@@ -2141,9 +1987,9 @@ struct Qwen4ExpCore::Impl {
         if (reuse_prefixes && r.reusable && r.prefilled == 0) {
             const auto [image, from_store] = find_stored(r, drafts_for(r), r.branches != nullptr);
             if (from_store > 0) {
-                const std::vector<TokenId> tokens   = stored[image].tokens;
-                const std::vector<MediaMark> media = stored[image].media;
-                const PrefixReusePath path          = stored[image].path;
+                const std::vector<TokenId> tokens  = store.images()[image].tokens;
+                const std::vector<MediaMark> media = store.images()[image].media;
+                const PrefixReusePath path         = store.images()[image].path;
                 if (restore_stored(r.slot, tokens, media)) {
                     forget(slot);
                     slot.fed     = tokens;
@@ -2203,6 +2049,7 @@ struct Qwen4ExpCore::Impl {
             }
         }
         r.prefilled += n;
+        count_prefill(r, r.prefilled - r.reused, Clock::now());
         if (cut != 0) {
             const std::vector<TokenId> prefix(slot.fed.begin(), slot.fed.begin() + cut);
             std::vector<MediaMark> media;
@@ -2214,15 +2061,19 @@ struct Qwen4ExpCore::Impl {
             }
             if (whole) {
                 store_image(r.slot, prefix, media, &slot.snapshot,
-                            PrefixReusePath::SharedStablePrefix);
+                            cut == r.checkpoint_at ? PrefixReusePath::PrivateLongAnchor
+                                                   : PrefixReusePath::SharedStablePrefix);
             }
         }
         if (reuse_prefixes && r.reusable &&
             std::binary_search(r.shared_at.begin(), r.shared_at.end(), r.prefilled)) {
-            store_image(r.slot, slot.fed, slot.media, nullptr, PrefixReusePath::SharedStablePrefix);
+            store_image(r.slot, slot.fed, slot.media, nullptr,
+                        r.prefilled == r.checkpoint_at ? PrefixReusePath::PrivateLongAnchor
+                                                       : PrefixReusePath::SharedStablePrefix);
         }
         if (reuse_prefixes && r.reusable && r.prefilled == r.anchor_at) {
             executor.snapshot(r.slot, slot.snapshot);
+            slot.anchor_path = anchor_path(r);
             slot.anchor       = slot.fed;
             slot.anchor_media = slot.media;
         }
@@ -2390,6 +2241,7 @@ struct Qwen4ExpCore::Impl {
             if (slot.fed == r.prompt_tokens) {
                 if (slot.anchor != slot.fed) {
                     executor.snapshot(r.slot, slot.snapshot);
+                    slot.anchor_path = PrefixReusePath::PrivateResponseReplay;
                     slot.anchor       = slot.fed;
                     slot.anchor_media = slot.media;
                 }
@@ -2490,10 +2342,12 @@ struct Qwen4ExpCore::Impl {
         const std::vector<std::uint32_t> lengths = pack_branches(r, 0, tokens);
         executor.forward_prompt_branches(r.slot, n, slot.snapshot, tokens, lengths);
         r.prefilled = prompt_n;
+        count_prefill(r, r.prefilled - r.reused, Clock::now());
         slot.fed.assign(r.prompt_tokens.begin(), r.prompt_tokens.end());
         slot.media        = r.media;
         slot.anchor       = slot.fed;
         slot.anchor_media = slot.media;
+        slot.anchor_path  = PrefixReusePath::PrivateResponseReplay;
         if (reuse_prefixes && r.reusable &&
             std::binary_search(r.shared_at.begin(), r.shared_at.end(), prompt_n)) {
             store_image(r.slot, slot.anchor, slot.anchor_media, &slot.snapshot,
@@ -2564,6 +2418,19 @@ struct Qwen4ExpCore::Impl {
         finish_prompt(request);
     }
 
+    // Adds the prompt tokens the request computed since its last count (`computed` in all) and
+    // the time since to the stats, so the throughput line shows a long prompt while it runs.
+    void count_prefill(Request& r, std::uint32_t computed, Clock::time_point now) {
+        const Clock::time_point from = std::max(r.prefill_start, r.prefill_counted_at);
+        std::lock_guard lock(stats_mutex);
+        if (computed > r.prefill_counted) {
+            stats.computed_prefill_tokens += computed - r.prefill_counted;
+            r.prefill_counted = computed;
+        }
+        if (now > from) { stats.prefill_seconds_total += seconds(from, now); }
+        r.prefill_counted_at = now;
+    }
+
     // The prompt is in (and a branched read's branches): the request takes its first token, from
     // column `column` of logits(rows), and decodes from there.
     void finish_prompt(const std::shared_ptr<Request>& request, std::uint32_t column = 0,
@@ -2573,11 +2440,7 @@ struct Qwen4ExpCore::Impl {
         const auto prompt_n = static_cast<std::uint32_t>(r.prompt_tokens.size());
         CUDA_CHECK(ninfer::wait_for_stream(executor.head_stream()));
         r.prefill_end = Clock::now();
-        {
-            std::lock_guard lock(stats_mutex);
-            stats.computed_prefill_tokens += prompt_n - r.reused;
-            stats.prefill_seconds_total += seconds(r.prefill_start, r.prefill_end);
-        }
+        count_prefill(r, prompt_n - r.reused, r.prefill_end);
         const auto& exec = r.options.execution;
         const std::uint32_t capacity =
             effective_output_capacity(exec.requested_output_tokens, max_context, prompt_n);
@@ -2602,7 +2465,7 @@ struct Qwen4ExpCore::Impl {
         // The first token's mask began with the request; when it is not done yet, the prompt's
         // last logits wait for it instead of the worker.
         if (r.branches) {
-            accept(request, r.branch_token, &r.branch_record);
+            accept(request, r.branch_token, &r.branch_record, Draws{});
             return;
         }
         const Tensor logits = executor.logits(rows);
@@ -2619,21 +2482,102 @@ struct Qwen4ExpCore::Impl {
                             DType::BF16, {logits.ne[0], 1});
         sample(std::span(&row, 1), ops::kSamplePurposePrefill, std::span(&token, 1),
                std::span(&logprob, 1), &source);
-        accept(request, token, row.logprobs ? &logprob : nullptr);
+        accept(request, token, row.logprobs ? &logprob : nullptr,
+               Draws{.logits = &source, .purpose = ops::kSamplePurposePrefill});
         next_mask(request);
     }
+
+    // Where the logits that drew a round's tokens are: token i's in column `column + i` of
+    // `logits`, drawn for `purpose`. A banned word's hold keeps its token's.
+    struct Draws {
+        const Tensor* logits = nullptr;
+        std::size_t column   = 0;
+        std::int32_t purpose = ops::kSamplePurposeDecode;
+    };
 
     // Applies the output policy to a sampled token: publishes what it accepts, then either
     // finishes the request or queues what its next decode step feeds. `logprob` is the token's
     // record when the request asked for logprobs.
     void accept(const std::shared_ptr<Request>& request, TokenId token,
-                const runtime::RawTokenLogprob* logprob) {
+                const runtime::RawTokenLogprob* logprob, const Draws& draws) {
         if (token < 0) { throw_numerical_failure(*request); }
         (void)accept(request, std::span<const TokenId>(&token, 1),
                      logprob != nullptr ? std::span<const runtime::RawTokenLogprob>(logprob, 1)
                                         : std::span<const runtime::RawTokenLogprob>{},
-                     true);
+                     true, draws);
         check_capacity(request);
+    }
+
+    // Banned words: the round's token `index` begins a hold. The request keeps the logits that
+    // drew it and how many tokens its sequence had read before it; the step after the round keeps
+    // the sequence's state there (keep_words_hold), which a speculative round commits to.
+    void begin_words_hold(Request& r, std::uint32_t index, bool committed, const Draws& draws) {
+        if (draws.logits == nullptr) {
+            throw std::logic_error("a banned word's hold began without the logits of its token");
+        }
+        RankBinding bind(device, instance.executor->head_rank());
+        const std::size_t bytes  = vocab_rows * sizeof(__nv_bfloat16);
+        const std::size_t stride = static_cast<std::size_t>(draws.logits->ne[0]) *
+                                   sizeof(__nv_bfloat16);
+        CUDA_CHECK(cudaMemcpyAsync(
+            static_cast<std::uint8_t*>(hold_logits.p) + std::size_t(r.slot) * bytes,
+            static_cast<const std::uint8_t*>(draws.logits->data) + (draws.column + index) * stride,
+            bytes, cudaMemcpyDeviceToDevice, instance.executor->head_stream()));
+        r.words_fed     = slots[r.slot].fed.size() + (committed ? 0 : 1) + index;
+        r.words_purpose = draws.purpose;
+        r.words_wanted  = holds_ready;
+    }
+
+    // Keeps the sequence's state where a banned word's hold began, in the slot's hold snapshot.
+    void keep_words_hold(Request& r) {
+        Slot& slot = slots[r.slot];
+        if (!r.decoding || !r.words_fed || slot.fed.size() != *r.words_fed) { return; }
+        r.words_wanted = false;
+        instance.executor->snapshot(r.slot, slot.hold);
+        slot.hold_tokens = static_cast<std::uint32_t>(slot.fed.size());
+    }
+
+    // Banned words: takes the request back to the state before generated token `words_rewind`,
+    // the hold's, and draws that position again from the hold's logits once the grammar's mask,
+    // which bans the dropped token there, is ready (next_mask). A speculative round calls it once
+    // it has committed the tokens before the hold.
+    void complete_words_rewind(Request& r) {
+        const std::uint32_t to = *r.words_rewind;
+        r.words_rewind.reset();
+        auto& executor = *instance.executor;
+        Slot& slot     = slots[r.slot];
+        if (!r.words_fed || to > r.generated.size() || slot.fed.size() < *r.words_fed) {
+            throw std::logic_error("banned-word rewind without the hold it returns to");
+        }
+        const std::size_t back_to = *r.words_fed;
+        RankBinding bind(device, executor.head_rank());
+        const std::span<const TokenId> dropped(r.generated.data() + to, r.generated.size() - to);
+        if (r.penalties) {
+            runtime::uncount_tokens(static_cast<std::int32_t*>(token_counts.p) +
+                                        std::size_t(r.slot) * domain,
+                                    dropped, executor.head_stream());
+        }
+        r.budget->release(static_cast<std::uint32_t>(dropped.size()));
+        r.generated.resize(to);
+        r.hold_wanted = false;
+        if (slot.fed.size() > back_to) {
+            if (r.words_wanted || slot.hold_tokens != back_to) {
+                throw std::logic_error("Qwen3.8-Flash-Next kept no state at a banned word's hold");
+            }
+            executor.restore(r.slot, slot.hold);
+            r.position -= static_cast<std::uint32_t>(slot.fed.size() - back_to);
+            slot.fed.resize(back_to);
+        }
+        r.feed.clear();
+        const std::size_t bytes = vocab_rows * sizeof(__nv_bfloat16);
+        CUDA_CHECK(cudaMemcpyAsync(
+            static_cast<std::uint8_t*>(saved_logits.p) + std::size_t(r.slot) * bytes,
+            static_cast<const std::uint8_t*>(hold_logits.p) + std::size_t(r.slot) * bytes, bytes,
+            cudaMemcpyDeviceToDevice, executor.head_stream()));
+        r.awaiting_sample  = true;
+        r.awaiting_purpose = r.words_purpose;
+        r.redrawing        = true;
+        r.mask.reset();
     }
 
     // Keeps the state of a request whose next step feeds the token that begins a stop string's
@@ -2677,7 +2621,8 @@ struct Qwen4ExpCore::Impl {
     // `committed`: the sequence already holds the state the tokens leave; a speculative round
     // commits after the policy has decided, the tokens Request::commit_tokens names when set.
     std::uint32_t accept(const std::shared_ptr<Request>& request, std::span<const TokenId> tokens,
-                         std::span<const runtime::RawTokenLogprob> logprobs, bool committed) {
+                         std::span<const runtime::RawTokenLogprob> logprobs, bool committed,
+                         const Draws& draws) {
         Request& r                    = *request;
         const OutputDecision decision = r.output.preview_model(tokens, r.budget->remaining(),
                                                                r.budget->limit_reason(), logprobs);
@@ -2714,7 +2659,37 @@ struct Qwen4ExpCore::Impl {
             accepted > 0 && decision.stop_hold_after && *decision.stop_hold_after < accepted
                 ? decision.stop_hold_after
                 : std::nullopt;
-        if (hold && !committed) { r.commit_tokens = *hold + 1; }
+        // A banned word's hold, which takes the hold snapshot first: the state there is kept as a
+        // stop string's is, and the sequence then stands where the turn may go back.
+        if (!decision.bad_words_hold_alive) {
+            r.words_fed.reset();
+            r.words_wanted = false;
+        }
+        const std::optional<std::uint32_t> words = decision.bad_words_hold_after;
+        if (words) { begin_words_hold(r, *words, committed, draws); }
+        if (!committed) {
+            if (words) {
+                r.commit_tokens = *words + 1;
+            } else if (hold && !r.words_fed) {
+                r.commit_tokens = *hold + 1;
+            }
+        }
+        if (decision.bad_words_rewind) {
+            // A banned word was completed: the output stands at its hold again.
+            r.words_rewind = *decision.bad_words_rewind;
+            if (committed) {
+                // The draw counted the round's token, which the output did not take.
+                if (r.penalties) {
+                    RankBinding bind(device, instance.executor->head_rank());
+                    runtime::uncount_tokens(static_cast<std::int32_t*>(token_counts.p) +
+                                                std::size_t(r.slot) * domain,
+                                            tokens.subspan(accepted),
+                                            instance.executor->head_stream());
+                }
+                complete_words_rewind(r);
+            }
+            return accepted;
+        }
         if (decision.finished()) {
             if (decision.stop_cut && !hold) {
                 if (committed) {
@@ -2726,9 +2701,9 @@ struct Qwen4ExpCore::Impl {
             finish(request, decision.finish_reason);
             return accepted;
         }
-        r.hold_wanted = hold.has_value();
-        if (hold) {
-            r.feed.assign(tokens.begin() + *hold, tokens.begin() + accepted);
+        r.hold_wanted = hold.has_value() && !r.words_fed;
+        if (words || r.hold_wanted) {
+            r.feed.assign(tokens.begin() + (words ? *words : *hold), tokens.begin() + accepted);
         } else {
             r.feed.assign(1, token);
         }
@@ -2782,6 +2757,7 @@ struct Qwen4ExpCore::Impl {
         auto& executor = *instance.executor;
         std::vector<std::shared_ptr<Request>> batch, alone, speculative, deferred;
         for (const Slot& slot : slots) {
+            if (slot.request && slot.request->words_wanted) { keep_words_hold(*slot.request); }
             if (slot.request && slot.request->hold_wanted) { keep_hold(*slot.request); }
         }
         for (const Slot& slot : slots) {
@@ -2835,7 +2811,8 @@ struct Qwen4ExpCore::Impl {
                    std::span(&logprob, 1));
             try {
                 if (!mask_usable(request)) { continue; }
-                accept(request, token, row.logprobs ? &logprob : nullptr);
+                const Tensor logits = executor.logits(1);
+                accept(request, token, row.logprobs ? &logprob : nullptr, Draws{.logits = &logits});
                 next_mask(request);
             } catch (...) { fail(request, std::current_exception()); }
         }
@@ -2890,11 +2867,13 @@ struct Qwen4ExpCore::Impl {
             sample(rows, purpose, sampled, logprobs, &source);
             for (std::size_t j = 0; j < group.size(); ++j) {
                 group[j]->awaiting_sample = false;
-                if (purpose == ops::kSamplePurposeDecode && drafts > 0) {
+                if (purpose == ops::kSamplePurposeDecode && drafts > 0 && !group[j]->redrawing) {
                     ++group[j]->speculative.fallback_steps;
                 }
+                group[j]->redrawing = false;
                 try {
-                    accept(group[j], sampled[j], rows[j].logprobs ? &logprobs[j] : nullptr);
+                    accept(group[j], sampled[j], rows[j].logprobs ? &logprobs[j] : nullptr,
+                           Draws{.logits = &source, .column = j, .purpose = purpose});
                     next_mask(group[j]);
                 } catch (...) { fail(group[j], std::current_exception()); }
             }
@@ -2952,7 +2931,9 @@ struct Qwen4ExpCore::Impl {
             if (drafts > 0) { ++now[b]->speculative.fallback_steps; }
             try {
                 if (!mask_usable(now[b])) { continue; }
-                accept(now[b], sampled[b], rows[b].logprobs ? &logprobs[b] : nullptr);
+                accept(now[b], sampled[b], rows[b].logprobs ? &logprobs[b] : nullptr,
+                       Draws{.logits = source ? &*source : &logits,
+                             .column = source ? b : columns[b]});
                 next_mask(now[b]);
             } catch (...) { fail(now[b], std::current_exception()); }
         }
@@ -3104,6 +3085,7 @@ struct Qwen4ExpCore::Impl {
         for (std::size_t j = 0; j < b; ++j) {
             if (!batch[j]->constrained) { continue; }
             const std::size_t own = std::min<std::size_t>(draft_extents[j], k);
+            allow_rewinds(*batch[j]);
             column_masks[j] = runtime::GrammarMaskJob::start(
                 *batch[j]->output.grammar_state(), mask_words(),
                 std::vector<TokenId>(proposed.begin() + std::ptrdiff_t(j * k),
@@ -3302,15 +3284,19 @@ struct Qwen4ExpCore::Impl {
                 failed[j] = 1;
             } else {
                 try {
-                    taken = accept(request, run_tokens, records, false);
+                    taken = accept(request, run_tokens, records, false,
+                                   Draws{.logits = &logits, .column = std::size_t(starts[j])});
                 } catch (...) {
                     fail(request, std::current_exception());
                     failed[j] = 1;
                 }
             }
-            // The tokens counted as sampled: those taken, or the first when none was.
-            kept[j] = std::max<std::uint32_t>(taken, 1);
-            if (kept[j] < std::uint32_t(licensed_n) && active(request) && rows[j].counts) {
+            // The tokens counted as sampled: those taken, or the first when none was. A rewind to
+            // a banned word's hold feeds the tokens taken before it and counts only those.
+            const bool rewound = r.words_rewind.has_value();
+            kept[j] = rewound ? taken + 1 : std::max<std::uint32_t>(taken, 1);
+            const std::uint32_t counted = rewound ? taken : kept[j];
+            if (counted < std::uint32_t(licensed_n) && active(request) && rows[j].counts) {
                 // The acceptance counted the whole run; the request keeps only its prefix.
                 const std::size_t at = std::size_t(r.slot) * domain * sizeof(std::int32_t);
                 CUDA_CHECK(cudaMemcpyAsync(static_cast<std::byte*>(token_counts.p) + at,
@@ -3318,12 +3304,14 @@ struct Qwen4ExpCore::Impl {
                                            std::size_t(domain) * sizeof(std::int32_t),
                                            cudaMemcpyDeviceToDevice, stream));
                 // The run's tokens are still in the licensed plane, at the row's offset.
-                const Tensor ids(static_cast<std::int32_t*>(spec_licensed.p) + j * w, DType::I32,
-                                 {static_cast<std::int32_t>(kept[j])});
-                Tensor row_counts(static_cast<std::int32_t*>(token_counts.p) +
-                                      std::size_t(r.slot) * domain,
-                                  DType::I32, {static_cast<std::int32_t>(domain)});
-                ops::increment_token_counts(ids, row_counts, stream);
+                if (counted > 0) {
+                    const Tensor ids(static_cast<std::int32_t*>(spec_licensed.p) + j * w,
+                                     DType::I32, {static_cast<std::int32_t>(counted)});
+                    Tensor row_counts(static_cast<std::int32_t*>(token_counts.p) +
+                                          std::size_t(r.slot) * domain,
+                                      DType::I32, {static_cast<std::int32_t>(domain)});
+                    ops::increment_token_counts(ids, row_counts, stream);
+                }
             }
         }
         // A row whose stop string's match began inside its run keeps the tokens before the match.
@@ -3355,8 +3343,12 @@ struct Qwen4ExpCore::Impl {
             r.position += committed[j];
             if (r.stop_rewind) { rewind_to_hold(r); }
             try {
+                if (r.words_rewind) { complete_words_rewind(r); }
                 check_capacity(batch[j]);
-            } catch (...) { fail(batch[j], std::current_exception()); }
+            } catch (...) {
+                fail(batch[j], std::current_exception());
+                continue;
+            }
             if (r.constrained) { next_mask(batch[j]); }
         }
     }
@@ -3511,6 +3503,32 @@ void Qwen4ExpCore::stop() noexcept {
     impl_->queue_cv.notify_all();
 }
 
+SessionSlotRecord Qwen4ExpCore::save_slot(std::uint32_t slot, const std::string& expected_digest) {
+    return impl_->session.tasks.run(impl_->queue_mutex, impl_->queue_cv, [&] {
+        return save_slot_record(*impl_, slot, expected_digest);
+    });
+}
+
+std::pair<std::uint32_t, std::string> Qwen4ExpCore::restore_slot(std::uint32_t slot,
+                                                         std::span<const std::uint8_t> record) {
+    return impl_->session.tasks.run(impl_->queue_mutex, impl_->queue_cv, [&] {
+        return restore_slot_record(*impl_, slot, record);
+    });
+}
+
+std::uint32_t Qwen4ExpCore::erase_slot(std::uint32_t slot, const std::string& expected_digest) {
+    return impl_->session.tasks.run(impl_->queue_mutex, impl_->queue_cv, [&] {
+        return erase_slot_session(*impl_, slot, expected_digest);
+    });
+}
+
+std::vector<SlotState> Qwen4ExpCore::slot_states() const {
+    std::lock_guard lock(impl_->stats_mutex);
+    std::vector<SlotState> states = impl_->session.published;
+    states.resize(impl_->slots.size());
+    return states;
+}
+
 std::shared_ptr<Qwen4ExpCore::Request>
 Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& budget_out) {
     models::qwen3_5::PreparedPrompt& prompt         = member.prompt;
@@ -3548,6 +3566,9 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
         throw std::invalid_argument(
             "structured output requires an Engine started with structured_output");
     }
+    if (!options.execution.bad_words.empty() && !impl_->structured_output) {
+        throw std::invalid_argument("bad_words require an Engine started with structured_output");
+    }
     if (pending_deadline == Clock::time_point{}) {
         pending_deadline = submitted + impl_->pending_timeout;
     }
@@ -3583,6 +3604,27 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
             identity.rewrite_checkpoint->frontier < prompt_n) {
             request->anchor_at = identity.rewrite_checkpoint->frontier;
         }
+        // Where the template closes the prompt's last message: the turn closure, or the end.
+        const std::uint32_t closed_at = request->anchor_at;
+        // The protocol's default boundary (DefaultAutomatic: OpenAI and Anthropic put it where the
+        // prompt's last message ends) is where a repeat of the prompt resumes, and the next turn
+        // when the template rewrites what follows it. The sequence's anchor moves there: a device
+        // snapshot, copied to the host as an image only when another request takes the sequence.
+        if (!options.execution.branches) {
+            for (const auto& opportunity : data.context_cache.opportunities) {
+                const bool only_default =
+                    has_shared_candidate_evidence(opportunity.evidence,
+                                                  SharedCandidateEvidence::DefaultAutomatic) &&
+                    !has_shared_candidate_evidence(
+                        opportunity.evidence, SharedCandidateEvidence::ExplicitBoundary |
+                                                  SharedCandidateEvidence::RequestedAutomatic |
+                                                  SharedCandidateEvidence::EngineStructural);
+                if (opportunity.kind == PromptCacheMarkerKind::SharedStablePrefix && only_default &&
+                    opportunity.frontier > 0 && opportunity.frontier < request->anchor_at) {
+                    request->anchor_at = opportunity.frontier;
+                }
+            }
+        }
         request->disposable = data.tap_hints.disposable;
         // Shared prefixes worth an image of their own: a structural or declared boundary, not one
         // the engine merely observed (the prompt's end, a grid point). A branched read's prompt
@@ -3594,7 +3636,6 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
             const bool structural = has_shared_candidate_evidence(
                 opportunity.evidence, SharedCandidateEvidence::ExplicitBoundary |
                                           SharedCandidateEvidence::RequestedAutomatic |
-                                          SharedCandidateEvidence::DefaultAutomatic |
                                           SharedCandidateEvidence::EngineStructural);
             const std::uint32_t frontier = opportunity.frontier;
             if (request->reusable &&
@@ -3606,6 +3647,23 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
         std::sort(request->shared_at.begin(), request->shared_at.end());
         request->shared_at.erase(std::unique(request->shared_at.begin(), request->shared_at.end()),
                                  request->shared_at.end());
+        // The checkpoint lies in the last message as the template closes it: with the anchor
+        // moved inside that closure, the message before it would count as the last one (in a
+        // long system message, a checkpoint and a prompt step more). The moved anchor is a kept
+        // state like the shared ones.
+        std::vector<std::uint32_t> kept = request->shared_at;
+        if (request->anchor_at < closed_at) {
+            kept.insert(std::upper_bound(kept.begin(), kept.end(), request->anchor_at),
+                        request->anchor_at);
+        }
+        if (const std::uint32_t at =
+                MessageCheckpoint::at(data.tap_hints.hints, closed_at, kept, request->media);
+            request->reusable && !options.execution.branches && at >= Impl::kMinStoredTokens &&
+            at < request->anchor_at) {
+            request->checkpoint_at = at;
+            request->shared_at.insert(
+                std::upper_bound(request->shared_at.begin(), request->shared_at.end(), at), at);
+        }
     }
     request->prompt_summary  = prompt_summary;
     request->prepare_seconds = prepare_seconds;
@@ -3620,7 +3678,7 @@ Qwen4ExpCore::make_request(GroupMember& member, std::optional<std::uint32_t>& bu
         impl_->instance.frontend.thinking_control_token_count());
     request->output = impl_->instance.frontend.make_output_session(
         prompt, options.stop, options.output, options.execution.thinking,
-        options.execution.structured_output);
+        options.execution.structured_output, options.execution.bad_words);
     // Strict tool arguments bring a grammar without a structured final format.
     if (request->output.grammar_state() && !impl_->structured_output) {
         throw std::invalid_argument(
@@ -3737,6 +3795,11 @@ MemorySummary Qwen4ExpCore::memory_summary() const {
     out.max_context               = impl_->max_context;
     out.kv_capacity               = impl_->max_context;
     out.kv_cache                      = impl_->instance.executor->options().kv_cache;
+    out.host_kv_capacity_bytes        = impl_->store.host_budget();
+    {
+        std::lock_guard lock(impl_->stats_mutex);
+        out.host_kv_occupied_bytes = impl_->stats.host_kv_occupied_bytes;
+    }
     out.weights                   = devices.front().weights;
     out.sequence                  = devices.front().sequence;
     out.workspace                 = devices.front().workspace;

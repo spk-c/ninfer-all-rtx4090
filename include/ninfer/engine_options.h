@@ -42,9 +42,11 @@ struct SpeculativeOptions {
     std::uint32_t draft_tokens = 0;
     // Qwen3.8-Flash-Next: MTP ends drafting and verification at the first draft whose absolute
     // probability is at or below this floor; DFlash2 verifies through the first draft whose
-    // selector confidence is at or below it. Zero keeps the full window. Unset keeps it with
-    // --spec, and is kAutomaticDraftMinP when the Engine chooses MTP (automatic) and
-    // kAutomaticDFlash2MinP when it chooses DFlash2.
+    // selector confidence is at or below it. Inkling 2's DSpark drafter (and DSpine on the families
+    // with a core of their own) verifies through the first draft whose drafter probability is at or
+    // below it. Zero keeps the full window. Unset keeps it with --spec, and is kAutomaticDraftMinP
+    // when the Engine chooses MTP (automatic), kAutomaticDFlash2MinP when it chooses DFlash2 and
+    // kAutomaticDSparkMinP when it chooses Inkling 2's DSpark.
     std::optional<float> draft_min_p;
     // DeepSeek-V4.1 DSpark: verify a round's drafts up to the first its confidence head scores below
     // this, in [0,1]; 0 keeps every draft. Unset keeps the drafter's default floor (0.5).
@@ -66,7 +68,8 @@ struct SpeculativeOptions {
     // configured backend, preferred whenever it finds a match.
     std::uint32_t lookup_ngram = 0;
     // MTP only; Adaptive verifies 1..draft_tokens drafts per round (Qwen3.8-Flash-Next: a lone
-    // request's round; a round of several drafts up to kAutomaticDraftTokens).
+    // request's round; a round of several drafts up to kAutomaticDraftTokens). Inkling 2's DSpark
+    // drafter adapts a lone request's round the same way.
     MtpDraftPolicy mtp_policy = MtpDraftPolicy::Fixed;
     // Optional target-verified copy proposals with MTP, DFlash or DFlash2, C1 only.
     // Zero disables the proposer; enabled draft width is 1..63 and minimum match 4..64.
@@ -87,12 +90,17 @@ struct SpeculativeOptions {
     // kAutomaticDraftMinP, a round of several requests with a CPU share verifying at most the
     // tokens of the widest call the CPU shares (64 with GGUF host experts), Edge0's form also with
     // device experts at max_concurrency 1; Gemma 4 with host or disk experts with its assistant,
-    // kAutomaticDraftTokens a round; others run without drafts. options() report the backend.
+    // kAutomaticDraftTokens a round; Inkling 2 at max_concurrency 1, also over tensor parallelism,
+    // with its DSpark drafter, kAutomaticDSparkTokens a round adapting (Adaptive) and ending at the
+    // first draft at or below kAutomaticDSparkMinP; others run without drafts. options() report
+    // the backend.
     bool automatic = false;
     static constexpr std::uint32_t kAutomaticDraftTokens   = 3;
     static constexpr float kAutomaticDraftMinP             = 0.5F;
     static constexpr std::uint32_t kAutomaticDFlash2Tokens = 4;
     static constexpr float kAutomaticDFlash2MinP           = 0.7F;
+    static constexpr std::uint32_t kAutomaticDSparkTokens  = 3;
+    static constexpr float kAutomaticDSparkMinP            = 0.5F;
 };
 
 enum class DiagnosticLevel : std::uint8_t {
@@ -447,6 +455,12 @@ struct HybridExpertOptions {
     std::filesystem::path mirror;
     // Disk experts: NVMe reads straight into device memory (ExpertDirect).
     ExpertDirect direct = ExpertDirect::Auto;
+    // Host experts: at most this many bytes pinned in host memory, in the artifact's order; the
+    // rest are read from the artifact's files as disk experts are. Unset (default): as many as fit
+    // the host's available memory and, on Windows and WSL2, what the GPU's shared memory segment
+    // can still lock (about half of Windows' memory) less 4 GiB. A value replaces that segment
+    // estimate; the available memory and the first part the host refuses still end the block.
+    std::optional<std::uint64_t> host_bytes;
 };
 
 // The n-gram table of Qwen3.8-Flash-Next's per-layer embedding or DeepSeek-V4.1-Flash's Engram: the
@@ -622,7 +636,14 @@ struct EngineOptions {
     // Prefill with the fast INT8-KV prompt-attention kernel and round prefill_chunk down to whole
     // prompt-attention waves. Off keeps the default kernel and the requested chunk.
     bool fast_prefill_kernel           = false;
+    // Float16 is native Flash-Next/Edge0 K/V: FP32 projections, key norm and rotation, then one
+    // binary16 store. Gemma 4 and Flint keep their F16 caches under either name; the Qwen3.5
+    // Program and DeepSeek-V4.1 refuse it. BF16 stays the default.
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // The storage was left to the Engine (no --kv-dtype): Inkling 2 then stores MXFP8 (Mxfp8),
+    // the KV format its release trained with, Flint its F16 cache and DeepSeek-V4.1 its only one
+    // (BFloat16 names both); the other families keep kv_cache. options() report the storage.
+    bool kv_cache_automatic = false;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;

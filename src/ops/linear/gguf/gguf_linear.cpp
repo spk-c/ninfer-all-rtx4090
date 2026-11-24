@@ -27,6 +27,13 @@ std::int64_t row_bytes(const Weight& w) {
 
 bool matrix_kernel(const Weight& w) { return gguf::has_matrix_kernel(gguf_type(w.qtype)); }
 
+// A matrix product refused for its geometry (rows not whole 128-row tiles, for instance) names
+// the problem, so a report shows which projection it was.
+[[noreturn]] void refuse_matrix(const std::invalid_argument& e, const Weight& w, std::int32_t t) {
+    throw std::invalid_argument(std::string(e.what()) + ": [" + std::to_string(w.n) + ", " +
+                                std::to_string(w.k) + "] at T=" + std::to_string(t));
+}
+
 gguf::Epilogue bridge_epilogue(GgufEpilogue epilogue) {
     switch (epilogue) {
     case GgufEpilogue::Store: return gguf::Epilogue::Store;
@@ -265,8 +272,33 @@ std::size_t gguf_project_workspace_bytes(std::span<const GgufShape> shapes,
     return widest;
 }
 
+void gguf_vector_project(std::span<const GgufVectorProduct> products, std::int32_t t,
+                         cudaStream_t stream) {
+    std::vector<gguf::VectorJob> jobs;
+    const Weight* group = nullptr;
+    const auto flush    = [&] {
+        if (jobs.empty()) { return; }
+        gguf::vector_products(gguf_type(group->qtype), row_bytes(*group), group->k, jobs, t, stream);
+        jobs.clear();
+    };
+    for (const auto& p : products) {
+        const Weight& w = *p.weight;
+        require_gguf(w, "gguf vector product");
+        if (!jobs.empty() &&
+            (p.out.epilogue != gguf::Epilogue::Store ||
+             jobs.back().out.epilogue != gguf::Epilogue::Store || group->qtype != w.qtype ||
+             group->k != w.k || row_bytes(*group) != row_bytes(w) ||
+             jobs.size() == std::size_t(gguf::kMaxVectorJobs))) {
+            flush();
+        }
+        group = &w;
+        jobs.push_back({w.qdata, w.n, p.activation, p.out});
+    }
+    flush();
+}
+
 void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
-                  WorkspaceArena& workspace, cudaStream_t stream) {
+                  WorkspaceArena& workspace, cudaStream_t stream, const void* quantized_x) {
     require_activation(x, "gguf product");
     if (products.empty()) { return; }
     for (const auto& p : products) { require_product(x, p); }
@@ -283,9 +315,12 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
     if (t <= gguf::kMaxVectorColumns) {
         struct Activation {
             const std::int32_t* columns;
-            void* data;
+            const void* data;
         };
         std::vector<Activation> activations;
+        if (quantized_x != nullptr) { activations.push_back({nullptr, quantized_x}); }
+        std::vector<GgufVectorProduct> queued;
+        queued.reserve(products.size());
         for (const auto& p : products) {
             const Weight& w = *p.weight;
             auto found      = std::find_if(activations.begin(), activations.end(),
@@ -296,9 +331,9 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
                 activations.push_back({w.input_columns, data});
                 found = activations.end() - 1;
             }
-            gguf::vector_product(gguf_type(w.qtype), w.qdata, row_bytes(w), w.n, k, found->data,
-                                 t, output(p, 0), stream);
+            queued.push_back({&w, found->data, output(p, 0)});
         }
+        gguf_vector_project(queued, t, stream);
         return;
     }
 
@@ -352,17 +387,20 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
                 activations.push_back({layout, w.input_columns, data});
                 found = activations.end() - 1;
             }
-            if (p.f32 == nullptr &&
-                (p.epilogue == GgufEpilogue::Store || p.epilogue == GgufEpilogue::Accumulate)) {
-                const gguf::VectorOutput destination = output(p, 0);
-                gguf::matrix_product_bf16(type, w.qdata, row_bytes(w), w.n, k, found->data, t,
-                                          destination.bf16, destination.column_stride, plane, fixup,
-                                          stream, p.epilogue == GgufEpilogue::Accumulate,
-                                          k % 256 != 0);
-                continue;
-            }
-            gguf::matrix_product(type, w.qdata, row_bytes(w), w.n, k, found->data, t, out, stride,
-                                 fixup, stream, k % 256 != 0);
+            try {
+                if (p.f32 == nullptr &&
+                    (p.epilogue == GgufEpilogue::Store || p.epilogue == GgufEpilogue::Accumulate)) {
+                    const gguf::VectorOutput destination = output(p, 0);
+                    gguf::matrix_product_bf16(type, w.qdata, row_bytes(w), w.n, k, found->data, t,
+                                              destination.bf16, destination.column_stride, plane,
+                                              fixup, stream,
+                                              p.epilogue == GgufEpilogue::Accumulate,
+                                              k % 256 != 0);
+                    continue;
+                }
+                gguf::matrix_product(type, w.qdata, row_bytes(w), w.n, k, found->data, t, out,
+                                     stride, fixup, stream, k % 256 != 0);
+            } catch (const std::invalid_argument& e) { refuse_matrix(e, w, t); }
         } else if (t <= kDequantizedVectorColumns) {
             for (std::int32_t first = 0; first < t; first += gguf::kMaxVectorColumns) {
                 const std::int32_t columns = std::min(gguf::kMaxVectorColumns, t - first);

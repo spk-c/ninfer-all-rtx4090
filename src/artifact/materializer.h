@@ -49,6 +49,9 @@ struct PinnedPlacement {
     std::uint64_t offset    = 0;
     std::uint64_t bytes     = 0;
     std::uint64_t alignment = 256;
+    // Residency::PinnedOrFiles: the object may stay in the artifact's files. Such placements
+    // follow every other one in the pinned block.
+    bool files_fallback = false;
 };
 
 struct HostPlacement {
@@ -89,6 +92,20 @@ struct MaterializationPlan {
     }
 };
 
+// Kept free of the GPU's shared memory segment for what startup pins after the weights, where the
+// platform reports what that segment can still lock (pinnable_host_memory_bytes).
+inline constexpr std::uint64_t kPinnedHeadroomBytes = 4ULL << 30;
+
+// What ended the pinned block of Residency::PinnedOrFiles objects.
+enum class PinnedBlockEnd : std::uint8_t {
+    Complete,  // it holds every such object, or there is none
+    Cap,       // MaterializeOptions::files_after_bytes
+    Available, // the host's available memory, MaterializationStats::pinned_block_limit_bytes
+    Pinnable,  // what the GPU's shared memory segment can still lock, pinned_block_limit_bytes,
+               // less kPinnedHeadroomBytes
+    Refused,   // the host refused to pin the next part
+};
+
 struct MaterializationStats {
     std::uint64_t file_bytes = 0; // Declared container file set, including framing.
     std::uint64_t read_bytes = 0; // Actual payload reads, including direct-I/O alignment.
@@ -103,6 +120,11 @@ struct MaterializationStats {
     std::uint64_t peak_staging_bytes    = 0;
     std::size_t device_object_count     = 0;
     std::size_t pinned_object_count     = 0;
+    // Residency::PinnedOrFiles objects the pinned block does not hold, which stay in the files.
+    std::uint64_t files_bytes           = 0;
+    std::size_t files_object_count      = 0;
+    PinnedBlockEnd pinned_block_end     = PinnedBlockEnd::Complete;
+    std::uint64_t pinned_block_limit_bytes = 0; // the memory figure that ended it, if any
     std::size_t mapped_object_count     = 0;
     std::size_t host_object_count       = 0;
     double upload_seconds               = 0;
@@ -115,6 +137,11 @@ struct MaterializeOptions {
     // if a path is replaced meanwhile.
     bool suspendable = false;
     std::shared_ptr<const Reader> retained_reader;
+    // At most this many bytes of Residency::PinnedOrFiles objects are pinned; the rest stay in the
+    // artifact's files (--expert-host-mib). It replaces the estimate of what the GPU's shared memory
+    // segment can still lock: the host's available memory and its first refusal still end the
+    // block. Unset: as many as the host can pin, within that estimate less kPinnedHeadroomBytes.
+    std::optional<std::uint64_t> files_after_bytes;
 };
 
 class MaterializedArtifact {
@@ -131,6 +158,9 @@ public:
     [[nodiscard]] std::span<const std::byte> host_bytes(ObjectHandle handle) const;
     [[nodiscard]] bool has_device(ObjectHandle handle) const noexcept;
     [[nodiscard]] const WeightParent& pinned_parent(ObjectHandle handle) const;
+    // Whether the pinned block holds the object (a Residency::PinnedOrFiles object may stay in the
+    // artifact's files).
+    [[nodiscard]] bool pinned(ObjectHandle handle) const noexcept;
     [[nodiscard]] std::span<const std::byte> pinned_block() const noexcept;
     // A Residency::Mapped object: its data addresses the primary device's mapping of the mapped
     // Host block, which only device code may dereference.

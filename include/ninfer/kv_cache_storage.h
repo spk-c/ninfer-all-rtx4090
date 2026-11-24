@@ -35,6 +35,12 @@ enum class KvCacheStorage : std::uint8_t {
     // row (ops/kv_cache/bf16p_codec.cuh), 23% fewer bytes than BFloat16; a row with no packed form
     // ends its request as one with non-finite logits. Opt-in through --kv-dtype bf16p.
     Bf16Packed,
+    // Native binary16 K/V, rounded directly from FP32 cache-producing operands (Flash-Next).
+    Float16,
+    // mxfp8 (Inkling 2): E4M3 values over one UE8M0 power-of-two scale per 32 dimensions, the
+    // group's absolute maximum over 448 rounded up to a power of two (the release's MXFP8 rule),
+    // the format Inkling 2's release trained its KV with and that family's default.
+    Mxfp8,
 };
 
 } // namespace ninfer

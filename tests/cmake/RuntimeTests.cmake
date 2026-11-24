@@ -46,6 +46,11 @@ ninfer_add_test(ninfer_prefix_cache_index_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_prefix_cache_index.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_context_image_store_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_context_image_store.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+set_tests_properties(ninfer_context_image_store_test PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_effective_thinking_budget_test
   STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_effective_thinking_budget.cpp")
@@ -59,3 +64,8 @@ ninfer_add_test(ninfer_engine_stop_string_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_stop_string_real.cpp"
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_engine_stop_string_real_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_engine_bad_words_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_bad_words_real.cpp"
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_engine_bad_words_real_test PROPERTIES SKIP_RETURN_CODE 77)

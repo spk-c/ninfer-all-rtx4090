@@ -119,6 +119,7 @@ std::uint64_t parse_byte_size(const char* text, const char* label) {
 KvCacheStorage parse_kv_dtype(const char* text) {
     const std::string value(text);
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
+    if (value == "fp16") { return KvCacheStorage::Float16; }
     if (value == "int8") { return KvCacheStorage::Int8Group64; }
     if (value == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     // RotorQuant rk8v4: rotated INT8 keys with a packed signed int4 value plane. Opt-in.
@@ -133,6 +134,8 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     // bf16p: BF16 rows packed losslessly into 392 bytes (bf16p_codec.cuh). Opt-in.
     if (value == "bf16p") { return KvCacheStorage::Bf16Packed; }
+    // mxfp8: E4M3 values over a power-of-two scale per 32 (Inkling 2, its default).
+    if (value == "mxfp8") { return KvCacheStorage::Mxfp8; }
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
@@ -200,7 +203,7 @@ std::string serve_usage_text(const char* argv0) {
            "Serves the OpenAI Responses/Chat Completions and Anthropic Messages APIs.\n"
            "  --help, -h                    show this help and exit\n"
            "  --version                     print the build version and exit\n"
-           "  --config FILE                 read options from a launch configuration file\n"
+           "  --config FILE                 read options from an INI or flat JSON launch file\n"
            "                                (`key = value` lines, docs/cli.md); repeatable,\n"
            "                                each later file and the command line override\n"
            "                                earlier ones; a file's `model` names the artifact\n"
@@ -355,7 +358,9 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  KV storage: bf16 (default), int8, fp8, rk8v4,\n"
-           "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p\n" +
+           "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p;\n"
+           "                                fp16: Flash-Next, Gemma 4 and Flint; mxfp8:\n"
+           "                                Inkling 2 (its default)\n" +
            std::string(product::kKvResidentHelp) +
            "\n"
            "CONTEXT CACHE\n"
@@ -482,7 +487,10 @@ std::string serve_usage_text(const char* argv0) {
            "  --prefix-cache-file PATH      hybrid: restore the Host tier from PATH at\n"
            "                                startup when this binary wrote it for the same\n"
            "                                artifact and KV format, and save it there when\n"
-           "                                the server stops (Ctrl+C twice) (default off)\n"
+           "                                the server stops (Ctrl+C twice) (default off);\n"
+           "                                Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and\n"
+           "                                Flash-Next save their own context caches, also\n"
+           "                                beside the checkpoint catalog's options\n"
            "\n"
            "SPECULATIVE DECODING\n"
            "  --spec none|mtp|dflash|dflash2|dspark|dspine\n"
@@ -492,20 +500,27 @@ std::string serve_usage_text(const char* argv0) {
            "                                3 for those over pipeline stages or with only the\n"
            "                                MTP block, for Edge0 device experts serving one\n"
            "                                request at a time and for Gemma 4 host or disk\n"
-           "                                experts whose artifact has the drafter, else\n"
-           "                                none; dspark: DeepSeek-V4.1's DSpark drafter;\n"
+           "                                experts whose artifact has the drafter, dspark\n"
+           "                                with 3 adapting for Inkling 2 serving one\n"
+           "                                request at a time whose artifact has its\n"
+           "                                drafter, else none; dspark: the release's\n"
+           "                                DSpark drafter\n"
+           "                                (DeepSeek-V4.1, Inkling 2);\n"
            "                                dspine: the DSpine drafter --draft-model names)\n"
            "  --draft-model PATH            dspine: the DSpine drafter artifact, trained for\n"
            "                                this model\n"
            "  --draft-tokens N              drafts per round, 1..15 (Flash-Next dflash2: 1..7;\n"
-           "                                dspark: up to its block of 5, the default; dspine:\n"
+           "                                dspark: up to its block of 5, the default, 7 for\n"
+           "                                Inkling 2; dspine:\n"
            "                                up to its block less one, 7 for Gemma 4, Flint\n"
            "                                and DeepSeek-V4.1)\n"
            "  --draft-min-p P               confidence floor 0..1 of Flash-Next MTP, DFlash2\n"
-           "                                or DSpine, and of DSpine on Gemma 4, Flint or\n"
-           "                                DeepSeek-V4.1 (default 0 with --spec, 0.5 when\n"
-           "                                the engine chooses MTP, 0.7 when it chooses\n"
-           "                                DFlash2)\n"
+           "                                or DSpine, of DSpine on Gemma 4, Flint or\n"
+           "                                DeepSeek-V4.1 and of DSpark on Inkling 2: a round\n"
+           "                                ends after its first draft at or below P\n"
+           "                                (default 0 with --spec, 0.5 when\n"
+           "                                the engine chooses MTP or Inkling 2's DSpark,\n"
+           "                                0.7 when it chooses DFlash2)\n"
            "  --draft-confidence C          dspark: verify drafts while their confidence is\n"
            "                                at least C, 0..1 (default 0.5; 0 keeps every draft)\n"
            "  --draft-experts N             dspark: each drafter block keeps its N most routed\n"
@@ -521,7 +536,9 @@ std::string serve_usage_text(const char* argv0) {
            "                                and round cost favor; greedy output is unchanged;\n"
            "                                with DFlash, DFlash2 or DSpine (Qwen3.5-core\n"
            "                                models) a round drafts and verifies\n"
-           "                                --draft-tokens or half of them\n"
+           "                                --draft-tokens or half of them; with DSpark on\n"
+           "                                Inkling 2 a lone request's round takes\n"
+           "                                1..--draft-tokens drafts\n"
            "  --mtp-attention-window N      the MTP draft head attends to its first 64 keys\n"
            "                                and the newest N before its query, not the\n"
            "                                whole history; verification is unchanged\n"
@@ -627,6 +644,10 @@ std::string serve_usage_text(const char* argv0) {
            "  --unconstrained-response-format\n"
            "                                without --structured-output, generate such a\n"
            "                                request unconstrained instead of refusing it\n"
+           "  --no-structured-output-instruction\n"
+           "                                keep a constrained request's messages as sent,\n"
+           "                                without the format instruction; the grammar\n"
+           "                                alone enforces the format\n"
            "  --assistant-prefill           continue a Chat Completions request's trailing\n"
            "                                assistant message in place, as /v1/messages\n"
            "                                does; needs thinking disabled\n"
@@ -646,6 +667,10 @@ std::string serve_usage_text(const char* argv0) {
            "                                on port N with a worker of their own (default off)\n"
            "  --api-key KEY                 require this bearer or x-api-key value (default:\n"
            "                                none)\n"
+           "  --admin-token KEY             the admin credential; enables the admin routes, of\n"
+           "                                which POST /shutdown, the HTTP form of the Ctrl+Break\n"
+           "                                graceful stop, is the first; the request must carry it\n"
+           "                                as a bearer or x-api-key (default: off)\n"
            "  --cors                        send permissive CORS headers for browser clients\n"
            "  --no-webui                    do not serve a WebUI built in with\n"
            "                                NINFER_WEBUI_DIR on GET /\n"
@@ -753,6 +778,7 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
     bool long_anchor_spacing_explicit = false;
     bool ngram_width_explicit         = false;
     bool spec_explicit                = false;
+    bool kv_dtype_explicit            = false;
     bool vision_max_merged_explicit   = false;
     std::optional<std::size_t> kv_headroom_mib;
     // Last flag seen that belongs to only one prefix-cache mode, for the cross-mode error.
@@ -786,6 +812,13 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
         }
         if (arg == "--api-key") {
             options.api_key = require_value("--api-key");
+            continue;
+        }
+        if (arg == "--admin-token") {
+            options.admin_token = require_value("--admin-token");
+            if (options.admin_token.empty()) {
+                throw std::invalid_argument("--admin-token must not be empty");
+            }
             continue;
         }
         if (arg == "--model-id") {
@@ -980,7 +1013,9 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
             if (options.context_cache.hybrid.persistent_file.empty()) {
                 throw std::invalid_argument("--prefix-cache-file must not be empty");
             }
-            hybrid_option_flag = "--prefix-cache-file";
+            // The families with an Engine core of their own save their cache to it too, so it
+            // names the hybrid cache only when no other hybrid setting does.
+            if (hybrid_option_flag == nullptr) { hybrid_option_flag = "--prefix-cache-file"; }
             continue;
         }
         if (arg == "--cache-tap-min-gap") {
@@ -1315,7 +1350,8 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
             continue;
         }
         if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+            options.kv_cache  = parse_kv_dtype(require_value("--kv-dtype"));
+            kv_dtype_explicit = true;
             continue;
         }
         if (arg == "--spec") {
@@ -1715,6 +1751,9 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
         if (product::switch_option(arg, "unconstrained-response-format", [&](bool on) { options.unconstrained_response_format = on; })) {
             continue;
         }
+        if (product::switch_option(arg, "structured-output-instruction", [&](bool on) { options.structured_output_instruction = on; })) {
+            continue;
+        }
         if (product::switch_option(arg, "assistant-prefill", [&](bool on) { options.assistant_prefill = on; })) {
             continue;
         }
@@ -1841,33 +1880,46 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
                 {"use-alt-prefix-caching", "prefix-reuse"},
                 "--use-alt-prefix-caching cannot be combined with --no-prefix-reuse");
         }
-        std::filesystem::path& file = options.context_cache.hybrid.persistent_file;
-        if (!file.empty()) {
-            if (host_cache_budget_explicit && !options.context_cache.host_cache_auto &&
-                options.context_cache.host_cache_budget_bytes == 0) {
-                throw product::OptionConflict(
-                    {"prefix-cache-file", "host-cache-mib"},
-                    "--prefix-cache-file saves the Host tier, which --host-cache-mib 0 removes");
-            }
-            // Resolved now, so the save at shutdown writes where startup read, and checked now,
-            // so an unusable location fails at launch rather than after a session of caching.
-            file = std::filesystem::absolute(file).lexically_normal();
-            std::error_code error;
-            if (std::filesystem::is_directory(file, error)) {
-                throw std::invalid_argument("--prefix-cache-file " + file.string() +
-                                            " is a directory; name a file in it");
-            }
-            if (!std::filesystem::is_directory(file.parent_path(), error)) {
-                throw std::invalid_argument("--prefix-cache-file " + file.string() +
-                                            ": the directory " + file.parent_path().string() +
-                                            " does not exist");
-            }
+        if (hybrid_cache_selected) {
+            options.hybrid_cache_flag = "--use-alt-prefix-caching";
+        } else if (hybrid_option_flag != nullptr) {
+            options.hybrid_cache_flag = hybrid_option_flag;
         }
+    } else if (hybrid_option_flag != nullptr &&
+               std::string_view(hybrid_option_flag) == "--prefix-cache-file") {
+        // The families with an Engine core of their own also save their context caches to it,
+        // which the catalog's options configure; the server refuses it for the other families
+        // once it knows the artifact's.
+        options.hybrid_cache_flag  = hybrid_option_flag;
+        options.catalog_cache_flag =
+            original_cache_selected ? "--use-original-prefix-caching" : catalog_option;
     } else if (hybrid_option_flag != nullptr) {
         throw std::invalid_argument(
             std::string(hybrid_option_flag) + " configures the hybrid prefix cache, and " +
             (original_cache_selected ? "--use-original-prefix-caching" : catalog_option) +
             " selects the checkpoint catalog");
+    }
+    if (std::filesystem::path& file = options.context_cache.hybrid.persistent_file;
+        !file.empty()) {
+        if (host_cache_budget_explicit && !options.context_cache.host_cache_auto &&
+            options.context_cache.host_cache_budget_bytes == 0) {
+            throw product::OptionConflict(
+                {"prefix-cache-file", "host-cache-mib"},
+                "--prefix-cache-file saves the Host tier, which --host-cache-mib 0 removes");
+        }
+        // Resolved now, so the save at shutdown writes where startup read, and checked now, so
+        // an unusable location fails at launch rather than after a session of caching.
+        file = std::filesystem::absolute(file).lexically_normal();
+        std::error_code error;
+        if (std::filesystem::is_directory(file, error)) {
+            throw std::invalid_argument("--prefix-cache-file " + file.string() +
+                                        " is a directory; name a file in it");
+        }
+        if (!std::filesystem::is_directory(file.parent_path(), error)) {
+            throw std::invalid_argument("--prefix-cache-file " + file.string() +
+                                        ": the directory " + file.parent_path().string() +
+                                        " does not exist");
+        }
     }
     if (kv_headroom_mib.has_value()) {
         if (options.kv_capacity.mode != KvCapacityMode::Automatic) {
@@ -2002,6 +2054,7 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
     }
     product::apply_default_ngram_draft_tokens(options.speculative, ngram_width_explicit);
     product::apply_automatic_speculation(options.speculative, spec_explicit);
+    options.kv_cache_automatic = !kv_dtype_explicit;
     product::validate_speculative_cli_options(options.speculative);
     if (options.vision_residency != VisionResidency::Resident && !options.enable_vision) {
         throw product::OptionConflict({"vision-residency", "vision"},
@@ -2072,7 +2125,8 @@ ServeOptions parse_serve_options(const product::CommandLine& command_line) {
         },
         &effective);
     if (artifact_given) { options.artifact_path = *command_line.artifact; }
-    options.effective_arguments = product::redact_arguments(std::move(effective), {"--api-key"});
+    options.effective_arguments =
+        product::redact_arguments(std::move(effective), {"--api-key", "--admin-token"});
     options.startup_argv        = {command_line.program};
     if (artifact_given) { options.startup_argv.push_back(*command_line.artifact); }
     options.startup_argv.insert(options.startup_argv.end(), options.effective_arguments.begin(),
@@ -2099,7 +2153,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         product::read_command_line(argc, argv, product::PositionalArtifact::Taken));
     std::vector<std::string> startup;
     for (int i = 0; i < argc; ++i) { startup.emplace_back(argv[i] == nullptr ? "" : argv[i]); }
-    options.startup_argv = product::redact_arguments(std::move(startup), {"--api-key"});
+    options.startup_argv =
+        product::redact_arguments(std::move(startup), {"--api-key", "--admin-token"});
     return options;
 }
 

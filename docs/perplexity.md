@@ -24,9 +24,14 @@ artifact (`--config FILE`); the command line overrides it.
 The default evaluation uses a 4,096-token context and a 2,048-token stride. Use `--context` and
 `--stride` to change that protocol, or score one UTF-8 file with `--text FILE`. The available Main
 KV representations are the server's ten: `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`,
-`rk2v4-e8`, `nvfp4`, `k8v4`, and `bf16p`, which scores as `bf16` does. Flint keeps its cache in F16 and DeepSeek-V4.1 in BF16; both are
-scored with `--kv-dtype bf16`. DeepSeek-V4.1 reads every window from `<｜begin▁of▁sentence｜>`, which
-it puts in front of a window that lacks it; the scored tokens stay the window's own.
+`rk2v4-e8`, `nvfp4`, `k8v4`, and `bf16p`, which scores as `bf16` does. Inkling 2 scores its MXFP8
+default without `--kv-dtype` (`mxfp8`) and quantizes the same eight full-attention visits under
+`int8`, `rk8v4` or `rk4v4`; the windowed rings stay F16 ([Inkling 2](inkling2.md#kv-cache)). Flint
+scores its F16 cache without `--kv-dtype` (or with `bf16`) and quantizes its 14 full-attention
+blocks under `int8`, `rk8v4` or `rk4v4` ([Flint](flint.md#kv-cache)); DeepSeek-V4.1 keeps BF16 and
+scores it without `--kv-dtype` or with `--kv-dtype bf16`. DeepSeek-V4.1 reads every window from
+`<｜begin▁of▁sentence｜>`, which it puts in front of a window that lacks it; the scored tokens stay
+the window's own.
 
 Seven of them were measured on this corpus with Qwen3.8-27B on an RTX 3090; the results, alongside
 each format's size and decode speed, are in [`docs/config-calculator.html`](config-calculator.html).
@@ -38,7 +43,7 @@ The evaluator also takes the server's `--devices` (one pipeline stage per GPU, o
 `--tensor-parallel-prompt-partials` a share of every layer per GPU),
 `--invariant-attention`, its
 MoE residency options (`--expert-residency`, `--expert-cache-mib`) for native Qwen, Gemma 4, Flint,
-DeepSeek-V4.1 and Qwen3.8-Flash-Next, its Qwen3.8-Flash-Next n-gram options (`--ngram-table`,
+DeepSeek-V4.1, Inkling 2 and Qwen3.8-Flash-Next, its Qwen3.8-Flash-Next n-gram options (`--ngram-table`,
 `--ngram-residency`, `--ngram-io`, `--ngram-io-depth`, `--ngram-hot-profile`, `--ngram-ram-mib`,
 `--ngram-lock`, `--ngram-dedupe`, `--no-ngram-table`; DeepSeek-V4.1's Engram table takes them
 too) and `--kv-resident` (streamed sparse-attention KV), and its

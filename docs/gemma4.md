@@ -1,9 +1,13 @@
-# Gemma 4 26B-A4B
+# Gemma 4 26B-A4B and 31B
 
-NInfer runs Google's Gemma 4 26B-A4B (`Gemma4ForConditionalGeneration`: the text model
-`Gemma4ForCausalLM` and its vision tower) from the official quantization-aware-trained GGUF release
-[`google/gemma-4-26B-A4B-it-qat-q4_0-gguf`](https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-gguf).
-It is its own model family next to Qwen3.5 and Flash-Next: its own executor
+NInfer runs two of Google's Gemma 4 models (`Gemma4ForConditionalGeneration`: the text model
+`Gemma4ForCausalLM` and its vision tower) from the official quantization-aware-trained GGUF
+releases: the MoE 26B-A4B,
+[`google/gemma-4-26B-A4B-it-qat-q4_0-gguf`](https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-gguf),
+and the dense 31B,
+[`google/gemma-4-31B-it-qat-q4_0-gguf`](https://huggingface.co/google/gemma-4-31B-it-qat-q4_0-gguf)
+([below](#gemma-4-31b)). This guide describes the 26B-A4B; the 31B runs the same way except where
+its section says otherwise. It is its own model family next to Qwen3.5 and Flash-Next: its own executor
 (`src/models/gemma4`) and Engine core (`src/runtime/engine/gemma4_core`), sharing the Qwen3.5
 frontend for tokenization, chat templates, output parsing and the serving protocols.
 
@@ -26,7 +30,7 @@ frontend for tokenization, chat templates, output parsing and the serving protoc
   attention derives each key from it as it reads it, with the same rotations the keys were stored
   with.
 - **Every quantized KV-cache format of the engine.** `--kv-dtype` keeps the caches in F16 (`bf16`, the
-  default) or in int8, fp8, rk8v4, nvfp4, k8v4, rk4v4, rk4v4-e8 or rk2v4-e8, the engine's own
+  default, or `fp16`) or in int8, fp8, rk8v4, nvfp4, k8v4, rk4v4, rk4v4-e8 or rk2v4-e8, the engine's own
   codecs; see [below](#kv-cache-formats). `bf16p` packs BF16 rows, so Gemma, whose plain cache
   is F16, refuses it.
 - **Speculative decoding with the release's assistant.** The multi-token-prediction drafter Google
@@ -48,27 +52,39 @@ frontend for tokenization, chat templates, output parsing and the serving protoc
   the model continues with the arguments; see [forced selection](serving.md#function-tools)),
   streaming, reasoning in its own channel when thinking is on, and causal scoring
   (`ninfer-perplexity`).
+- **Dependent launches.** On sm_90 and newer cards the decode graph launches each kernel as a
+  programmatic dependent of the one before it
+  ([programmatic dependent launch](maintainer/op-development.md#programmatic-dependent-launch)).
+  Greedy decode with MTP drafts on an RTX 5090 went from 371.1 to 382.7 tok/s with the same tokens.
 - **Prompt chunks without logits.** A chunk before the prompt's last, or before a scoring call's
   first scored position, runs its last block only up to the key/value store: that block's attention
   output, MLP and experts feed only the head. The stored rows are those of the whole block, so
   caches and logits keep their bits.
 - **Thinking.** Off unless asked for, as the release's chat template has it: a request turns it on
   with `chat_template_kwargs: {"enable_thinking": true}`, and the reasoning arrives as
-  `reasoning_content`. Gemma has no early-close control, so thinking budgets do not apply and the
-  [reasoning-loop guard](serving.md#openai-chat-completions) stops a looping reply under `conclude`
-  as under `stop`.
+  `reasoning_content`. A thinking budget (`--thinking-budget`, `--default-thinking-budget`, a
+  request's) counts the tokens of the thought channel the model opens; once reached, the engine
+  closes the channel with Qwen's early-close guidance and `<channel|>`, masks `<|channel>` for the
+  rest of the response, and the model answers. `--reasoning-loop conclude` closes it the same way
+  ([Serving](serving.md#openai-chat-completions)).
 - **Sampling defaults.** The release's `generation_config.json` (temperature 1.0, top-p 0.95) with
   top-k held at the sampler's 20 candidates.
 
 Not built for this family: DFlash and ngram copy drafts, pipeline stages over several GPUs, and of
-the context cache the shared paged KV pool, the disk tier and session slots. Several GPUs divide
+the context cache the shared paged KV pool. Several GPUs divide
 the routed experts of the MoE model instead (`--devices 0,1 --tensor-parallel`, experts on the
 devices; [expert parallelism](maintainer/pipeline-stages.md#expert-parallelism-of-the-other-moe-families)).
 
-The Q4_K async prompt tiles (`gguf_moe_matrix/q4_k`) apply to the Q4_K gate/up experts of a
-release such as HauhauCS's whose expert tables are 16-byte aligned (`MoeTable::aligned16`): device
-banks, and the delivery's banks and slots that bring host or disk experts to the device. The QAT
-Q4_0 release has no Q4_K experts.
+Prompt chunks stage the matrix kernel's tiles through `cp.async` (`gguf_matrix/<format>` and
+`gguf_moe_matrix/<format>`, [device profiles](device-profiles.md#what-is-calibrated)) at every
+column tile, 16 to 128 columns, for the QAT release's Q4_0 projections and experts, and for the
+Q4_K, Q5_0, Q5_K and Q8_0 matrices of a mixed-format GGUF such as HauhauCS's, where the card's
+profile takes them. The 26B's 704-wide expert rows and the 2,112-wide rows of its dense MLP start
+on 4 bytes only; staged, they copy 4 bytes at a time. Experts need 16-byte aligned expert pointers
+(`MoeTable::aligned16`): device banks, and the delivery's banks and slots that bring host or disk
+experts to the device. The values are those of the synchronous loop. On an RTX 3090 (350 W) a
+3,655-token prompt of the QAT release prefills at 7.61-7.62k instead of 6.43-6.51k tokens/s with
+the synchronous loop, and a 296-token prompt at 3.35k instead of 3.19k, with the same perplexity.
 
 ## Converting
 
@@ -168,8 +184,9 @@ does not fit is refused at startup with the numbers.
 ## KV-cache formats
 
 `--kv-dtype` selects the caches' storage. The 16-bit default keeps F16 rows (the prompt kernels'
-type). Every other format of the engine stores its codes and scales per 256-wide block with the
-engine's D256 codecs (`ops/kv_cache`), each block's codes and scales in two planes:
+type), which `bf16` and `fp16` both select. Every other format of the engine stores its codes and
+scales per 256-wide block in the engine's KV row codings (`ops/kv_cache/kv_row.h`, the same that
+Inkling 2's and Flint's 128-wide planes use), each block's codes and scales in two planes:
 
 | `--kv-dtype` | sliding blocks: keys | sliding blocks: values | full-attention plane |
 |---|---|---|---|
@@ -311,11 +328,16 @@ keeps instead of prefilling those tokens again:
   the assistant. Requests with the same system prompt resume after it on any sequence, also when
   they arrive together, since a prompt that has not started prefilling looks for images again at
   its first chunk. A disposable request (a decision read) leaves no image of its end.
+- **Documents, files and slots.** A long last message also keeps a state inside it, where a later
+  prompt with the same document and another question resumes; images go to a disk tier, a prefix
+  cache file and session slot files ([Serving](serving.md#context-cache-of-the-other-families)).
 
 A sliding-window state cannot be cut back at will: the rings at a position hold the window before
 it, and each block's window reaches further back through the blocks below. A prompt therefore
 resumes only where a state was kept (a sequence's end, its checkpoint, a stored image), not at an
-arbitrary common prefix.
+arbitrary common prefix. A sequence's own state can go back a little: a next prompt that departs
+from what the sequence read after its last prompt (a reply the template renders otherwise) resumes
+where it departs, the sequence taken back there, while its rings still hold that position's window.
 
 A turn that a stop string ends is the exception. Its state has read the tokens the cut removed, so
 the sequence goes back to where the stop string's match began, the state its visible text
@@ -562,7 +584,9 @@ memory and `disk` in the artifact's files, read through the OS page cache. Both 
 with the resident kernels and outputs (top-8 GeGLU, the 704-wide middle, the dense branch and the
 sandwich norms) on the GPU, except the share of decode and verification misses that CPU threads
 compute (the CPU share below). A 12 GB card runs the model this way; the GPU holds 1.7 GiB of other
-weights instead of 13.7 GiB.
+weights instead of 13.7 GiB. Host experts the pinned block cannot hold (`--expert-host-mib`, or a
+host that cannot pin them all, such as Windows past about half its RAM) are read from the
+artifact's files as disk experts are, with the same results.
 
 ```sh
 ninfer /models/gemma4.ninfer --expert-residency host
@@ -653,3 +677,98 @@ the layer banks, metadata and pinned buffers; runtime expert counters start at z
 Disk residency uses two bounded pinned transfer halves and no application RAM cache. Flash-Next's
 `--expert-misses`, `--expert-tail-skip`, `--expert-prefill-buffers` and `--expert-cache-adaptive`
 do not apply. Gemma model suspend is unsupported, as with resident experts.
+
+## Gemma 4 31B
+
+The dense 31B converts and runs as the 26B-A4B does, with these differences:
+
+- **The model.** 60 blocks of hidden width 5376: five sliding-window blocks (window 1024, head
+  width 256, 32 query and 16 key/value heads) to every full-attention block (head width 512, 32
+  query heads over 4 key/value heads, keys used as values), each with a dense GeGLU MLP of width
+  21,504 and no routed experts. The weights are the GGUF's Q4_0 blocks with a Q6_K token table,
+  16.4 GiB on the GPU.
+- **Its own assistant.** Google's QAT assistant for the 31B (four blocks of width 1024 reading the
+  target's 5376-wide states), in Unsloth's Q4_0 GGUF (280 MB), drafts as the 26B's does.
+- **One GPU.** With no routed experts there is nothing to place in host memory or on disk and
+  nothing to divide: `--expert-residency host|disk` and `--tensor-parallel` refuse the model.
+- **Four times the cache.** Twice the sliding blocks with twice the key/value heads, and twice the
+  full-attention blocks with twice the heads: each sequence's sliding rings take 800 MiB in F16
+  (four times the [26B's](#memory-and-context), as for every `--kv-dtype`), and its full-attention
+  values 40,960 bytes per context token in F16.
+
+Converting with the assistant and the vision tower:
+
+```bash
+mkdir -p models/gemma4-31b/hf
+for f in config.json tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json \
+         processor_config.json; do
+  curl -fsSL -o models/gemma4-31b/hf/$f https://huggingface.co/google/gemma-4-31B-it/resolve/main/$f
+done
+hf download google/gemma-4-31B-it-qat-q4_0-gguf gemma-4-31B_q4_0-it.gguf gemma-4-31B-it-mmproj.gguf \
+  --local-dir models/gemma4-31b
+hf download unsloth/gemma-4-31B-it-qat-GGUF mtp-gemma-4-31B-it.gguf --local-dir models/gemma4-31b
+
+python -m tools.convert --model models/gemma4-31b/hf --recipe gemma4_gguf --components text,mtp,vision \
+  --source gguf=models/gemma4-31b/gemma-4-31B_q4_0-it.gguf \
+  --source mtp=models/gemma4-31b/mtp-gemma-4-31B-it.gguf \
+  --source vision=models/gemma4-31b/gemma-4-31B-it-mmproj.gguf --name Gemma-4-31B-it-QAT-Q4_0-MTP \
+  --out models/gemma-4-31B-it-QAT-Q4_0-MTP-ninfer-v3.ninfer --device cpu
+```
+
+The conversion takes about a minute and writes one 17.77 GiB file, published as
+[WaveCut/gemma-4-31B-it-QAT-Q4_0-MTP-NInfer-v3](https://huggingface.co/WaveCut/gemma-4-31B-it-QAT-Q4_0-MTP-NInfer-v3).
+
+The longest `--max-context` that `ninfer-serve` starts with for one sequence on the 24 GB RTX 3090,
+context cache on; the first five leave 0.29 to 0.32 GiB free after startup:
+
+| configuration | `--max-context` |
+|---|---:|
+| `--kv-dtype bf16` | 101,376 |
+| `--kv-dtype bf16 --spec mtp --draft-tokens 2` | 87,040 |
+| `--kv-dtype bf16 --vision` | 73,728 |
+| `--kv-dtype bf16 --spec mtp --draft-tokens 2 --vision` | 59,392 |
+| `--kv-dtype int8` | 179,200 |
+| `--kv-dtype rk4v4` | 262,144, the model's limit |
+
+Perplexity of the same eight 8,192-token windows of the NInfer source stream as
+[above](#quality-and-speed) (65,528 scored tokens), on an RTX 3090:
+
+| `--kv-dtype` | 31B | 26B-A4B |
+|---|---:|---:|
+| `bf16` | 11.922 | 21.061 |
+| `int8` | 11.899 | 21.170 |
+| `fp8` | 11.985 | 21.070 |
+| `rk8v4` | 11.796 | 20.281 |
+| `nvfp4` | 13.267 | 22.465 |
+| `k8v4` | 13.030 | 24.096 |
+| `rk4v4` | 12.118 | 20.419 |
+| `rk4v4-e8` | 12.063 | 19.472 |
+| `rk2v4-e8` | 20.360 | 21.937 |
+
+On the 31B `int8` and `fp8` stay within 0.6% of F16 and the formats with INT4 values within 1.6%
+(`rk8v4` 1.1% below it); NVFP4 values (`nvfp4`, `k8v4`) cost 9-11%, and 2-bit keys (`rk2v4-e8`)
+71%, where the 26B's cost 4%: take a 4-bit format as the 31B's smallest.
+
+Speed on the RTX 3090 (390 W, a CUDA 12.9 build): `ninfer_bench` prefills 2,048 and 8,192 tokens
+at 1,324 and 1,214 tok/s and decodes 42.3 tok/s on an empty context; with two drafts a round it
+decodes 61.8 tok/s after an 8,192-token prompt of the bench corpus (acceptance 0.51). Three greedy
+chat answers of 229 to 384 tokens decode at 42.1 to 42.2 tok/s plainly, 72.3 to 77.6 with one
+draft, 94.8 to 109.5 with two and 98.0 to 132.4 with three (acceptance 59% to 96%), each answer
+byte for byte the plain one. llama.cpp was not measured on the 31B.
+
+Numerical checks on the 31B artifact:
+
+- The row kernels (the norm, the attention residual and the MLP combine), which hold two float4s
+  a thread past width 4096, and the decode attention at the 31B's heads match FP64 oracles at
+  widths 5376 and 2816 (`ninfer_gemma4_kernels_test`); the KV formats, the vision kernels and the
+  CPU vision tower pass as for the 26B.
+- End to end, [`tools/reference/gemma4.py`](../tools/reference/gemma4.py) runs the dense blocks:
+  over the first 160 tokens of a WikiText window NInfer's NLL of the 159 targets is 1125.76 nats
+  against the FP64 oracle's 1128.34.
+- The assistant's three drafts after the greedy anchor of a 32-token prompt are the FP64 oracle's
+  (top-2 margins 11.8, 5.6 and 10.4 logits); verifying them in one pass gives the logits of
+  decoding them one at a time bit for bit; the prompt route and the decode route agree on all of
+  the last 256 greedy tokens past the sliding window (`ninfer_gemma4_assistant_real_test`).
+- The vision tower on a 1024 x 1024 picture (256 soft tokens): the device tower within 2.07%
+  relative RMS error of the FP64 oracle, every token's cosine at least 0.9965; the CPU tower within
+  0.17% and 0.999998 (`ninfer_gemma4_vision_real_test`).

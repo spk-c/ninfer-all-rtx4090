@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -58,6 +59,7 @@ struct MissLayer {
         std::span<const ExpertLocation> located; // disk experts: where each expert's bytes are
     };
     std::array<Projection, 3> projections;   // gate, up, down
+    std::vector<float> expert_scales;        // optional FP32 [experts, 3], ordinary MoE products
     const void* const* gate_table = nullptr; // the device table the cached stage reads
     // Device memory holding this layer's cached experts (ExpertCache::storage): a gate entry
     // inside any of its blocks is resident.
@@ -102,6 +104,13 @@ struct MissOptions {
     std::uint32_t tail_skip_rank = 0;
     // Disk experts: a drive mirror and the direct path (core/expert_disk.h).
     ExpertDiskReads disk{};
+    // Whether a narrow call's copies (staged and admitted experts, its missing pairs) run as a
+    // kernel on the copy stream that reads the source in place, instead of the copy engine. Where
+    // a device's copies queue behind one another (serialized_copy_queue), the service's copy-engine
+    // copies would wait behind the copies a graph queued after a replayed layer's wait for them.
+    // Unset: NINFER_MISS_COPY_KERNEL=0|1 for A/B runs and diagnosis, else serialized_copy_queue().
+    // Wide calls copy with the copy engine.
+    std::optional<bool> copy_kernel;
 };
 
 struct MissStats {

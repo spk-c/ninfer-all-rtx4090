@@ -42,6 +42,11 @@ struct ServeOptions {
     // worker of their own (0 = off).
     int stats_port = 0;
     std::string api_key;                          // empty => no auth
+    // --admin-token: the credential of the admin routes, of which POST /shutdown -- the HTTP form
+    // of the Ctrl+Break graceful stop (listener close, requests cancelled, prefix cache saved,
+    // exit) -- is the first. A request must carry the token as a bearer or x-api-key.
+    // Empty => no admin route is registered.
+    std::string admin_token;
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::string request_log_jsonl;                // empty => structured request logging disabled
     // --request-log-max-mib: rotate the request log at this size (0 keeps one unbounded file),
@@ -96,9 +101,18 @@ struct ServeOptions {
     NgramTableOptions ngram_table;
     std::optional<std::uint32_t> kv_resident_positions; // Flash-Next: --kv-resident
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
+    bool kv_cache_automatic                = false; // no --kv-dtype (EngineOptions::kv_cache_automatic)
     SpeculativeOptions speculative;
     bool ngram_native_sessions = false;
     ContextCacheOptions context_cache;
+    // The option that named the hybrid prefix cache (--use-alt-prefix-caching or one of its
+    // settings, --prefix-cache-file only when no other does); empty when it is the default. A
+    // family without the hybrid cache refuses it, except --prefix-cache-file in the families with
+    // an Engine core of their own, which save their own cache to it.
+    std::string hybrid_cache_flag;
+    // The option that selected the checkpoint catalog beside --prefix-cache-file, which only the
+    // families with an Engine core of their own then accept.
+    std::string catalog_cache_flag;
     bool enable_vision      = false;
     VisionResidency vision_residency       = VisionResidency::Resident;
     std::uint32_t vision_max_merged_tokens = 16384;
@@ -207,6 +221,9 @@ struct ServeOptions {
     // --unconstrained-response-format: without structured_output, generate a JSON or JSON Schema
     // request unconstrained instead of refusing it, for clients that always send a format.
     bool unconstrained_response_format = false;
+    // --no-structured-output-instruction: a request with a response format keeps its messages as
+    // sent, without the leading format instruction; the token grammar alone enforces the format.
+    bool structured_output_instruction = true;
     // --assistant-prefill: a Chat Completions request whose last message is the assistant's
     // continues that message in place, as /v1/messages always does.
     bool assistant_prefill = false;
