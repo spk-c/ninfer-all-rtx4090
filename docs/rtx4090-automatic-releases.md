@@ -62,6 +62,14 @@ test_ref to master, and publish to false. It builds that source revision but
 does not create or alter any release. Tag and release assets must remain
 immutable.
 
+Build-only dry runs (CI test branch or explicit test_ref) export individual
+400 MiB archive volumes as rtx4090-build-only-part-001 through -004,
+with the checksum manifest in part 001. This keeps each download below
+the 512 MiB transfer cap. Retrieve every present part, verify every volume
+against the manifest, and extract the first volume with 7-Zip. Release/tag
+packaging and publication still use the existing 1900 MiB volumes and the
+canonical release artifact. More than four dry-run volumes fails explicitly.
+
 ## GPU qualification remains separate
 
 GitHub-hosted Windows runners have NO RTX 4090. Their checks cannot

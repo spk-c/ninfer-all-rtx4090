@@ -177,7 +177,17 @@ $innerHashes = Get-ChildItem -LiteralPath $ProductRoot -File -Recurse | Sort-Obj
 [IO.File]::WriteAllText((Join-Path $ProductRoot 'SHA256SUMS.txt'), (($innerHashes -join "`n") + "`n"), [Text.ASCIIEncoding]::new())
 # Always use volumes. Every asset stays below GitHub's 2 GiB limit, even as the fatbins grow.
 Write-Host "Creating archive: $ArchivePath"
-& $SevenZip a -t7z -mx=3 -bsp1 -v1900m $ArchivePath $ProductRoot
+$VolumeMiB = 1900
+if ($env:NINFER_ARCHIVE_VOLUME_MIB) {
+    if ($env:NINFER_ARCHIVE_VOLUME_MIB -notmatch '^[0-9]{2,4}$') {
+        throw 'NINFER_ARCHIVE_VOLUME_MIB must be an integer from 64 to 1900'
+    }
+    $VolumeMiB = [int]$env:NINFER_ARCHIVE_VOLUME_MIB
+    if ($VolumeMiB -lt 64 -or $VolumeMiB -gt 1900) {
+        throw 'NINFER_ARCHIVE_VOLUME_MIB must be an integer from 64 to 1900'
+    }
+}
+& $SevenZip a -t7z -mx=3 -bsp1 ("-v" + $VolumeMiB + "m") $ArchivePath $ProductRoot
 if ($LASTEXITCODE -ne 0) { throw 'Archive creation failed' }
 Write-Host "Verifying archive: $ArchivePath.001"
 & $SevenZip t -bsp1 "$ArchivePath.001"

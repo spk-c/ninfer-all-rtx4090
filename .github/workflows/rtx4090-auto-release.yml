@@ -183,6 +183,7 @@ jobs:
       - name: Package and verify Windows CUDA 13.4 SM89 release
         timeout-minutes: 45
         env:
+          NINFER_ARCHIVE_VOLUME_MIB: ${{ (startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish)) && '400' || '1900' }}
           SHA: ${{ needs.source.outputs.sha }}
         run: |
           $env:NINFER_BUILD_ROOT=Join-Path $pwd 'build-release'
@@ -196,6 +197,11 @@ jobs:
           $parts=@(Get-ChildItem dist -File | Where-Object { $_.Name -match ('^'+[regex]::Escape($name)+'[.]7z[.][0-9]{3}$') } | Sort-Object Name)
           $sum=Join-Path $pwd "dist/SHA256SUMS-$name.txt"
           if (-not $parts.Count -or -not (Test-Path $sum)) { throw 'Missing archives' }
+          if ($env:NINFER_ARCHIVE_VOLUME_MIB -eq '400') {
+            if ($parts.Count -gt 4 -or @($parts | Where-Object Length -gt 400MB).Count) {
+              throw 'Build-only archive exceeds four bounded transfer artifacts.'
+            }
+          }
           $rows=@(Get-Content $sum | Where-Object { $_ -match '\S' })
           if ($rows.Count -ne $parts.Count) { throw 'Checksum manifest incomplete' }
           for($i=0;$i -lt $parts.Count;$i++){
@@ -209,12 +215,51 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Archive integrity failed' }
           Write-Host 'Cloud binary is GPU-unverified; only prerelease allowed.'
       - uses: actions/upload-artifact@v7
+        if: ${{ !(startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish)) }}
         with:
           name: rtx4090-verified-windows-release
           path: |
             dist/*.7z.*
             dist/SHA256SUMS-*.txt
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Upload build-only archive volume 001
+        if: ${{ startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtx4090-build-only-part-001
+          path: |
+            dist/*.7z.001
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Upload build-only archive volume 002
+        if: ${{ startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtx4090-build-only-part-002
+          path: dist/*.7z.002
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7
+      - name: Upload build-only archive volume 003
+        if: ${{ startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtx4090-build-only-part-003
+          path: dist/*.7z.003
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7
+      - name: Upload build-only archive volume 004
+        if: ${{ startsWith(github.ref, 'refs/heads/ci/rtx4090-shard-test/') || (github.event_name == 'workflow_dispatch' && inputs.test_ref != '' && !inputs.publish) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtx4090-build-only-part-004
+          path: dist/*.7z.004
+          if-no-files-found: ignore
           compression-level: 0
           retention-days: 7
       - name: Upload test failure diagnostics
