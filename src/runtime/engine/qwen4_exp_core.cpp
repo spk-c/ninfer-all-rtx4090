@@ -2953,6 +2953,11 @@ struct Qwen4ExpCore::Impl {
             sequences.push_back(request->slot);
             anchors.push_back(request->feed.front());
         }
+        std::uint32_t adaptive_context = 0;
+        for (const auto& request : batch) {
+            adaptive_context = std::max(adaptive_context, static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(request->position, ops::kContextBucketTokens.back())));
+        }
         const auto round_start = Clock::now();
         // With --adaptive-mtp the controller picks a lone request's steps from its draft survival
         // and the round times it has measured; a new request restarts its probe. A round of
@@ -2983,7 +2988,7 @@ struct Qwen4ExpCore::Impl {
                          1099511628211ULL;
             }
             steps = std::clamp<std::uint32_t>(
-                mtp_controller->select(signals, available, room, cohort), 1, drafts);
+                mtp_controller->select(signals, available, room, cohort, adaptive_context), 1, drafts);
         }
         std::vector<TokenId> all_drafts(b * drafts);
         std::vector<std::uint32_t> draft_extents(b, steps);
@@ -3329,7 +3334,7 @@ struct Qwen4ExpCore::Impl {
             const double round_seconds = seconds(round_start, Clock::now());
             if (lookups == 0) {
                 mtp_controller->observe_execution(static_cast<std::uint32_t>(b), steps,
-                                                  round_seconds);
+                                                  round_seconds, adaptive_context);
             }
             packed_planner.observe(static_cast<std::uint32_t>(verified_columns), round_seconds);
         }

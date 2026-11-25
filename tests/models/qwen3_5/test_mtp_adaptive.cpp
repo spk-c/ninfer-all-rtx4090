@@ -56,7 +56,14 @@ void costs_are_measured_then_scaled() {
     require(std::abs(costs.cost(1, 3) - 0.030F) < 1e-6F, "a measured width reports its seconds");
     require(std::abs(costs.cost(1, 1) - 0.030F * shape_one / shape_three) < 1e-6F,
             "an unmeasured width scales from the measured one");
-    require(costs.cost(2, 3) == shape_three, "batch sizes are measured separately");
+    require(std::abs(costs.cost(2, 3) - 0.0375F) < 1e-6F,
+            "unmeasured batch must use the measured unit scale");
+    for (int n = 0; n < 8; ++n) costs.observe(2, 3, 0.043);
+    require(std::abs(costs.cost(2, 3) - 0.043F) < 1e-6F, "batch costs are measured separately");
+    require(costs.cost(1, 3, 65536) == shape_three, "short-context cost leaked to long context");
+    for (int n = 0; n < 8; ++n) costs.observe(1, 3, 0.095, 65536);
+    require(std::abs(costs.cost(1, 3, 65536) - 0.095F) < 1e-6F, "long context not measured");
+    require(std::abs(costs.cost(1, 3, 1024) - 0.030F) < 1e-6F, "long context changed short cost");
 }
 
 struct Simulation {

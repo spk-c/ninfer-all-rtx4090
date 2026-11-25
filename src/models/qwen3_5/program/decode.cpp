@@ -821,7 +821,8 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             std::clamp(mtp_controller->select(
                            std::span<const MtpAdaptiveSignal* const>(signals.data(), lanes.size()),
                            std::span<const std::uint32_t>(available.data(), lanes.size()),
-                           std::span<const std::uint32_t>(room.data(), lanes.size()), cohort_key),
+                           std::span<const std::uint32_t>(room.data(), lanes.size()), cohort_key,
+                           maximum_frontier),
                        mtp_minimum_adaptive_window(draft_window), draft_window);
     }
     const std::uint32_t width = verify_window + 1;
@@ -977,7 +978,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             if (!matches[row].tokens.empty()) {
                 record_ngram_round(request, matches[row], pcur,
                                    static_cast<std::uint32_t>(accepted_i));
-            } else if (mtp_controller) {
+            } else if (mtp_controller && !copy_round) {
                 request.mtp_signal.observe(pcur, static_cast<std::uint32_t>(accepted_i));
             }
             request.pending = PendingCandidate{
@@ -993,7 +994,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         }
         if (mtp_controller && !copy_round) {
             mtp_controller->observe_execution(static_cast<std::uint32_t>(lanes.size()),
-                                              verify_window, seconds);
+                                              verify_window, seconds, maximum_frontier);
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(mtp_host_egress->licensed_tokens.data(),

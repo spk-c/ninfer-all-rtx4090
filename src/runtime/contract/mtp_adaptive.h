@@ -109,19 +109,24 @@ private:
 // size; with nothing measured every width is priced in the shape's own units.
 class MtpRoundCostModel final {
 public:
-    void observe(std::size_t batch_size, std::uint32_t window, double seconds) noexcept {
-        if (!valid(batch_size, window) || !(seconds > 0.0) || !std::isfinite(seconds)) { return; }
-        float& cost           = seconds_[batch_size - 1U][window - 1U];
-        std::uint16_t& counts = samples_[batch_size - 1U][window - 1U];
+    void observe(std::size_t batch_size, std::uint32_t window, double seconds, std::uint32_t context = 0) noexcept {
+        if (!valid(batch_size, window) || !(seconds > 0.0) || !std::isfinite(seconds) ||
+            !std::isfinite(static_cast<float>(seconds)) || !(static_cast<float>(seconds) > 0.0F))
+            return;
+        const auto bucket = bucket_index(context);
+        float& cost           = seconds_[bucket][batch_size - 1U][window - 1U];
+        std::uint16_t& counts = samples_[bucket][batch_size - 1U][window - 1U];
         const auto sample     = static_cast<float>(seconds);
         cost                  = counts == 0 ? sample : cost + kAlpha * (sample - cost);
         if (counts != UINT16_MAX) { ++counts; }
     }
 
-    [[nodiscard]] float cost(std::size_t batch_size, std::uint32_t window) const noexcept {
+    [[nodiscard]] float cost(std::size_t batch_size, std::uint32_t window,
+                             std::uint32_t context = 0) const noexcept {
         if (!valid(batch_size, window)) { return 1.0F; }
-        const auto& seconds = seconds_[batch_size - 1U];
-        const auto& samples = samples_[batch_size - 1U];
+        const auto bucket = bucket_index(context);
+        const auto& seconds = seconds_[bucket][batch_size - 1U];
+        const auto& samples = samples_[bucket][batch_size - 1U];
         if (samples[window - 1U] >= kMeasuredRounds) { return seconds[window - 1U]; }
         std::size_t reference = kAdaptiveMtpMaximumDrafts;
         for (std::size_t index = 0; index < kAdaptiveMtpMaximumDrafts; ++index) {
@@ -131,11 +136,40 @@ public:
             }
         }
         const float shape = kRelativeCost[window - 1U];
-        if (reference == kAdaptiveMtpMaximumDrafts) { return shape; }
-        return shape * seconds[reference] / kRelativeCost[reference];
+        if (reference != kAdaptiveMtpMaximumDrafts)
+            return shape * seconds[reference] / kRelativeCost[reference];
+
+        // Keep all batch costs in the same units within a context bucket. The
+        // two-round score can compare this batch with a smaller surviving one;
+        // adding an unscaled relative unit to measured seconds would overwhelm
+        // real timings. Use the nearest measured batch as an explicit prior.
+        for (std::size_t distance = 1; distance < kAdaptiveMtpMaximumBatch; ++distance) {
+            for (const auto candidate : {batch_size > distance ? batch_size - distance : 0,
+                                         batch_size + distance}) {
+                if (candidate == 0 || candidate > kAdaptiveMtpMaximumBatch) continue;
+                const auto& other = samples_[bucket][candidate - 1U];
+                std::size_t best = kAdaptiveMtpMaximumDrafts;
+                for (std::size_t i = 0; i < other.size(); ++i) {
+                    if (other[i] >= kMeasuredRounds &&
+                        (best == kAdaptiveMtpMaximumDrafts || other[i] > other[best])) best = i;
+                }
+                if (best != kAdaptiveMtpMaximumDrafts) {
+                    const float ratio = (1.0F + 0.25F * float(batch_size - 1U)) /
+                                        (1.0F + 0.25F * float(candidate - 1U));
+                    return shape * seconds_[bucket][candidate - 1U][best] /
+                           kRelativeCost[best] * ratio;
+                }
+            }
+        }
+        return shape;
     }
 
 private:
+    static constexpr std::size_t bucket_index(std::uint32_t context) noexcept {
+        return static_cast<std::size_t>(ops::select_context_bucket(
+            std::min(context, ops::kContextBucketTokens.back())));
+    }
+
     [[nodiscard]] static bool valid(std::size_t batch_size, std::uint32_t window) noexcept {
         return batch_size != 0 && batch_size <= kAdaptiveMtpMaximumBatch && window != 0 &&
                window <= kAdaptiveMtpMaximumDrafts;
@@ -148,9 +182,11 @@ private:
         1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F,
         1.388F, 1.442F, 1.496F, 1.550F, 1.604F, 1.658F, 1.712F};
 
-    std::array<std::array<float, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch> seconds_{};
-    std::array<std::array<std::uint16_t, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch>
-        samples_{};
+    using Costs = std::array<std::array<float, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch>;
+    using Counts = std::array<std::array<std::uint16_t, kAdaptiveMtpMaximumDrafts>,
+                              kAdaptiveMtpMaximumBatch>;
+    std::array<Costs, ops::kContextBucketCount> seconds_{};
+    std::array<Counts, ops::kContextBucketCount> samples_{};
 };
 
 class MtpAdaptiveBatchController final {
@@ -159,6 +195,8 @@ public:
     // many drafts ready: 3 where narrower widths cost about as much (the Qwen3.5 Programs, whose
     // drafts are ready before the round), 1 where each draft is a step of its own.
     void reset(std::uint32_t maximum_window, std::uint32_t floor_window = 3) noexcept {
+        costs_ = {};
+        context_ = 0;
         maximum_window_             = std::clamp(maximum_window, 1U, kAdaptiveMtpMaximumDrafts);
         floor_window_               = std::clamp(floor_window, 1U, maximum_window_);
         selected_window_            = default_startup_window();
@@ -174,12 +212,12 @@ public:
     }
 
     void observe_execution(std::uint32_t batch_size, std::uint32_t window,
-                           double seconds) noexcept {
+                           double seconds, std::uint32_t context = 0) noexcept {
         if (batch_size == 0 || batch_size > kAdaptiveMtpMaximumBatch || window == 0 ||
             window > maximum_window_ || !(seconds > 0.0) || !std::isfinite(seconds)) {
             return;
         }
-        costs_.observe(batch_size, window, seconds);
+        costs_.observe(batch_size, window, seconds, context);
         const std::size_t batch = batch_size - 1U;
         const std::size_t width = window - 1U;
         if (execution_round_ != UINT64_MAX) { ++execution_round_; }
@@ -192,14 +230,20 @@ public:
     [[nodiscard]] std::uint32_t select(std::span<const MtpAdaptiveSignal* const> signals,
                                        std::span<const std::uint32_t> available,
                                        std::span<const std::uint32_t> room,
-                                       std::uint64_t cohort_key) noexcept {
+                                       std::uint64_t cohort_key,
+                                       std::uint32_t context = 0) noexcept {
         last_transition_from_ = selected_window_;
         last_transition_to_   = selected_window_;
         if (signals.empty() || signals.size() > kAdaptiveMtpMaximumBatch ||
             signals.size() != available.size() || signals.size() != room.size()) {
             return selected_window_;
         }
-        if (selection_cohort_key_ != cohort_key) {
+        const auto bucket = [](std::uint32_t value) {
+            return ops::select_context_bucket(std::min(value, ops::kContextBucketTokens.back()));
+        };
+        const bool changed_context = bucket(context_) != bucket(context);
+        context_ = context;
+        if (selection_cohort_key_ != cohort_key || changed_context) {
             selected_window_            = startup_window(signals, available, room);
             candidate_window_           = selected_window_;
             rounds_at_window_           = 0;
@@ -355,7 +399,7 @@ private:
                               std::span<const std::uint32_t> room) const noexcept {
         float expected           = 0.0F;
         float future_expected    = 0.0F;
-        float cost               = costs_.cost(signals.size(), window);
+        float cost               = costs_.cost(signals.size(), window, context_);
         std::size_t future_batch = 0;
         for (std::size_t row = 0; row < signals.size(); ++row) {
             if (room[row] == 0) continue;
@@ -372,7 +416,7 @@ private:
         }
         if (future_batch != 0) {
             expected += future_expected;
-            cost += costs_.cost(future_batch, window);
+            cost += costs_.cost(future_batch, window, context_);
         }
         return expected / std::max(cost, 1e-6F);
     }
@@ -380,9 +424,9 @@ private:
     // A width whose cost exceeds what even full acceptance could repay against a narrower one.
     [[nodiscard]] bool physically_dominated(std::uint32_t window,
                                             std::size_t batch_size) const noexcept {
-        const float candidate_cost = costs_.cost(batch_size, window);
+        const float candidate_cost = costs_.cost(batch_size, window, context_);
         for (std::uint32_t narrower = 1; narrower < window; ++narrower) {
-            const float narrower_cost = costs_.cost(batch_size, narrower);
+            const float narrower_cost = costs_.cost(batch_size, narrower, context_);
             const float maximum_yield_ratio =
                 static_cast<float>(window + 1U) / static_cast<float>(narrower + 1U);
             if (candidate_cost >= narrower_cost * maximum_yield_ratio) { return true; }
@@ -400,6 +444,7 @@ private:
     }
 
     MtpRoundCostModel costs_;
+    std::uint32_t context_ = 0;
     std::uint32_t maximum_window_   = 1;
     std::uint32_t floor_window_     = 3;
     std::uint32_t selected_window_  = 1;
