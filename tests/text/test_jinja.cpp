@@ -7,6 +7,7 @@
 #include <io.h>
 #endif
 #include <future>
+#include <limits>
 #include <iostream>
 #include <stdexcept>
 
@@ -28,6 +29,8 @@ int language_semantics() {
     };
 
     const Example cases[]{
+        {"{{ n is divisibleby(-1) }}|{{ n is divisibleby(2) }}",
+         {{"n", std::numeric_limits<int64_t>::min()}}, "True|True"},
         {"{{ missing is undefined }}|{{ value is none }}|{{ value|default('fallback') }}|{{ "
          "value|default('fallback', true) }}",
          {{"value", nullptr}},
