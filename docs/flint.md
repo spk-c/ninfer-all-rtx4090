@@ -24,8 +24,9 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
 - **Attention.** Prompt chunks run llama.cpp's tensor-core flash attention with the sinks added to
   its softmax; decode runs a kernel of its own: one block per sequence, KV head and key split, whose
   eight warps are the eight query heads of a KV head reading each key tile once, merged with the
-  sinks in a second pass. The sliding blocks keep a ring of 768 positions per sequence, the
-  full-attention blocks every position, all in F16.
+  sinks in a second pass. The sliding blocks keep a ring of 768 positions per sequence in F16, the
+  full-attention blocks every position, in F16 or in a quantized `--kv-dtype` format
+  ([below](#kv-cache)).
 - **Requests.** One to eight concurrent sequences (`--max-concurrency`), prompt chunks of 2048
   tokens (1024 or 512 on a card without room for them), prefix reuse across turns and requests
   with host-memory images ([below](#prefix-reuse)), branched reads for
@@ -37,6 +38,10 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
   (`<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...</tool_call>`) returned as
   OpenAI tool calls, each value read by its declared parameter type. A forced `tool_choice` ends
   the generation prompt with `<tool_call>NAME`, so the model continues with the arguments.
+- **Dependent launches.** On sm_90 and newer cards the decode graph launches each kernel as a
+  programmatic dependent of the one before it
+  ([programmatic dependent launch](maintainer/op-development.md#programmatic-dependent-launch)).
+  Greedy decode on an RTX 5090 went from 334.9 to 358.0 tok/s with the same tokens.
 - **Prompt chunks without logits.** A chunk before the prompt's last, or before a scoring call's
   first scored position, runs its last block only up to the key/value store: that block's attention
   output and experts feed only the head. The stored rows are those of the whole block, so caches and
@@ -47,9 +52,11 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
   the assistant marker, the switch GLM's templates use for the same role-marker format, and Flint
   then answers at once; [typed decisions](serving.md#typed-decisions) read their labels there.
   Without it, a one-label question puts about 10^-11 of the first token's probability on the
-  labels, the rest on `<think>`. Flint has no early-close control, so thinking budgets do not
-  apply and the [reasoning-loop guard](serving.md#openai-chat-completions) stops a looping reply
-  under `conclude` as under `stop`.
+  labels, the rest on `<think>`. A thinking budget (`--thinking-budget`,
+  `--default-thinking-budget`, a request's) counts the tokens of the `<think>` block the model
+  opens; once reached, the engine closes the block with Qwen's early-close guidance and `</think>`,
+  masks `<think>` for the rest of the response, and the model answers. `--reasoning-loop conclude`
+  closes it the same way ([Serving](serving.md#openai-chat-completions)).
 - **Sampling defaults.** The release's: temperature 1.0, top-p 0.95, top-k 20.
 - **Speculative decoding by context lookup.** Recursive publishes no draft model. `--lookup-ngram
   N` proposes what followed the last N tokens' earlier occurrence in the sequence (up to
@@ -62,17 +69,24 @@ the Qwen3.5 frontend for tokenization, chat templates, output parsing and the se
   artifact's files, with a device cache and a CPU share of decode misses
   ([below](#expert-residency)).
 
-Not built for this family: the quantized `--kv-dtype` formats (the KV cache is F16), MTP, DFlash
+Not built for this family: the `--kv-dtype` formats other than `bf16`, `fp16`, `int8`, `rk8v4`
+and `rk4v4`, MTP, DFlash
 and n-gram copy drafts, rotation scaling (`--rope-yarn`, `--rope-scaling-factor`: the
 full-attention blocks have no rotation to scale), strict tool arguments and structured output beside
 tools (Flint's tool markup has no grammar here), images and video (Flint reads text only), pipeline
-stages, and of the context cache the shared paged KV pool, the disk tier and session slots. Several
+stages, and of the context cache the shared paged KV pool, whose options the server refuses at
+startup ([Serving](serving.md#context-cache-of-the-other-families)). Several
 GPUs divide the routed experts instead (`--devices 0,1 --tensor-parallel`, experts on the devices;
 [expert parallelism](maintainer/pipeline-stages.md#expert-parallelism-of-the-other-moe-families)).
 
-The Q4_K async prompt tiles (`gguf_moe_matrix/q4_k`) apply to the Q4_K gate/up experts that the
-UD-Q4_K_XL release stores in 3 of its 47 MoE blocks, on the device or brought to it from host
-memory or disk (16-byte aligned expert tables, `MoeTable::aligned16`).
+Prompt chunks stage the matrix kernel's tiles through `cp.async` (`gguf_matrix/<format>` and
+`gguf_moe_matrix/<format>`, [device profiles](device-profiles.md#what-is-calibrated)) at every
+column tile, 16 to 128 columns, for UD-Q4_K_XL's IQ4_XS experts, its Q4_K and Q5_K matrices and
+its Q8_0 attention, where the card's profile takes them, on the device or brought to it from host
+memory or disk (16-byte aligned expert pointers, `MoeTable::aligned16`). Q6_K and IQ3_S keep the
+synchronous loop. The values are those of the synchronous loop. On an RTX 3090 (350 W) with host
+experts a 3,502-token prompt prefills at 6.07-6.08k instead of 5.02k tokens/s with the
+synchronous loop, with the same perplexity.
 
 ## Converting
 
@@ -119,6 +133,57 @@ holds. With `--expert-residency host` the GPU keeps 1.9 GiB of weights, two laye
 cache of as many experts as fit, and the host pins 21.5 GiB for the routed experts; `disk` reads
 them from the artifact through the OS page cache and pins 137 MiB of transfer buffers.
 
+## KV cache
+
+Flint keeps its KV cache in F16 unless `--kv-dtype` names a quantized format; `bf16`, the default,
+and `fp16` both select F16. `int8` (int8 codes over one FP16 scale per 64 values), `rk8v4` (the
+same keys, and values as packed int4 over one scale per 32) and `rk4v4` (4-bit Lloyd-Max keys over
+the same values) store the 14 full-attention blocks, the part of the cache that grows with the
+context, in planes of codes and scales: a token's K and V there take 14.4, 11.2 and 7.7 KiB instead
+of F16's 28 KiB. The full blocks carry no rotary positions, so `rk4v4` rotates its keys: a key row
+is stored as H k / 8, H the 128-point Sylvester-Hadamard matrix, and the attention turns its queries
+by H / 16, which leaves every score as it was. Rotation lowered `rk4v4`'s mean NLL from 2.976107 to
+2.954204 over 61,623 tokens (from 2.990424 to 2.965850 over 8,798) and raised `rk8v4`'s from
+2.959716 to 2.962335 over 61,623 tokens (it lowered it from 2.967644 to 2.964361 over 8,798), so
+`rk8v4` stores its int8 keys as they are. Values are never rotated. The sliding blocks' rings of 768
+positions and a DSpine drafter's caches stay F16: a ring does not grow with the context.
+
+Decode reads the planes in its key-tile loader, which holds the next tile in registers as its stored
+codes and scales and decodes it as it enters shared memory, so the loads overlap the current tile's
+work. On an RTX PRO 4500 Blackwell (200 W, CUDA 13.4) after a 29,108-token prompt, 256 greedy
+tokens decoded at 188.5 and 188.1 tok/s with `int8` against 182.5 and 182.3 when each tile waited
+for its decoded words, and at 188.0 and 187.7 with `rk4v4` against 183.2 and 182.8, with the same
+text (November 23, 2026). A prompt chunk stores its rows into the planes and
+attends over the sequence's rows decoded back to F16 up to the chunk's end, in one staging buffer
+that every full block reuses: 2 KiB per context position (256 MiB at 131,072 tokens), growing with
+the prompts beside an elastic expert cache and counted in the startup line's workspace. The codes
+that `kv_store` writes, decoded on the host with their stored scales, stay within each coding's
+error of the rows (or of H k / 8); `kv_load` returns that decode rounded to FP16 bit for bit; the
+query rotation matches H q / 16 in FP64; and decode attention over the planes matches an FP64
+attention over those rows (`ninfer_flint_kv_planes_test`).
+
+| `--kv-dtype` | A token's full-block K and V | KV at `--max-context 40960` | Mean NLL, 8,798 tokens | Mean NLL, 61,623 tokens | 5K prompt: prefill, then decode | 30K prompt: prefill, then decode |
+|---|---:|---:|---:|---:|---:|---:|
+| `bf16` or `fp16` (F16) | 28 KiB | 1,238 MiB | 2.971122 | 2.959979 | 1.86k, 67.7-71.2 tok/s | 2.36k, 60.6-63.0 tok/s |
+| `int8` | 14.4 KiB | 692 MiB | 2.962291 (-0.30%) | 2.959655 (-0.011%) | 1.86k, 66.6 tok/s | 2.36k, 58.6 tok/s |
+| `rk8v4` | 11.2 KiB | 560 MiB | 2.967644 (-0.12%) | 2.959716 (-0.009%) | 1.85k, 66.8 tok/s | 2.36k, 59.0 tok/s |
+| `rk4v4` | 7.7 KiB | 419 MiB | 2.965850 (-0.18%) | 2.954204 (-0.20%) | 1.86k, 67.7 tok/s | 2.36k, 58.5 tok/s |
+
+UD-Q4_K_XL on an RTX 3090 (350 W, PCIe 4.0 x16) with host experts and a 1,024 MiB expert cache, a
+CUDA 13.4.3 build for `75;80;86;89;120a`, November 22, 2026. The NLL columns score the first 40,000
+bytes and all 277,332 bytes of the WikiText file `00.txt` in 4,096-token windows at a 2,048-token
+stride. That the quantized formats score below F16 is this text's spread, not a gain: `int8`'s
+-0.30% over 8,798 tokens shrinks to -0.011% over 61,623. Speed: one server per format at
+`--max-context 40960`, one run each (F16 twice), each prompt decoding up to 128 tokens. At 30K
+tokens the planes decode 3-7% slower than F16, and the staging buffer adds 80 MiB of workspace at
+40,960 tokens (805 against 725 MiB).
+
+Not built for Flint: `fp8` and `k8v4`, which `rk8v4` beats on size, speed and quality together on
+the Qwen models ([CLI](cli.md#context-and-memory)); `nvfp4`, 144 bytes per 128-value row against
+`rk4v4`'s 140 at a higher perplexity there; `rk4v4-e8`, `rk4v4`'s size with a per-value error no
+better than plain int4; `rk2v4-e8`, whose niche is a 1,048,576-token context; `bf16p`, whose packing
+covers 256-value rows; and `mxfp8`, Inkling 2's trained format.
+
 ## Prefix reuse
 
 With the context cache on (the default), a prompt resumes from a state a sequence or the host store
@@ -129,7 +194,7 @@ keeps instead of prefilling those tokens again:
   resumes from either.
 - **From host memory.** Before another request takes a sequence, what it held goes to an image in
   pinned host memory: the rings (53 MiB) and the full-attention keys and values up to its length
-  (28 KiB per token). A prompt on any sequence resumes from the longest image it starts with.
+  (28 KiB per token in F16, less in a [quantized format](#kv-cache)). A prompt on any sequence resumes from the longest image it starts with.
   `--host-kv-mib` (or `--host-cache-mib`) sets the store, 8 GiB by default, pinned at startup in
   8 MiB pages; the least recently used images go first, and a conversation's prefixes shorter than
   1,024 tokens are not kept.
@@ -138,10 +203,16 @@ keeps instead of prefilling those tokens again:
   boundary), and the state there goes to an image too when saving it and copying it back take less
   time than computing its tokens again (about 50 tokens on). A disposable request (a decision read)
   leaves no image of its end.
+- **Documents, files and slots.** A long last message also keeps a state inside it, where a later
+  prompt with the same document and another question resumes; images go to a disk tier, a prefix
+  cache file and session slot files ([Serving](serving.md#context-cache-of-the-other-families)).
 
 A sliding-window state cannot be cut back at will: the rings at a position hold the window before
 it, and each block's window reaches further back through the blocks below. A prompt therefore
-resumes only where a state was kept, not at an arbitrary common prefix.
+resumes only where a state was kept, not at an arbitrary common prefix. A sequence's own state can
+go back a little: a next prompt that departs from what the sequence read after its last prompt (a
+reply the template renders otherwise) resumes where it departs, the sequence taken back there,
+while its rings still hold that position's window.
 
 A turn that a stop string ends is the exception. Its state has read the tokens the cut removed, so
 the sequence goes back to where the stop string's match began, the state its visible text
@@ -218,10 +289,12 @@ repetitions, the first having spread ±22%.
   score alike: 15.270 against llama.cpp's 15.195 (+0.49%); per window the mean NLL differs by
   -0.012 to +0.022 nats. On 40 KB, device, host and disk experts give the same perplexity,
   19.560887.
-- **Branched reads.** `ninfer_flint_branches_real_test` (with `NINFER_FLINT_ARTIFACT`) checks
-  that a branch alone reads bit for bit as a plain chunk of its tokens; that beside another
-  branch, first or second, it reads the same whatever that branch holds; and that a read joining
-  the prompt's last chunk leaves nothing of its branches in the sequence.
+- **Branched reads and sequences.** `ninfer_flint_branches_real_test` (with
+  `NINFER_FLINT_ARTIFACT`; `NINFER_FLINT_EXPERTS=host` or `disk` on a 24 GB card) checks that a
+  branch alone reads bit for bit as a plain chunk of its tokens; that beside another branch, first
+  or second, it reads the same whatever that branch holds; that a read joining the prompt's last
+  chunk leaves nothing of its branches in the sequence; and that a prompt on the second sequence
+  reads bit for bit as on the first, one decode step of both giving both the same row.
 
 ### Rounding with the pass
 

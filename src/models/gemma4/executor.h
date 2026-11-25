@@ -58,7 +58,7 @@ struct ExecutorOptions {
     // media unit (an image or a video frame) has, which also bounds a batch of units the device
     // tower encodes at once. 0: text only.
     std::uint32_t vision_max_patches = 0;
-    // The caches' storage (kv_format.h); BFloat16 selects the F16 cache.
+    // The caches' storage (kv_format.h); BFloat16 and Float16 select the F16 cache.
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     // One checkpoint of every sequence's rings (snapshot/restore), allocated with the caches.
     bool checkpoints = true;
@@ -218,6 +218,11 @@ public:
     // round's drafts, and not before the sequence's last prompt, checkpoint or image; rings no
     // wider than the window hold it for the 32 decode steps after hold().
     bool rewind(std::uint32_t sequence, std::uint32_t tokens);
+    // How many positions past `position` (one the sequence has read, not before its last prompt,
+    // checkpoint or image) it may read and still rewind() to it: the rings' spare slots, or the
+    // rows a hold() at or before that position keeps; with `hold`, as if hold() marked it now.
+    [[nodiscard]] std::uint32_t rewind_reach(std::uint32_t sequence, std::uint32_t position,
+                                             bool hold) const;
     // The sequence may return to its current position: its next decode steps keep the rows they
     // overwrite in rings no wider than the window. release_hold() ends that.
     void hold(std::uint32_t sequence);

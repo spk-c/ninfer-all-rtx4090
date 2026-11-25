@@ -23,6 +23,15 @@ namespace ninfer {
 [[nodiscard]] std::optional<std::uint64_t>
 cgroup_remaining_bytes(const std::filesystem::path& cgroup_root, std::string_view proc_self_cgroup);
 
+// Page-locked memory this process may still register for the GPU whose adapter LUID is the 8 bytes
+// at `luid` (cudaDeviceProp::luid). On Windows a GPU's page-locked host memory is charged to its
+// shared WDDM segment, about half the RAM: that segment's budget less this process's use of it
+// (DXGI), else half the physical memory less 8 GiB when DXGI gives no answer. WSL2 charges the
+// same segment, about half of Windows' memory whatever the guest's: the same budget less use, read
+// through /dev/dxg, and empty when the driver gives none. Empty elsewhere, where a process locks
+// what the host has available.
+[[nodiscard]] std::optional<std::uint64_t> pinnable_host_memory_bytes(const void* luid) noexcept;
+
 // The tightest memory limit (not the remainder) any cgroup level above the process sets.
 [[nodiscard]] std::optional<std::uint64_t>
 cgroup_limit_bytes(const std::filesystem::path& cgroup_root, std::string_view proc_self_cgroup);

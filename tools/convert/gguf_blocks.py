@@ -378,16 +378,52 @@ def dequantize_nvfp4(blocks: np.ndarray) -> np.ndarray:
     return (_NVFP4_VALUES[codes] * scale).reshape(rows, -1)
 
 
+def dequantize_mxfp4(blocks: np.ndarray) -> np.ndarray:
+    """ggml MXFP4 rows: 32 values per 17-byte block, an E8M0 exponent byte e then 16 code bytes;
+    value j is kvalues[c] * 2^(e - 128) (kvalues doubled), c the low nibble of byte j for j < 16
+    and the high nibble of byte j - 16 after. Exact in FP32."""
+
+    rows = blocks.shape[0]
+    b = np.ascontiguousarray(blocks).reshape(rows, -1, 17)
+    scale = np.ldexp(np.float32(1.0), b[..., 0].astype(np.int32) - 128).astype(np.float32)
+    q = b[..., 1:]
+    codes = np.concatenate([q & 15, q >> 4], axis=-1)
+    return (_NVFP4_VALUES[codes] * scale[..., None]).reshape(rows, -1)
+
+
+def mxfp4_as_q8_0(blocks: np.ndarray) -> np.ndarray:
+    """The same values as Q8_0 rows, exactly: per block the codes' doubled values as q and
+    d = 2^(e - 128) as binary16, which holds it for e in [104, 143]. A block outside that range
+    raises instead of rounding."""
+
+    rows = blocks.shape[0]
+    b = np.ascontiguousarray(blocks).reshape(rows, -1, 17)
+    exponent = b[..., 0].astype(np.int32) - 128
+    if exponent.size and (exponent.min() < -24 or exponent.max() > 15):
+        raise ValueError(f"MXFP4 scales 2^{exponent.min()}..2^{exponent.max()} leave binary16")
+    q = b[..., 1:]
+    codes = np.concatenate([q & 15, q >> 4], axis=-1)
+    out = np.empty((rows, b.shape[1], 34), dtype=np.uint8)
+    out[..., :2] = np.ldexp(np.float32(1.0), exponent).astype("<f2")[..., None].view(np.uint8)
+    out[..., 2:] = _NVFP4_VALUES[codes].astype(np.int8).view(np.uint8)
+    out = out.reshape(rows, -1)
+    if not np.array_equal(dequantize_q8_0(out), dequantize_mxfp4(blocks)):
+        raise AssertionError("MXFP4 to Q8_0 changed a value")
+    return out
+
+
 GGML_Q4_0 = 2
+GGML_MXFP4 = 39
 GGML_NVFP4 = 40
 _LOCAL_DECODERS = {GGML_Q2_0: dequantize_q2_0, GGML_Q4_0: dequantize_q4_0,
-                   GGML_Q8_0: dequantize_q8_0, GGML_NVFP4: dequantize_nvfp4}
+                   GGML_Q8_0: dequantize_q8_0, GGML_MXFP4: dequantize_mxfp4,
+                   GGML_NVFP4: dequantize_nvfp4}
 
 
 def dequantize_blocks(type_id: int, blocks: np.ndarray) -> torch.Tensor:
     """FP32 values ``[rows, columns]`` of encoded ggml rows ``blocks`` (``uint8 [rows, row
-    bytes]``) of block type `type_id`: local decoders for Q2_0, Q4_0, Q8_0 and NVFP4, gguf-py's
-    for the others."""
+    bytes]``) of block type `type_id`: local decoders for Q2_0, Q4_0, Q8_0, MXFP4 and NVFP4,
+    gguf-py's for the others."""
 
     rows = blocks.shape[0]
     local = _LOCAL_DECODERS.get(type_id)
@@ -486,14 +522,23 @@ def bf16_source(
     gguf: GGUFFile, tensor: str, shape: tuple[int, int], stored_rows: int | None = None
 ) -> LogicalSource:
     """A stored BF16 matrix as its exact words, read a run of rows at a time; rows past
-    ``stored_rows`` (when ``shape[0]`` is larger) are zero padding."""
+    ``stored_rows`` (when ``shape[0]`` is larger) are zero padding. A stack of matrices (an
+    expert bank ``[experts, rows, k]``) is addressed by its flattened rows, matrix-major, as the
+    file stores them."""
 
     real = shape[0] if stored_rows is None else stored_rows
+    info = gguf.info(tensor)
+    stored = int(np.prod(info.shape[:-1])) if len(info.shape) > 1 else 1
+    if info.type_id != TYPE_BF16 or info.shape[-1] != shape[1] or stored != real:
+        raise ValueError(f"{tensor}: stored {info.type_name} {list(info.shape)}, expected BF16 "
+                         f"rows x columns ({real}, {shape[1]})")
+    row_bytes = 2 * shape[1]
 
     def values(first: int, last: int) -> torch.Tensor:
         parts = []
         if first < min(last, real):
-            words = gguf.read_bf16_words(tensor, first, min(last, real))
+            raw = gguf.tensor_bytes(tensor, first * row_bytes, min(last, real) * row_bytes)
+            words = np.frombuffer(raw, dtype="<u2").copy()
             parts.append(
                 torch.from_numpy(words.view(np.int16)).view(torch.bfloat16).reshape(-1, shape[1])
             )

@@ -28,7 +28,8 @@ inline constexpr bool kTextMode =
     Mode == RopeKernelMode::DflashText1D;
 
 std::int64_t token_stride(const Tensor* tensor) {
-    return tensor == nullptr ? 0 : tensor->nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16));
+    return tensor == nullptr ? 0
+                             : tensor->nb[2] / static_cast<std::int64_t>(dtype_size(tensor->dtype));
 }
 
 bool bf16x2_aligned(const Tensor& tensor) {
@@ -262,7 +263,14 @@ void launch_yarn(const Tensor& positions, int rotary_dim, float theta, const Rop
                            launch_yarn_heads<16, 0>(positions, q, nullptr, table, stream) ||
                            launch_yarn_heads<2, 0>(positions, q, nullptr, table, stream);
     if (!launched) {
-        throw std::invalid_argument("rope: YaRN covers the 24/4 and 16/2 Text head geometries");
+        // A tensor-parallel share rotates its own head counts: Flash-Next's 12 query heads or one
+        // key head, a Qwen3.5 share's 18 and 3, 12 and 2 or 6 and 1, in the same arithmetic.
+        rope_generic_kernel<__nv_bfloat16, true><<<positions.ne[0], kSmallBlock, 0, stream>>>(
+            static_cast<const std::int32_t*>(positions.data), positions.ne[1],
+            static_cast<__nv_bfloat16*>(q->data),
+            k == nullptr ? nullptr : static_cast<__nv_bfloat16*>(k->data), q->ne[0], rotary_dim,
+            theta, q->ne[1], k == nullptr ? 0 : k->ne[1], q->ne[2], token_stride(q),
+            token_stride(k), table);
     }
 }
 
@@ -293,7 +301,21 @@ void rope_launch(const Tensor& positions, int rotary_dim, float theta, const Rop
 
 void rope_single_launch(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn,
                         Tensor& x, cudaStream_t stream) {
-    if (yarn.active()) {
+    if (x.dtype == DType::FP32) {
+        const auto issue = [&]<bool Yarn>() {
+            const RopeYarnKernelTable table =
+                Yarn ? yarn_table(rotary_dim, theta, yarn) : RopeYarnKernelTable{};
+            rope_generic_kernel<float, Yarn><<<positions.ne[0], kSmallBlock, 0, stream>>>(
+                static_cast<const std::int32_t*>(positions.data), positions.ne[1],
+                static_cast<float*>(x.data), nullptr, x.ne[0], rotary_dim, theta, x.ne[1], 0,
+                x.ne[2], token_stride(&x), 0, table);
+        };
+        if (yarn.active()) {
+            issue.template operator()<true>();
+        } else {
+            issue.template operator()<false>();
+        }
+    } else if (yarn.active()) {
         launch_yarn(positions, rotary_dim, theta, yarn, &x, nullptr, stream);
     } else if (!launch_fixed_single_dispatch(positions, rotary_dim, theta, x, stream)) {
         launch_generic(positions, rotary_dim, theta, &x, nullptr, stream);

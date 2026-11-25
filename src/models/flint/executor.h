@@ -17,6 +17,7 @@
 #include "core/tensor.h"
 #include "models/expert_profile.h"
 #include "models/flint/model.h"
+#include "ninfer/kv_cache_storage.h"
 
 #include <cuda_runtime.h>
 
@@ -60,6 +61,9 @@ struct ExecutorOptions {
     std::uint32_t expert_cpu_threads = 0;
     // Disk experts: a drive mirror and the direct path (core/expert_disk.h).
     ExpertDiskReads expert_disk{};
+    // The full-attention blocks' KV storage (kv_format.h); BFloat16 and Float16 select the F16
+    // cache.
+    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
 };
 
 struct ExecutorMemory {
@@ -165,6 +169,9 @@ public:
     // keys of the positions given back: later drafts see those slots as context, which changes
     // the drafts only (the verification keeps the output exact).
     bool rewind(std::uint32_t sequence, std::uint32_t tokens);
+    // How many positions past `position` (one the sequence has read, not before its last prompt,
+    // checkpoint or image) it may read and still rewind() to it.
+    [[nodiscard]] std::uint32_t rewind_reach(std::uint32_t sequence, std::uint32_t position) const;
     // Bytes of an image at `position`.
     [[nodiscard]] std::uint64_t image_bytes(std::uint32_t position) const;
     // Copies the sequence's state into `pages`, pinned host memory that holds image_bytes() of its

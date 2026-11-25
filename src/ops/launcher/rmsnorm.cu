@@ -49,10 +49,31 @@ template <RmsEpilogue Epilogue>
 void launch_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor* z, Tensor& out,
                     std::int32_t d, std::int64_t rows, float eps, bool aligned2,
                     cudaStream_t stream) {
+    if (x.dtype == DType::FP32) {
+        if (weight.dtype == DType::FP32) {
+            rmsnorm_generic_kernel<Epilogue, float, float>
+                <<<static_cast<unsigned>(rows), 256, 0, stream>>>(
+                    static_cast<const float*>(x.data), static_cast<const float*>(weight.data),
+                    nullptr, static_cast<float*>(out.data), d, rows, eps);
+        } else {
+            rmsnorm_generic_kernel<Epilogue, __nv_bfloat16, float>
+                <<<static_cast<unsigned>(rows), 256, 0, stream>>>(
+                    static_cast<const float*>(x.data),
+                    static_cast<const __nv_bfloat16*>(weight.data), nullptr,
+                    static_cast<float*>(out.data), d, rows, eps);
+        }
+        return;
+    }
     const auto* x_bf16 = static_cast<const __nv_bfloat16*>(x.data);
     const auto* w_bf16 = static_cast<const __nv_bfloat16*>(weight.data);
     const auto* z_bf16 = z != nullptr ? static_cast<const __nv_bfloat16*>(z->data) : nullptr;
     auto* out_bf16     = static_cast<__nv_bfloat16*>(out.data);
+
+    if (weight.dtype == DType::FP32) {
+        rmsnorm_generic_kernel<Epilogue, float><<<static_cast<unsigned>(rows), 256, 0, stream>>>(
+            x_bf16, static_cast<const float*>(weight.data), z_bf16, out_bf16, d, rows, eps);
+        return;
+    }
 
     // The hoisted weight and gate cost registers. Measured at 512-thread blocks, only the
     // gated epilogue loses a block per SM for them: warp 35 -> 50 and the wide row 38 -> 48, both

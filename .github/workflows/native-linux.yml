@@ -92,7 +92,7 @@ jobs:
         run: python3.11 -m pip install --disable-pip-version-check huggingface_hub==1.17.0
       - name: Restore completed objects from HF
         id: object-cache
-        run: python3.11 .github/scripts/hf-build-cache.py restore --directory .cache/objects --family native-linux-cuda-${{ inputs.cuda }}-shared-v1
+        run: python3.11 .github/scripts/hf-build-cache.py restore --merged-branch --directory .cache/objects --family native-linux-cuda-${{ inputs.cuda }}-shared-v1
       - name: Verify object-cache reuse and CUDA invalidation
         timeout-minutes: 10
         run: python3.11 .github/scripts/check-compiler-cache.py

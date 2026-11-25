@@ -1,6 +1,7 @@
 #include "models/gemma4/kernels.h"
 
 #include "core/device_launch.h"
+#include "core/pdl_arch.cuh"
 #include "models/gemma4/kv_codec.cuh"
 #include "ops/common/route_order.cuh"
 
@@ -72,7 +73,8 @@ __device__ __forceinline__ float gelu_tanh(float x) {
     return 0.5f * x * (1.0f + tanhf(inner));
 }
 
-// Row kernels hold one float4 of a [hidden] row per thread (hidden % 4 == 0, hidden / 4 <= 1024).
+// Row kernels hold N float4s of a [hidden] row per thread, quads i, i + blockDim.x, ... of thread i
+// (hidden % 4 == 0, hidden / 4 <= 1024 * N). Width 2816 runs N = 1, width 5376 N = 2.
 __device__ __forceinline__ float4 load_bf16x4(const __nv_bfloat16* p) {
     const uint2 w   = *reinterpret_cast<const uint2*>(p);
     const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&w.x));
@@ -113,7 +115,8 @@ __device__ __forceinline__ float4 fixed4(const unsigned long long* p, int i) {
 
 // The q8_1 form of this thread's four values, elements 4i..4i+3 of row `row` of width k: eight
 // consecutive threads hold one 32-value block (hidden % 32 == 0 keeps every group of eight either
-// in or out of the row). Every lane of the warp calls it; `valid` lanes store.
+// in or out of the row; blockDim.x, a multiple of 32, keeps a row kernel's later quads in the same
+// groups). Every lane of the warp calls it; `valid` lanes store.
 __device__ __forceinline__ void store_q8x4(const Q8Rows& q, int k, std::int64_t row, int i, float4 v,
                                            bool valid) {
     float amax = fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
@@ -135,29 +138,52 @@ __device__ __forceinline__ void store_q8x4(const Q8Rows& q, int k, std::int64_t 
 }
 
 __global__ void scale_kernel(float* x, std::int64_t n, float s) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) { x[i] *= s; }
 }
 
-__global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w,
-                                int hidden, float eps, __nv_bfloat16* __restrict__ out, Q8Rows q8) {
-    const int q      = hidden >> 2, i = threadIdx.x;
+// The block of a row kernel (rms_norm, attn_residual, ffn_combine): row_threads() launches up to
+// 1,024 threads, as row_quads() takes rows of up to 2,048 float4s, two a thread. The bound keeps
+// each kernel's registers within that block in every build; without it CUDA 13.4's sm_120a
+// ffn_combine_kernel<2> needs more registers than the 31B's 672-thread rows have.
+constexpr int kRowThreads = 1024;
+
+template <int N>
+__launch_bounds__(kRowThreads) __global__
+    void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, int hidden,
+                         float eps, __nv_bfloat16* __restrict__ out, Q8Rows q8) {
+    ninfer::pdl::arch_enter_glue();
+    const int q      = hidden >> 2;
     const float* row = x + std::int64_t(blockIdx.x) * hidden;
-    const float4 v   = i < q ? ld4(row, i) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    // The weight is loaded before the reduction, whose barriers would hold the load behind it.
-    const float4 wv = i < q && w != nullptr ? ld4(w, i) : make_float4(1.0f, 1.0f, 1.0f, 1.0f);
-    const float inv = rsqrtf(block_sum(dot4(v, v)) / float(hidden) + eps);
-    float4 y        = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (i < q) {
-        y = mul4(scale4(v, inv), wv);
-        if (out != nullptr) { store_bf16x4(out + std::int64_t(blockIdx.x) * hidden + 4 * i, y); }
+    float4 v[N], wv[N];
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i = threadIdx.x + j * blockDim.x;
+        v[j]        = i < q ? ld4(row, i) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // The weight is loaded before the reduction, whose barriers would hold the load behind it.
+        wv[j] = i < q && w != nullptr ? ld4(w, i) : make_float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
-    if (q8.qs != nullptr) { store_q8x4(q8, hidden, blockIdx.x, i, y, i < q); }
+    float ss = dot4(v[0], v[0]);
+#pragma unroll
+    for (int j = 1; j < N; ++j) { ss += dot4(v[j], v[j]); }
+    const float inv = rsqrtf(block_sum(ss) / float(hidden) + eps);
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i = threadIdx.x + j * blockDim.x;
+        float4 y    = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (i < q) {
+            y = mul4(scale4(v[j], inv), wv[j]);
+            if (out != nullptr) { store_bf16x4(out + std::int64_t(blockIdx.x) * hidden + 4 * i, y); }
+        }
+        if (q8.qs != nullptr) { store_q8x4(q8, hidden, blockIdx.x, i, y, i < q); }
+    }
 }
 
 // Block (t, head): Hq query heads then Hkv key/value heads; D/2 threads, thread i the pair
 // (i, i + D/2).
 __global__ void qkv_post_kernel(QkvArgs a) {
+    ninfer::pdl::arch_enter_glue();
     const int t      = blockIdx.x;
     const int head   = blockIdx.y;
     const int d      = a.head_dim;
@@ -204,6 +230,7 @@ __global__ void qkv_post_kernel(QkvArgs a) {
 __global__ void build_mask_kernel(__half* mask, int tokens, int slots, int first, int ring,
                                   int window, const std::int32_t* __restrict__ blocks,
                                   const std::int32_t* __restrict__ starts) {
+    ninfer::pdl::arch_enter_glue();
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     const int t = blockIdx.y;
     if (s >= slots) { return; }
@@ -247,6 +274,7 @@ __device__ __forceinline__ void derived_key_pair(float v0, float v1, float w0, f
 
 __global__ void rope_table_kernel(const float* __restrict__ freq, int pairs, int positions,
                                   float2* __restrict__ rope) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t j = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (j >= std::int64_t(positions) * pairs) { return; }
     const int p = int(j / pairs), i = int(j % pairs);
@@ -261,6 +289,7 @@ __global__ void derive_keys_kernel(const __half* __restrict__ v, std::int64_t he
                                    const float* __restrict__ w, const float2* __restrict__ rope,
                                    int pairs, __half* __restrict__ k,
                                    const std::int32_t* __restrict__ turns, int turned_from) {
+    ninfer::pdl::arch_enter_glue();
     const int p = blockIdx.x, h = blockIdx.y, i = threadIdx.x, half = d >> 1;
     const std::int64_t at = h * head_stride + std::int64_t(p) * d;
     const int turn        = turns != nullptr && p >= turned_from ? turns[p - turned_from] : p;
@@ -271,6 +300,7 @@ __global__ void derive_keys_kernel(const __half* __restrict__ v, std::int64_t he
 
 // Block (position, head): the position's K and V rows, 16-byte words.
 __global__ void ring_copy_kernel(RingCopyArgs a) {
+    ninfer::pdl::arch_enter_glue();
     const int p = a.begin + blockIdx.x, h = blockIdx.y;
     const std::int64_t src = h * a.src_head_stride + std::int64_t(p % a.src_ring) * a.head_dim;
     const std::int64_t dst = h * a.dst_head_stride + std::int64_t(p % a.dst_ring) * a.head_dim;
@@ -281,6 +311,7 @@ __global__ void ring_copy_kernel(RingCopyArgs a) {
 }
 
 __global__ void f32_to_bf16_kernel(const float* in, __nv_bfloat16* out, std::int64_t n) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) { out[i] = __float2bfloat16(in[i]); }
 }
@@ -372,6 +403,7 @@ struct DecodeShape {
 
 template <int D, int G, KvCoding KC = KvCoding::F16, KvCoding VC = KvCoding::F16>
 __launch_bounds__(kDecodeThreads) __global__ void decode_attention_kernel(DecodeAttentionArgs a) {
+    ninfer::pdl::arch_enter();
     constexpr int V      = G;
     using S              = DecodeShape<D, V>;
     constexpr int kTile  = S::kTile;
@@ -550,6 +582,7 @@ constexpr int kWideThreads = 256;
 
 template <bool Derived, KvCoding VC = KvCoding::F16>
 __launch_bounds__(kWideThreads, 2) __global__ void decode_attention_wide_kernel(DecodeAttentionArgs a) {
+    ninfer::pdl::arch_enter();
     constexpr int D = 512, kTile = 16, kHalf = D / 2;
     const int b        = blockIdx.x; // rows fastest, as decode_attention_kernel
     const int kv_head  = blockIdx.y;
@@ -752,6 +785,7 @@ constexpr int kDecodeCombineThreads = 128; // at least the largest split count
 
 template <int D, bool Rotated = false>
 __global__ void decode_combine_kernel(DecodeAttentionArgs a) {
+    ninfer::pdl::arch_enter_glue();
     static_assert(!Rotated || D == kKvBlockDims, "a rotated row is one 256-wide block");
     const int head = blockIdx.x, b = blockIdx.y;
     const int d    = blockIdx.z * kDecodeCombineThreads + threadIdx.x;
@@ -829,36 +863,59 @@ __global__ void decode_combine_kernel(DecodeAttentionArgs a) {
 // h += rms_norm(o) * w_post; then the FFN inputs of the new h (see AttnResidualArgs). Every
 // operand is loaded before the first reduction: the reductions' barriers would otherwise hold each
 // load behind the reduction before it.
-__global__ void attn_residual_kernel(AttnResidualArgs a) {
-    const int q = a.hidden >> 2, i = threadIdx.x;
+template <int N>
+__launch_bounds__(kRowThreads) __global__ void attn_residual_kernel(AttnResidualArgs a) {
+    ninfer::pdl::arch_enter_glue();
+    const int q = a.hidden >> 2;
     const std::int64_t row = std::int64_t(blockIdx.x) * a.hidden;
-    const float4 zero         = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    const bool valid          = i < q;
-    const float4 o            = valid ? load_bf16x4(a.o + row + 4 * i) : zero;
-    const float4 h0           = valid ? ld4(a.h + row, i) : zero;
-    const float4 w_post       = valid ? ld4(a.w_post, i) : zero;
-    const float4 ffn_norm     = valid ? ld4(a.ffn_norm, i) : zero;
-    const float4 pre_norm     = valid && a.pre_norm != nullptr ? ld4(a.pre_norm, i) : zero;
-    const float4 router_scale = valid && a.router_x != nullptr ? ld4(a.router_scale, i) : zero;
-    const float inv_o = rsqrtf(block_sum(dot4(o, o)) / float(a.hidden) + a.eps);
-    float4 h = zero;
-    if (valid) {
-        h = add4(h0, mul4(scale4(o, inv_o), w_post));
-        reinterpret_cast<float4*>(a.h + row)[i] = h;
+    const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 o[N], h[N], w_post[N], ffn_norm[N], pre_norm[N], router_scale[N];
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i     = threadIdx.x + j * blockDim.x;
+        const bool valid = i < q;
+        o[j]            = valid ? load_bf16x4(a.o + row + 4 * i) : zero;
+        h[j]            = valid ? ld4(a.h + row, i) : zero;
+        w_post[j]       = valid ? ld4(a.w_post, i) : zero;
+        ffn_norm[j]     = valid ? ld4(a.ffn_norm, i) : zero;
+        pre_norm[j]     = valid && a.pre_norm != nullptr ? ld4(a.pre_norm, i) : zero;
+        router_scale[j] = valid && a.router_x != nullptr ? ld4(a.router_scale, i) : zero;
     }
-    const float inv  = rsqrtf(block_sum(dot4(h, h)) / float(a.hidden) + a.eps);
-    const float4 n   = scale4(h, inv);
-    const float4 mlp = valid ? mul4(n, ffn_norm) : zero;
-    if (valid && a.mlp_in != nullptr) { store_bf16x4(a.mlp_in + row + 4 * i, mlp); }
-    if (a.mlp_q.qs != nullptr) { store_q8x4(a.mlp_q, a.hidden, blockIdx.x, i, mlp, valid); }
-    if (a.pre_norm != nullptr) {
-        const float4 moe = valid ? mul4(n, pre_norm) : zero;
-        if (valid && a.moe_in != nullptr) { store_bf16x4(a.moe_in + row + 4 * i, moe); }
-        if (a.moe_q.qs != nullptr) { store_q8x4(a.moe_q, a.hidden, blockIdx.x, i, moe, valid); }
+    float ss = dot4(o[0], o[0]);
+#pragma unroll
+    for (int j = 1; j < N; ++j) { ss += dot4(o[j], o[j]); }
+    const float inv_o = rsqrtf(block_sum(ss) / float(a.hidden) + a.eps);
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i = threadIdx.x + j * blockDim.x;
+        if (i < q) {
+            h[j] = add4(h[j], mul4(scale4(o[j], inv_o), w_post[j]));
+            reinterpret_cast<float4*>(a.h + row)[i] = h[j];
+        } else {
+            h[j] = zero;
+        }
     }
-    if (valid && a.router_x != nullptr) {
-        reinterpret_cast<float4*>(a.router_x + row)[i] =
-            scale4(mul4(n, router_scale), rsqrtf(float(a.hidden)));
+    ss = dot4(h[0], h[0]);
+#pragma unroll
+    for (int j = 1; j < N; ++j) { ss += dot4(h[j], h[j]); }
+    const float inv = rsqrtf(block_sum(ss) / float(a.hidden) + a.eps);
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i      = threadIdx.x + j * blockDim.x;
+        const bool valid = i < q;
+        const float4 n   = scale4(h[j], inv);
+        const float4 mlp = valid ? mul4(n, ffn_norm[j]) : zero;
+        if (valid && a.mlp_in != nullptr) { store_bf16x4(a.mlp_in + row + 4 * i, mlp); }
+        if (a.mlp_q.qs != nullptr) { store_q8x4(a.mlp_q, a.hidden, blockIdx.x, i, mlp, valid); }
+        if (a.pre_norm != nullptr) {
+            const float4 moe = valid ? mul4(n, pre_norm[j]) : zero;
+            if (valid && a.moe_in != nullptr) { store_bf16x4(a.moe_in + row + 4 * i, moe); }
+            if (a.moe_q.qs != nullptr) { store_q8x4(a.moe_q, a.hidden, blockIdx.x, i, moe, valid); }
+        }
+        if (valid && a.router_x != nullptr) {
+            reinterpret_cast<float4*>(a.router_x + row)[i] =
+                scale4(mul4(n, router_scale[j]), rsqrtf(float(a.hidden)));
+        }
     }
 }
 
@@ -871,6 +928,7 @@ constexpr int kRouteTokens = 8; // decode: the small kernel below covers up to t
 __global__ void route_logits_kernel(const float* __restrict__ x, int hidden, int tokens,
                                     const float* __restrict__ router, int experts,
                                     float* __restrict__ logits) {
+    ninfer::pdl::arch_enter_glue();
     __shared__ float xs[kRouteTileT][kRouteTileK + 1];
     __shared__ float rs[kRouteTileE][kRouteTileK + 1];
     const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5; // 8 warps
@@ -923,6 +981,7 @@ constexpr int kRouteSmallThreads = 256;
 __global__ void route_logits_small_kernel(const float* __restrict__ x, int hidden, int tokens,
                                           const float* __restrict__ router, int experts,
                                           float* __restrict__ logits) {
+    ninfer::pdl::arch_enter_glue();
     __shared__ float part[kRouteSmallThreads / 32][kRouteTokens];
     const int e = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const float4* w = reinterpret_cast<const float4*>(router + std::int64_t(e) * hidden);
@@ -958,6 +1017,7 @@ constexpr int kTopkMaxExperts = 256;
 __global__ void route_topk_kernel(const float* __restrict__ logits, int experts, int top_k,
                                   const float* __restrict__ expert_scale,
                                   std::int32_t* __restrict__ ids, float* __restrict__ weights) {
+    ninfer::pdl::arch_enter_glue();
     __shared__ float v[kTopkMaxExperts];
     __shared__ float chosen[8];
     __shared__ int chosen_id[8];
@@ -986,9 +1046,29 @@ __global__ void route_topk_kernel(const float* __restrict__ logits, int experts,
     }
 }
 
+// The rank of `mine`, expert e's logit, among a token's values[0, 4 * quads) (larger first, lower
+// id on equal values), as route_topk_kernel ranks it: the values past the experts are -inf, which
+// never rank before an expert. Float4 reads, eight in flight, replace the scalar loop's dependent
+// shared-memory loads.
+__device__ __forceinline__ int rank_among(const float* values, float mine, int e, int quads) {
+    const float4* v4 = reinterpret_cast<const float4*>(values);
+    int rank         = 0;
+#pragma unroll 8
+    for (int j4 = 0; j4 < quads; ++j4) {
+        const float4 o = v4[j4];
+        const int j    = 4 * j4;
+        rank += (o.x > mine) | ((o.x == mine) & (j < e));
+        rank += (o.y > mine) | ((o.y == mine) & (j + 1 < e));
+        rank += (o.z > mine) | ((o.z == mine) & (j + 2 < e));
+        rank += (o.w > mine) | ((o.w == mine) & (j + 3 < e));
+    }
+    return rank;
+}
+
 // Decode routing after the logits, in one block of at least max(experts, tokens * top_k)
 // threads: each token's top_k as route_topk_kernel picks them, then the pairs grouped by expert as
-// moe_sort_routes lists them (bounds, pairs per expert, active experts ascending).
+// moe_sort_routes lists them (bounds, pairs per expert, active experts ascending). Every token's
+// logits are staged at once, so a thread ranks its expert in all of them between two barriers.
 __global__ void route_select_kernel(const float* __restrict__ logits, int tokens, int experts,
                                     int top_k, const float* __restrict__ expert_scale,
                                     std::int32_t* __restrict__ ids, float* __restrict__ weights,
@@ -996,29 +1076,30 @@ __global__ void route_select_kernel(const float* __restrict__ logits, int tokens
                                     std::int32_t* __restrict__ sorted,
                                     std::int32_t* __restrict__ active,
                                     std::int32_t* __restrict__ active_count) {
-    __shared__ float v[kTopkMaxExperts];
+    ninfer::pdl::arch_enter_glue();
+    __shared__ __align__(16) float v[kRouteTokens][kTopkMaxExperts];
     __shared__ float chosen[kRouteTokens * 8];
     __shared__ int chosen_id[kRouteTokens * 8];
     __shared__ int cursor[kTopkMaxExperts];
     __shared__ int warp_total[kTopkMaxExperts / 32][2];
     const int e = threadIdx.x, lane = e & 31, warp = e >> 5;
-    for (int t = 0; t < tokens; ++t) {
-        if (e < experts) { v[e] = ops::route_order(logits[std::int64_t(t) * experts + e]); }
-        __syncthreads();
-        if (e < experts) {
-            const float mine = v[e];
-            int rank         = 0;
-            for (int j = 0; j < experts; ++j) {
-                const float other = v[j];
-                rank += (other > mine || (other == mine && j < e)) ? 1 : 0;
-            }
+    const int quads = (experts + 3) / 4;
+    for (int i = e; i < tokens * 4 * quads; i += blockDim.x) {
+        const int t = i / (4 * quads), j = i % (4 * quads);
+        v[t][j] = j < experts ? ops::route_order(logits[std::int64_t(t) * experts + j]) : -INFINITY;
+    }
+    __syncthreads();
+    if (e < experts) {
+        for (int t = 0; t < tokens; ++t) {
+            const float mine = v[t][e];
+            const int rank   = rank_among(v[t], mine, e, quads);
             if (rank < top_k) {
                 chosen[t * top_k + rank]    = mine;
                 chosen_id[t * top_k + rank] = e;
             }
         }
-        __syncthreads();
     }
+    __syncthreads();
     const int pairs = tokens * top_k;
     if (e < pairs) {
         const int base = (e / top_k) * top_k;
@@ -1067,6 +1148,7 @@ __global__ void route_select_kernel(const float* __restrict__ logits, int tokens
 
 __global__ void geglu_rows_kernel(const float* __restrict__ x, int pairs, int width,
                                   __nv_bfloat16* __restrict__ out) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= std::int64_t(pairs) * width) { return; }
     const std::int64_t p = i / width, r = i % width;
@@ -1075,60 +1157,94 @@ __global__ void geglu_rows_kernel(const float* __restrict__ x, int pairs, int wi
 }
 
 // Every operand is loaded before the first reduction, as in attn_residual_kernel.
-__global__ void ffn_combine_kernel(FfnCombineArgs a) {
-    const int q = a.hidden >> 2, i = threadIdx.x;
+template <int N>
+__launch_bounds__(kRowThreads) __global__ void ffn_combine_kernel(FfnCombineArgs a) {
+    ninfer::pdl::arch_enter_glue();
+    const int q = a.hidden >> 2;
     const std::int64_t row = std::int64_t(blockIdx.x) * a.hidden;
     const float hidden = float(a.hidden);
     const float4 zero  = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    const bool valid   = i < q;
-    float4 y           = valid ? load_bf16x4(a.dense + row + 4 * i) : zero;
     const bool moe     = a.moe_rows != nullptr || a.moe_fixed != nullptr;
-    const float4 w_dense = valid && a.w_dense != nullptr ? ld4(a.w_dense, i) : zero;
-    const float4 w_moe   = valid && moe ? ld4(a.w_moe, i) : zero;
-    const float4 h0      = valid ? ld4(a.h + row, i) : zero;
-    const float4 w_post  = valid ? ld4(a.w_post, i) : zero;
-    const float4 w_next  = valid && a.next_norm != nullptr ? ld4(a.next_norm, i) : zero;
-    const float scalar   = a.scalar[0];
-    float4 m             = zero;
-    if (moe && valid) {
-        if (a.moe_rows != nullptr) {
-            for (int k = 0; k < a.top_k; ++k) {
-                const std::int64_t pair = std::int64_t(blockIdx.x) * a.top_k + k;
-                m = add4(m, scale4(ld4(a.moe_rows + pair * a.hidden, i), a.moe_weights[pair]));
+    const float scalar = a.scalar[0];
+    float4 y[N], m[N], w_dense[N], w_moe[N], h[N], w_post[N], w_next[N];
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i      = threadIdx.x + j * blockDim.x;
+        const bool valid = i < q;
+        y[j]       = valid ? load_bf16x4(a.dense + row + 4 * i) : zero;
+        w_dense[j] = valid && a.w_dense != nullptr ? ld4(a.w_dense, i) : zero;
+        w_moe[j]   = valid && moe ? ld4(a.w_moe, i) : zero;
+        h[j]       = valid ? ld4(a.h + row, i) : zero;
+        w_post[j]  = valid ? ld4(a.w_post, i) : zero;
+        w_next[j]  = valid && a.next_norm != nullptr ? ld4(a.next_norm, i) : zero;
+        m[j]       = zero;
+        if (moe && valid) {
+            if (a.moe_rows != nullptr) {
+                for (int k = 0; k < a.top_k; ++k) {
+                    const std::int64_t pair = std::int64_t(blockIdx.x) * a.top_k + k;
+                    m[j] = add4(m[j], scale4(ld4(a.moe_rows + pair * a.hidden, i), a.moe_weights[pair]));
+                }
+            } else {
+                m[j] = fixed4(a.moe_fixed + row, i);
             }
-        } else {
-            m = fixed4(a.moe_fixed + row, i);
         }
     }
     if (a.w_dense != nullptr || moe) {
         // The dense and expert norms in one reduction.
-        const float2 ss = block_sum2(dot4(y, y), dot4(m, m));
-        if (valid) {
-            if (a.w_dense != nullptr) { y = mul4(scale4(y, rsqrtf(ss.x / hidden + a.eps)), w_dense); }
-            if (moe) { y = add4(y, mul4(scale4(m, rsqrtf(ss.y / hidden + a.eps)), w_moe)); }
+        float sy = dot4(y[0], y[0]), sm = dot4(m[0], m[0]);
+#pragma unroll
+        for (int j = 1; j < N; ++j) {
+            sy += dot4(y[j], y[j]);
+            sm += dot4(m[j], m[j]);
+        }
+        const float2 ss = block_sum2(sy, sm);
+#pragma unroll
+        for (int j = 0; j < N; ++j) {
+            if (threadIdx.x + j * blockDim.x < q) {
+                if (a.w_dense != nullptr) { y[j] = mul4(scale4(y[j], rsqrtf(ss.x / hidden + a.eps)), w_dense[j]); }
+                if (moe) { y[j] = add4(y[j], mul4(scale4(m[j], rsqrtf(ss.y / hidden + a.eps)), w_moe[j])); }
+            }
         }
     }
-    const float inv_y = rsqrtf(block_sum(dot4(y, y)) / hidden + a.eps);
-    float4 h = zero;
-    if (valid) {
-        h = scale4(add4(h0, mul4(scale4(y, inv_y), w_post)), scalar);
-        reinterpret_cast<float4*>(a.h + row)[i] = h;
+    float ss = dot4(y[0], y[0]);
+#pragma unroll
+    for (int j = 1; j < N; ++j) { ss += dot4(y[j], y[j]); }
+    const float inv_y = rsqrtf(block_sum(ss) / hidden + a.eps);
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i = threadIdx.x + j * blockDim.x;
+        if (i < q) {
+            h[j] = scale4(add4(h[j], mul4(scale4(y[j], inv_y), w_post[j])), scalar);
+            reinterpret_cast<float4*>(a.h + row)[i] = h[j];
+        } else {
+            h[j] = zero;
+        }
     }
     if (a.next_norm == nullptr) { return; }
-    const float inv  = rsqrtf(block_sum(dot4(h, h)) / hidden + a.eps);
-    const float4 nxt = valid ? mul4(scale4(h, inv), w_next) : zero;
-    if (valid && a.next_out != nullptr) { store_bf16x4(a.next_out + row + 4 * i, nxt); }
-    if (a.next_q.qs != nullptr) { store_q8x4(a.next_q, a.hidden, blockIdx.x, i, nxt, valid); }
+    ss = dot4(h[0], h[0]);
+#pragma unroll
+    for (int j = 1; j < N; ++j) { ss += dot4(h[j], h[j]); }
+    const float inv = rsqrtf(block_sum(ss) / hidden + a.eps);
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        const int i      = threadIdx.x + j * blockDim.x;
+        const bool valid = i < q;
+        const float4 nxt = valid ? mul4(scale4(h[j], inv), w_next[j]) : zero;
+        if (valid && a.next_out != nullptr) { store_bf16x4(a.next_out + row + 4 * i, nxt); }
+        if (a.next_q.qs != nullptr) { store_q8x4(a.next_q, a.hidden, blockIdx.x, i, nxt, valid); }
+    }
 }
 
 __global__ void add_fixed_kernel(unsigned long long* sums, const unsigned long long* products,
                                  const std::int32_t* flag, std::int64_t n) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n || *flag == 0) { return; }
     sums[i] += products[i];
 }
 
 __global__ void softcap_kernel(const float* x, std::int64_t n, float cap, __nv_bfloat16* out) {
+    ninfer::pdl::arch_enter_glue();
     const std::int64_t i = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n) { return; }
     const float v = cap > 0.0f ? cap * tanhf(x[i] / cap) : x[i];
@@ -1144,6 +1260,7 @@ __global__ void copy_rows_kernel(const __nv_bfloat16* __restrict__ src,
                                  const std::int32_t* __restrict__ src_rows,
                                  __nv_bfloat16* __restrict__ dst,
                                  const std::int32_t* __restrict__ dst_rows, int width) {
+    ninfer::pdl::arch_enter_glue();
     const int r  = blockIdx.x;
     const auto* from = reinterpret_cast<const uint4*>(
         src + std::int64_t(src_rows != nullptr ? src_rows[r] : r) * width);
@@ -1155,6 +1272,7 @@ __global__ void copy_rows_kernel(const __nv_bfloat16* __restrict__ src,
 __global__ void stem_rows_kernel(const float* __restrict__ embedding,
                                  const __nv_bfloat16* __restrict__ hidden, int width,
                                  __nv_bfloat16* __restrict__ out) {
+    ninfer::pdl::arch_enter_glue();
     const int r = blockIdx.x;
     __nv_bfloat16* row = out + std::int64_t(r) * 2 * width;
     for (int i = threadIdx.x; i < width; i += blockDim.x) {
@@ -1167,20 +1285,33 @@ __global__ void stem_rows_kernel(const float* __restrict__ embedding,
 
 void scale(float* x, std::int64_t n, float s, cudaStream_t stream) {
     if (n <= 0) { return; }
-    scale_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(x, n, s);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, scale_kernel, x, n, s);
     check_launch("scale");
 }
 
-int row_threads(int hidden) {
-    if (hidden % 4 != 0 || hidden / 4 > 1024) {
-        throw std::invalid_argument("gemma4 row kernels: hidden must be whole float4s, at most 4096");
+// A row kernel's float4s per thread: one up to width 4096, two up to 8192.
+int row_quads(int hidden) {
+    if (hidden % 4 != 0 || hidden <= 0 || hidden / 4 > 2048) {
+        throw std::invalid_argument("gemma4 row kernels: hidden must be whole float4s, at most 8192");
     }
-    return (hidden / 4 + 31) / 32 * 32;
+    return hidden / 4 > 1024 ? 2 : 1;
+}
+
+// The block of a row kernel holding `per` float4s a thread: whole warps.
+int row_threads(int hidden, int per) {
+    return ((hidden / 4 + per - 1) / per + 31) / 32 * 32;
 }
 
 void rms_norm(const float* x, const float* w, int hidden, int tokens, float eps,
               __nv_bfloat16* out, cudaStream_t stream, Q8Rows q) {
-    rms_norm_kernel<<<tokens, row_threads(hidden), 0, stream>>>(x, w, hidden, eps, out, q);
+    const int per = row_quads(hidden);
+    if (per == 1) {
+        ninfer::pdl::launch_arch(tokens, row_threads(hidden, 1), 0, stream, rms_norm_kernel<1>, x,
+                                 w, hidden, eps, out, q);
+    } else {
+        ninfer::pdl::launch_arch(tokens, row_threads(hidden, 2), 0, stream, rms_norm_kernel<2>, x,
+                                 w, hidden, eps, out, q);
+    }
     check_launch("rms_norm");
 }
 
@@ -1189,28 +1320,29 @@ void qkv_post(const QkvArgs& args, cudaStream_t stream) {
         throw std::invalid_argument("gemma4 qkv_post: head width must be 256 or 512");
     }
     const dim3 grid(args.tokens, args.query_heads + args.kv_heads, 1);
-    qkv_post_kernel<<<grid, args.head_dim / 2, 0, stream>>>(args);
+    ninfer::pdl::launch_arch(grid, args.head_dim / 2, 0, stream, qkv_post_kernel, args);
     check_launch("qkv_post");
 }
 
 void build_mask(__half* mask, int tokens, int slots, int first, int ring, int window,
                 cudaStream_t stream, const std::int32_t* blocks, const std::int32_t* starts) {
     const dim3 grid(blocks_for(slots, 256), tokens, 1);
-    build_mask_kernel<<<grid, 256, 0, stream>>>(mask, tokens, slots, first, ring, window, blocks,
-                                                starts);
+    ninfer::pdl::launch_arch(grid, 256, 0, stream, build_mask_kernel, mask, tokens, slots, first,
+                             ring, window, blocks, starts);
     check_launch("build_mask");
 }
 
 void ring_copy(const RingCopyArgs& a, cudaStream_t stream) {
     if (a.end <= a.begin) { return; }
     if (a.head_dim % 8 != 0) { throw std::invalid_argument("gemma4 ring_copy: head width"); }
-    ring_copy_kernel<<<dim3(a.end - a.begin, a.kv_heads, 1), 64, 0, stream>>>(a);
+    ninfer::pdl::launch_arch(dim3(a.end - a.begin, a.kv_heads, 1), 64, 0, stream, ring_copy_kernel,
+                             a);
     check_launch("ring_copy");
 }
 
 void f32_to_bf16(const float* in, __nv_bfloat16* out, std::int64_t n, cudaStream_t stream) {
     if (n <= 0) { return; }
-    f32_to_bf16_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(in, out, n);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, f32_to_bf16_kernel, in, out, n);
     check_launch("f32_to_bf16");
 }
 
@@ -1224,7 +1356,8 @@ namespace {
 
 template <KvCoding KC, KvCoding VC>
 void launch_sliding(const DecodeAttentionArgs& args, dim3 grid, cudaStream_t stream) {
-    decode_attention_kernel<256, 2, KC, VC><<<grid, kDecodeThreads, 0, stream>>>(args);
+    ninfer::pdl::launch_arch(grid, kDecodeThreads, 0, stream,
+                             decode_attention_kernel<256, 2, KC, VC>, args);
 }
 
 // The sliding blocks' (key, value) codings of the KV formats (kv_format.h).
@@ -1249,11 +1382,26 @@ void dispatch_derived(const DecodeAttentionArgs& args, dim3 grid, cudaStream_t s
     const KvCoding v = args.v_plane.codes != nullptr ? args.v_plane.coding : KvCoding::F16;
     using C = KvCoding;
     switch (v) {
-    case C::F16: decode_attention_wide_kernel<true><<<grid, kWideThreads, 0, stream>>>(args); return;
-    case C::Int8G64: decode_attention_wide_kernel<true, C::Int8G64><<<grid, kWideThreads, 0, stream>>>(args); return;
-    case C::Int4G32: decode_attention_wide_kernel<true, C::Int4G32><<<grid, kWideThreads, 0, stream>>>(args); return;
-    case C::Fp8Row: decode_attention_wide_kernel<true, C::Fp8Row><<<grid, kWideThreads, 0, stream>>>(args); return;
-    case C::Nvfp4G16: decode_attention_wide_kernel<true, C::Nvfp4G16><<<grid, kWideThreads, 0, stream>>>(args); return;
+    case C::F16:
+        ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream, decode_attention_wide_kernel<true>,
+                                 args);
+        return;
+    case C::Int8G64:
+        ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream,
+                                 decode_attention_wide_kernel<true, C::Int8G64>, args);
+        return;
+    case C::Int4G32:
+        ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream,
+                                 decode_attention_wide_kernel<true, C::Int4G32>, args);
+        return;
+    case C::Fp8Row:
+        ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream,
+                                 decode_attention_wide_kernel<true, C::Fp8Row>, args);
+        return;
+    case C::Nvfp4G16:
+        ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream,
+                                 decode_attention_wide_kernel<true, C::Nvfp4G16>, args);
+        return;
     default: break;
     }
     throw std::invalid_argument("gemma4 decode attention: no derived-key kernel for this coding");
@@ -1281,12 +1429,12 @@ void decode_attention(const DecodeAttentionArgs& args, cudaStream_t stream) {
         dispatch_sliding(args, grid, stream);
         check_launch("decode_attention");
         if (v_planed && args.v_plane.rotated) {
-            decode_combine_kernel<256, true>
-                <<<dim3(args.query_heads, args.batch, 1), kKvBlockDims, 0, stream>>>(args);
+            ninfer::pdl::launch_arch(dim3(args.query_heads, args.batch, 1), kKvBlockDims, 0, stream,
+                                     decode_combine_kernel<256, true>, args);
         } else {
-            decode_combine_kernel<256>
-                <<<dim3(args.query_heads, args.batch, 256 / kDecodeCombineThreads),
-                   kDecodeCombineThreads, 0, stream>>>(args);
+            ninfer::pdl::launch_arch(
+                dim3(args.query_heads, args.batch, 256 / kDecodeCombineThreads),
+                kDecodeCombineThreads, 0, stream, decode_combine_kernel<256>, args);
         }
     } else if (args.head_dim == 512 && group == 8 && args.ring == 0) {
         if (derived) {
@@ -1299,13 +1447,15 @@ void decode_attention(const DecodeAttentionArgs& args, cudaStream_t stream) {
             }
             dispatch_derived(args, grid, stream);
         } else if (!k_planed && !v_planed) {
-            decode_attention_wide_kernel<false><<<grid, kWideThreads, 0, stream>>>(args);
+            ninfer::pdl::launch_arch(grid, kWideThreads, 0, stream,
+                                     decode_attention_wide_kernel<false>, args);
         } else {
             throw std::invalid_argument("gemma4 decode attention: width 512 stores no quantized keys");
         }
         check_launch("decode_attention");
-        decode_combine_kernel<512><<<dim3(args.query_heads, args.batch, 512 / kDecodeCombineThreads),
-                                     kDecodeCombineThreads, 0, stream>>>(args);
+        ninfer::pdl::launch_arch(dim3(args.query_heads, args.batch, 512 / kDecodeCombineThreads),
+                                 kDecodeCombineThreads, 0, stream, decode_combine_kernel<512>,
+                                 args);
     } else {
         throw std::invalid_argument("gemma4 decode attention: unsupported head geometry");
     }
@@ -1313,7 +1463,14 @@ void decode_attention(const DecodeAttentionArgs& args, cudaStream_t stream) {
 }
 
 void attn_residual(const AttnResidualArgs& args, cudaStream_t stream) {
-    attn_residual_kernel<<<args.tokens, row_threads(args.hidden), 0, stream>>>(args);
+    const int per = row_quads(args.hidden);
+    if (per == 1) {
+        ninfer::pdl::launch_arch(args.tokens, row_threads(args.hidden, 1), 0, stream,
+                                 attn_residual_kernel<1>, args);
+    } else {
+        ninfer::pdl::launch_arch(args.tokens, row_threads(args.hidden, 2), 0, stream,
+                                 attn_residual_kernel<2>, args);
+    }
     check_launch("attn_residual");
 }
 
@@ -1324,15 +1481,16 @@ void route(const float* x, int hidden, int tokens, const float* router, const fl
         throw std::invalid_argument("gemma4 route: at most 8 of 256 experts over whole float4s");
     }
     if (tokens <= kRouteTokens) {
-        route_logits_small_kernel<<<experts, kRouteSmallThreads, 0, stream>>>(x, hidden, tokens,
-                                                                             router, experts, logits);
+        ninfer::pdl::launch_arch(experts, kRouteSmallThreads, 0, stream, route_logits_small_kernel,
+                                 x, hidden, tokens, router, experts, logits);
     } else {
         const dim3 grid(blocks_for(experts, kRouteTileE), blocks_for(tokens, kRouteTileT), 1);
-        route_logits_kernel<<<grid, 256, 0, stream>>>(x, hidden, tokens, router, experts, logits);
+        ninfer::pdl::launch_arch(grid, 256, 0, stream, route_logits_kernel, x, hidden, tokens,
+                                 router, experts, logits);
     }
     check_launch("route logits");
-    route_topk_kernel<<<tokens, (experts + 31) / 32 * 32, 0, stream>>>(logits, experts, top_k,
-                                                                       expert_scale, ids, weights);
+    ninfer::pdl::launch_arch(tokens, (experts + 31) / 32 * 32, 0, stream, route_topk_kernel, logits,
+                             experts, top_k, expert_scale, ids, weights);
     check_launch("route top-k");
 }
 
@@ -1344,45 +1502,55 @@ void route_select(const float* x, int hidden, int tokens, const float* router,
         hidden % 4 != 0) {
         throw std::invalid_argument("gemma4 route_select: at most 8 tokens, 8 of 256 experts");
     }
-    route_logits_small_kernel<<<experts, kRouteSmallThreads, 0, stream>>>(x, hidden, tokens, router,
-                                                                         experts, logits);
+    ninfer::pdl::launch_arch(experts, kRouteSmallThreads, 0, stream, route_logits_small_kernel, x,
+                             hidden, tokens, router, experts, logits);
     check_launch("route logits");
     const int threads = (std::max(experts, tokens * top_k) + 31) / 32 * 32;
-    route_select_kernel<<<1, threads, 0, stream>>>(logits, tokens, experts, top_k, expert_scale, ids,
-                                                   weights, bounds, sorted, active, active_count);
+    ninfer::pdl::launch_arch(1, threads, 0, stream, route_select_kernel, logits, tokens, experts,
+                             top_k, expert_scale, ids, weights, bounds, sorted, active,
+                             active_count);
     check_launch("route select");
 }
 
 void geglu_rows(const float* x, int pairs, int width, __nv_bfloat16* out, cudaStream_t stream) {
     const std::int64_t n = std::int64_t(pairs) * width;
     if (n <= 0) { return; }
-    geglu_rows_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(x, pairs, width, out);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, geglu_rows_kernel, x, pairs, width,
+                             out);
     check_launch("geglu_rows");
 }
 
 void ffn_combine(const FfnCombineArgs& args, cudaStream_t stream) {
-    ffn_combine_kernel<<<args.tokens, row_threads(args.hidden), 0, stream>>>(args);
+    const int per = row_quads(args.hidden);
+    if (per == 1) {
+        ninfer::pdl::launch_arch(args.tokens, row_threads(args.hidden, 1), 0, stream,
+                                 ffn_combine_kernel<1>, args);
+    } else {
+        ninfer::pdl::launch_arch(args.tokens, row_threads(args.hidden, 2), 0, stream,
+                                 ffn_combine_kernel<2>, args);
+    }
     check_launch("ffn_combine");
 }
 
 void add_fixed(unsigned long long* sums, const void* products, const std::int32_t* flag,
                std::int64_t n, cudaStream_t stream) {
     if (n <= 0) { return; }
-    add_fixed_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(
-        sums, static_cast<const unsigned long long*>(products), flag, n);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, add_fixed_kernel, sums,
+                             static_cast<const unsigned long long*>(products), flag, n);
     check_launch("add_fixed");
 }
 
 void softcap(const float* x, std::int64_t n, float cap, __nv_bfloat16* out, cudaStream_t stream) {
     if (n <= 0) { return; }
-    softcap_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(x, n, cap, out);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, softcap_kernel, x, n, cap, out);
     check_launch("softcap");
 }
 
 void rope_table(const float* inv_freq, int pairs, int positions, float2* rope, cudaStream_t stream) {
     const std::int64_t n = std::int64_t(pairs) * positions;
     if (n <= 0) { return; }
-    rope_table_kernel<<<blocks_for(n, 256), 256, 0, stream>>>(inv_freq, pairs, positions, rope);
+    ninfer::pdl::launch_arch(blocks_for(n, 256), 256, 0, stream, rope_table_kernel, inv_freq, pairs,
+                             positions, rope);
     check_launch("rope_table");
 }
 
@@ -1390,8 +1558,9 @@ void derive_keys(const __half* v, std::int64_t head_stride, int kv_heads, int he
                  const float* k_norm, const float2* rope, int rope_pairs, __half* k,
                  cudaStream_t stream, const std::int32_t* turns, int turned_from) {
     if (count <= 0) { return; }
-    derive_keys_kernel<<<dim3(count, kv_heads, 1), head_dim / 2, 0, stream>>>(
-        v, head_stride, head_dim, k_norm, rope, rope_pairs, k, turns, turned_from);
+    ninfer::pdl::launch_arch(dim3(count, kv_heads, 1), head_dim / 2, 0, stream, derive_keys_kernel,
+                             v, head_stride, head_dim, k_norm, rope, rope_pairs, k, turns,
+                             turned_from);
     check_launch("derive_keys");
 }
 
@@ -1399,14 +1568,15 @@ void copy_rows(const __nv_bfloat16* src, const std::int32_t* src_rows, __nv_bflo
                const std::int32_t* dst_rows, int rows, int width, cudaStream_t stream) {
     if (rows <= 0) { return; }
     if (width % 8 != 0) { throw std::invalid_argument("gemma4 copy_rows: width"); }
-    copy_rows_kernel<<<rows, 128, 0, stream>>>(src, src_rows, dst, dst_rows, width);
+    ninfer::pdl::launch_arch(rows, 128, 0, stream, copy_rows_kernel, src, src_rows, dst, dst_rows,
+                             width);
     check_launch("copy_rows");
 }
 
 void stem_rows(const float* embedding, const __nv_bfloat16* hidden, int rows, int width,
                __nv_bfloat16* out, cudaStream_t stream) {
     if (rows <= 0) { return; }
-    stem_rows_kernel<<<rows, 256, 0, stream>>>(embedding, hidden, width, out);
+    ninfer::pdl::launch_arch(rows, 256, 0, stream, stem_rows_kernel, embedding, hidden, width, out);
     check_launch("stem_rows");
 }
 

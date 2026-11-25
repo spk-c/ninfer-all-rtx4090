@@ -35,6 +35,9 @@ from .deepseek_v41 import ARCHITECTURES as DEEPSEEK_V41_ARCHITECTURES
 from .deepseek_v41 import RECIPES as DEEPSEEK_V41_RECIPES
 from .deepseek_v41 import GGUFShards
 from .deepseek_v41 import build_model as build_deepseek_v41
+from .inkling2 import ARCHITECTURES as INKLING2_ARCHITECTURES
+from .inkling2 import RECIPES as INKLING2_RECIPES
+from .inkling2 import build_model as build_inkling2
 from .dspine import RECIPES as DSPINE_RECIPES
 from .dspine import build_model as build_dspine
 from .dspine import is_dspine
@@ -141,7 +144,7 @@ def _layers(value: str):
 def _function(value: str):
     recipes = {**RECIPES, **TERNARY_RECIPES, **GGUF_RECIPES, **QWEN4_EXP_GGUF_RECIPES,
                **EDGE0_RECIPES, **GEMMA4_RECIPES, **FLINT_RECIPES, **DEEPSEEK_V41_RECIPES,
-               **DSPINE_RECIPES}
+               **INKLING2_RECIPES, **DSPINE_RECIPES}
     if value in recipes:
         return recipes[value]
     filename, function = _recipe_parts(value)
@@ -223,6 +226,9 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rows-per-chunk", type=int, default=512)
+    parser.add_argument("--ngram-sha256", help="require this SHA-256 of the encoded Flash-Next table before writing")
+    parser.add_argument("--compat-bf16", action="store_true",
+                        help="preservation recipe only: explicitly reproduce Basalt's BF16 compatibility casts")
     parser.add_argument(
         "--max-file-bytes",
         type=int,
@@ -230,6 +236,10 @@ def main(argv=None):
         "(default: one file)",
     )
     args = parser.parse_args(argv)
+    if args.compat_bf16 and args.recipe != "qwen3_8_flash_next_gguf_preserve":
+        raise ValueError("--compat-bf16 requires qwen3_8_flash_next_gguf_preserve")
+    if args.ngram_sha256 is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", args.ngram_sha256):
+        raise ValueError("--ngram-sha256 requires 64 hexadecimal digits")
     if "OMP_NUM_THREADS" not in os.environ:
         import torch
 
@@ -241,6 +251,8 @@ def main(argv=None):
     with ExitStack() as stack:
         base = stack.enter_context(SafetensorsSource(args.model))
         architectures = base.config.get("architectures") or [None]
+        if args.ngram_sha256 is not None and architectures[0] not in QWEN4_EXP_ARCHITECTURES:
+            raise ValueError("--ngram-sha256 requires Qwen3.8-Flash-Next")
         if is_dspine(base.config):
             if (paths or overrides or args.layers or args.proposal
                     or (args.components or "dspine") != "dspine"):
@@ -311,6 +323,46 @@ def main(argv=None):
             source_paths = {"base": {"path": str(args.model)},
                             "engram": {"path": str(paths["engram"])}}
             for name in ("gguf", "dspark", "vision", "bias_vl"):
+                if name in paths:
+                    source_paths[name] = {"path": str(paths[name])}
+            report = convert(
+                model, recipe, args.out, name=args.name,
+                provenance={"converter": "ninfer-v3", "recipe": args.recipe,
+                            "sources": source_paths},
+                device=args.device, rows_per_chunk=args.rows_per_chunk,
+                max_file_bytes=args.max_file_bytes,
+                progress=lambda index, total, job: print(
+                    f"[{index+1}/{total}] {job.parameters[0]}"
+                    + (f" (+{len(job.parameters)-1})" if len(job.parameters) > 1 else "")
+                    + f": {job.spec.format} {job.spec.shape}", flush=True))
+            print(f"wrote {args.out}: {report['objects']} objects, {len(report['files'])} files, "
+                  f"{report['seconds']:.1f}s", flush=True)
+            return
+        if architectures[0] in INKLING2_ARCHITECTURES:
+            wanted = (args.components or "text").split(",")
+            if ("gguf" not in paths or args.layers or wanted[0] != "text"
+                    or not set(wanted) <= {"text", "vision", "dspark"}
+                    or len(set(wanted)) != len(wanted)
+                    or ("vision" in wanted) != ("vision" in paths)
+                    or ("dspark" in wanted) != ("dspark" in paths)):
+                raise ValueError("Inkling 2 converts its text component from --source gguf=FILE; "
+                                 "--components text,vision adds its vision tower from --source "
+                                 "vision=MMPROJ.gguf and text,dspark its drafter from --source "
+                                 "dspark=DRAFTER.gguf")
+            gguf = stack.enter_context(GGUFFile(paths["gguf"]))
+            vision = stack.enter_context(GGUFFile(paths["vision"])) if "vision" in paths else None
+            dspark = stack.enter_context(GGUFFile(paths["dspark"])) if "dspark" in paths else None
+            model = build_inkling2(base, gguf, vision=vision, dspark=dspark,
+                                   resource_overrides=overrides)
+            recipe = Recipe(model)
+            inkling_sources = ({"base": base, "gguf": gguf} | ({"vision": vision} if vision else {})
+                               | ({"dspark": dspark} if dspark else {}))
+            _function(args.recipe)(model, recipe, inkling_sources)
+            if args.override:
+                _function(args.override)(model, recipe, inkling_sources)
+            source_paths = {"base": {"path": str(args.model)},
+                            "gguf": {"path": str(paths["gguf"])}}
+            for name in ("vision", "dspark"):
                 if name in paths:
                     source_paths[name] = {"path": str(paths[name])}
             report = convert(
@@ -420,6 +472,11 @@ def main(argv=None):
         if build_model is build_qwen4_exp and "gguf" in paths:
             # An expert-pruned release takes the model's config with its own expert count.
             base.config = with_gguf_expert_count(base.config, paths["gguf"])
+        if args.recipe == "qwen3_8_flash_next_gguf_preserve":
+            if not flash_next or ("text" in components and "gguf" not in paths):
+                raise ValueError("the preservation recipe requires Flash-Next and --source gguf for text")
+            from .qwen4_exp_preserve import model_config
+            base.config = model_config(base.config)
         if build_model is build_qwen4_exp and "mtp" in components and isinstance(
             companions.get("mtp"), GGUFFile
         ):
@@ -433,11 +490,20 @@ def main(argv=None):
             **({"layers": args.layers} if flash_next else {}),
         )
         recipe = Recipe(model)
-        _function(args.recipe)(model, recipe, sources)
+        if args.recipe == "qwen3_8_flash_next_gguf_preserve":
+            _function(args.recipe)(model, recipe, sources, compat_bf16=args.compat_bf16)
+        else:
+            _function(args.recipe)(model, recipe, sources)
         if args.proposal:
             add_official_proposal(recipe, ranking=args.ranking, rows=args.proposal_rows)
         if args.override:
             _function(args.override)(model, recipe, sources)
+
+        if args.ngram_sha256 is not None:
+            expected = args.ngram_sha256.lower()
+            actual = model.components.get("ngram", {}).get("config", {}).get("table_sha256")
+            if actual != expected:
+                raise ValueError(f"n-gram table SHA-256 mismatch: expected {expected}, got {actual}")
 
         def progress(index, total, job):
             label = job.parameters[0]
@@ -453,6 +519,8 @@ def main(argv=None):
             "recipe": args.recipe,
             "sources": sources.provenance(),
         }
+        if args.compat_bf16:
+            provenance["compat_bf16"] = True
         if args.override:
             provenance["override"] = args.override
         if args.layers is not None:

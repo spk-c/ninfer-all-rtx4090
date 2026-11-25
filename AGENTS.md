@@ -57,11 +57,13 @@ release folders (`text_config.latent_moe`): each text layer's routed experts are
 8 groups (NVFP4, or Q3_K and IQ4_NL) between Q8_0 or Q4_0 group encoders and decoders, which
 `moe_latent_gguf` runs with the family's placements, CPU share and tensor parallelism by whole
 groups.
-Native Qwen MoE, Gemma MoE and Flint also support host/disk expert placements, with whole-layer
-device banks beside the optional persistent cache and the same CPU share of decode misses.
-Gemma 4 26B-A4B (`Gemma4ForCausalLM`, the text component of `Gemma4ForConditionalGeneration`;
-`src/models/gemma4`, `runtime/engine/gemma4_core`) is a third explicit family converted from
-Google's QAT GGUF (or a mixed-format GGUF of the same model) with its ggml blocks kept as stored.
+Native Qwen MoE, Gemma MoE, Flint and Inkling 2 also support host/disk expert placements, with
+whole-layer device banks beside the optional persistent cache and the same CPU share of decode
+misses.
+Gemma 4 26B-A4B and the dense Gemma 4 31B (`Gemma4ForCausalLM`, the text component of
+`Gemma4ForConditionalGeneration`; `src/models/gemma4`, `runtime/engine/gemma4_core`) are a third
+explicit family converted from Google's QAT GGUFs (or a mixed-format GGUF of the same model) with
+their ggml blocks kept as stored.
 It shares the Qwen3.5 frontend (tokenizer, chat template, output channels and Gemma's tool-call
 markup), runs one to eight sequences in prompt chunks of 2048 tokens (narrower where memory is
 short) with an F16 KV cache or any
@@ -69,14 +71,16 @@ short) with an F16 KV cache or any
 `mtp` component, `--spec mtp`),
 encodes images and video with the release's vision tower (the artifact's `vision` component, from
 its llama.cpp mmproj; resident, streamed from pinned memory, or FP32 on CPU threads), and has no
-pipeline stages; several GPUs divide its routed experts (`--tensor-parallel`).
+pipeline stages; several GPUs divide the 26B's routed experts (`--tensor-parallel`), and the 31B,
+which has none, runs on one GPU.
 Flint (`FlintForCausalLM`; `src/models/flint`, `runtime/engine/flint_core`) is a fourth explicit
 family converted from a llama.cpp GGUF of Recursive's release (Unsloth's UD-Q4_K_XL) with its ggml
 blocks kept as stored. It shares the Qwen3.5 frontend in a Flint dialect (its pre-tokenizer, the
 role-marker chat template, reasoning the model opens itself, GLM-4.7 tool calls), runs one to eight
-sequences in prompt chunks of 2048 tokens with an F16 KV cache, drafts by context lookup only
-(`--lookup-ngram`; Recursive publishes no draft model), and has no vision, rotation scaling or
-pipeline stages; several GPUs divide its routed experts (`--tensor-parallel`).
+sequences in prompt chunks of 2048 tokens with an F16 KV cache (or its full-attention blocks in
+`int8`, `rk8v4` or `rk4v4` planes), drafts by context lookup only (`--lookup-ngram`; Recursive
+publishes no draft model), and has no vision, rotation scaling or pipeline stages; several GPUs
+divide its routed experts (`--tensor-parallel`).
 DeepSeek-V4.1-Flash (`DeepseekV41ForCausalLM`; `src/models/deepseek_v41`,
 `runtime/engine/deepseek_v41_core`) is a fifth explicit family converted from ISTA-DASLab's
 GSQ-RCO GGUF (IQ1_M) and its Engram table GGUF with the ggml blocks kept as stored. It shares the
@@ -93,6 +97,19 @@ from the release's mmproj and its routing bias of image positions; resident or s
 memory).
 No video, rotation scaling or pipeline stages; several GPUs divide its host or disk experts
 (`--tensor-parallel`, each device its own banks and copies).
+Inkling 2 Mini (`Inkling2ForCausalLM`, the text component of
+`Inkling2LoopForConditionalGeneration`; `src/models/inkling2`, `runtime/engine/inkling2_core`) is a
+sixth explicit family and the engine's first looped transformer, converted from a llama.cpp GGUF of
+Thinking Machines' release (Unsloth's UD-IQ4_XS) with its ggml blocks kept as stored: 24 stored
+layers run as 48 visits, the core layers three times with the same weights, each visit with its own
+keys, values and convolution histories. It shares the Qwen3.5 frontend in an Inkling dialect (the
+release's message blocks, reasoning and JSON tool-call blocks that the model opens itself), runs
+one to eight sequences in prompt chunks of 2048 tokens with its full-attention visits' KV in MXFP8
+(the default), `int8`, `rk8v4` or `rk4v4` planes or F16, the windowed rings F16, drafts with the
+release's DSpark drafter (the `dspark` component; without `--spec` while one request runs) or by
+context lookup, encodes images with the release's vision tower (the `vision` component; resident or
+streamed from pinned memory), and has no rotation scaling, video or pipeline stages; several GPUs
+divide its routed experts (`--tensor-parallel`).
 Flash-Next's dense and attention arithmetic runs on the GPU. Of a decode or verification call's
 routed experts that the device cache lacks, CPU threads may compute a share from the host copy
 while the GPU copies and runs the rest (hybrid execution, `--expert-dma-share`), including a share

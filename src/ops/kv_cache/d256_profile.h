@@ -46,6 +46,16 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(DType dtype, DType val
         return {DType::BF16, DType::BF16, kD256KVCacheHeadDim, kD256KVCacheHeadDim,
                 0,           DType::FP16, 0,                   DType::FP16,
                 0};
+    case DType::FP16:
+        return {DType::FP16,
+                DType::FP16,
+                kD256KVCacheHeadDim,
+                kD256KVCacheHeadDim,
+                0,
+                DType::FP16,
+                0,
+                DType::FP16,
+                0};
     case DType::I8:
         if (value_code_dtype == DType::U8) {
             return {DType::I8, DType::U8,   kD256KVCacheHeadDim, kD256KVCacheHeadDim / 2,
@@ -87,6 +97,8 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
         return d256_kv_cache_profile(DType::BF16);
+    case ninfer::KvCacheStorage::Float16:
+        return d256_kv_cache_profile(DType::FP16);
     case ninfer::KvCacheStorage::Int8Group64:
         return d256_kv_cache_profile(DType::I8, DType::I8);
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
@@ -128,6 +140,9 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
         // A row's 384 bytes of codes and exponent nibbles, and its 8-byte side record as the scale
         // plane (ops/kv_cache/bf16p_codec.cuh); no quantization group.
         return {DType::U8, DType::U8, 384, 384, 0, DType::U8, 8, DType::U8, 8};
+    case ninfer::KvCacheStorage::Mxfp8:
+        // Inkling 2's D128 planes only (models/inkling2/kv_format.h).
+        break;
     }
     throw std::invalid_argument("unknown KV-cache storage profile");
 }

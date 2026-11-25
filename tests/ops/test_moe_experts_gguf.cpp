@@ -63,6 +63,20 @@ float exact_q2_0(const std::uint8_t* block, int element) {
     return float(multiplier * (code - 1));
 }
 
+// OCP E2M1 values and unsigned E4M3 scale per 16 values, decoded without a production kernel.
+float exact_nvfp4(const std::uint8_t* block, int element) {
+    constexpr double values[] = {0, 0.5, 1, 1.5, 2, 3, 4, 6};
+    const unsigned scale      = block[element / 16];
+    if (scale & 128U) { throw std::runtime_error("invalid NVFP4 scale in fixture"); }
+    const unsigned exponent = scale >> 3, fraction = scale & 7U;
+    const double multiplier = scale == 127 ? 0
+                              : exponent   ? std::ldexp(1.0 + fraction / 8.0, int(exponent) - 7)
+                                           : std::ldexp(double(fraction), -9);
+    const unsigned byte     = block[4 + (element / 16) * 8 + element % 8];
+    const unsigned code     = (element % 16 < 8 ? byte : byte >> 4) & 15U;
+    return float(multiplier * values[code & 7U] * (code & 8U ? -1 : 1));
+}
+
 void check(cudaError_t status, const char* what) {
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(status));
@@ -162,10 +176,12 @@ struct Bank {
             matrices.back().copy_from_host(bytes.data(), bytes.size());
             host.push_back(bytes);
             exact.emplace_back(std::size_t(rows) * k);
-            if (q == QType::GGUF_Q2_0) {
+            if (q == QType::GGUF_Q2_0 || q == QType::GGUF_NVFP4) {
                 for (std::size_t element = 0; element < exact.back().size(); ++element) {
-                    exact.back()[element] = exact_q2_0(bytes.data() + (element / 64) * 18,
-                                                       int(element % 64));
+                    const auto* packed    = bytes.data() + (element / 64) * block.bytes;
+                    exact.back()[element] = q == QType::GGUF_Q2_0
+                                                ? exact_q2_0(packed, int(element % 64))
+                                                : exact_nvfp4(packed, int(element % 64));
                 }
             } else {
                 DeviceBuffer values(std::size_t(rows) * k * sizeof(float));
@@ -199,7 +215,7 @@ double silu(double x) { return x / (1.0 + std::exp(-x)); }
 
 // One expert's product for one token (BF16 words) on the CPU, as the miss service computes it.
 std::vector<float> cpu_expert(const Bank& gate, const Bank& up, const Bank& down, int expert,
-                              const std::uint16_t* x) {
+                              const std::uint16_t* x, const float* scales = nullptr) {
     const auto matrix = [&](const Bank& bank, int rows, int k) {
         return ops::GgufCpuMatrix{bank.format, bank.host[expert % bank.distinct].data(),
                                   bank.row_bytes, rows, k};
@@ -211,17 +227,26 @@ std::vector<float> cpu_expert(const Bank& gate, const Bank& up, const Bank& down
     std::vector<float> g(kWidth), u(kWidth), y(kHidden);
     ops::gguf_cpu_rows(matrix(gate, kWidth, kHidden), in, 0, kWidth, g.data(), kWidth, backend);
     ops::gguf_cpu_rows(matrix(up, kWidth, kHidden), in_up, 0, kWidth, u.data(), kWidth, backend);
+    if (scales != nullptr) {
+        for (int r = 0; r < kWidth; ++r) {
+            g[r] *= scales[0];
+            u[r] *= scales[1];
+        }
+    }
     std::vector<std::uint16_t> m(kWidth);
     ops::gguf_cpu_swiglu_bf16(g.data(), u.data(), kWidth, m.data(), backend);
     middle.prepare_bf16(down.format, m.data(), kWidth, 1);
     ops::gguf_cpu_rows(matrix(down, kHidden, kWidth), middle, 0, kHidden, y.data(), kHidden,
                        backend);
+    if (scales != nullptr) {
+        for (auto& value : y) { value *= scales[2]; }
+    }
     return y;
 }
 
 // down . (silu(gate . x) * (up . x)) in FP64.
 std::vector<double> expert_output(const float* gate, const float* up, const float* down,
-                                  const std::vector<float>& x) {
+                                  const std::vector<float>& x, const float* scales = nullptr) {
     std::vector<double> middle(kWidth);
     for (int r = 0; r < kWidth; ++r) {
         double g = 0, u = 0;
@@ -231,14 +256,14 @@ std::vector<double> expert_output(const float* gate, const float* up, const floa
             g += double(gr[i]) * x[i];
             u += double(ur[i]) * x[i];
         }
-        middle[r] = silu(g) * u;
+        middle[r] = silu(g * (scales ? scales[0] : 1)) * u * (scales ? scales[1] : 1);
     }
     std::vector<double> out(kHidden);
     for (int r = 0; r < kHidden; ++r) {
         double acc      = 0;
         const float* dr = down + std::size_t(r) * kWidth;
         for (int i = 0; i < kWidth; ++i) { acc += double(dr[i]) * middle[i]; }
-        out[r] = acc;
+        out[r] = acc * (scales ? scales[2] : 1);
     }
     return out;
 }
@@ -249,6 +274,7 @@ struct Case {
     int distinct;
     std::vector<int> tokens;
     int expert_pool; // routes draw from experts [0, expert_pool)
+    bool scaled = false;
 };
 
 int run_case(const Case& c, std::uint32_t seed) {
@@ -259,11 +285,28 @@ int run_case(const Case& c, std::uint32_t seed) {
     const Bank sgate(c.shared_gate, kWidth, kHidden, 1, 1, rng);
     const Bank sup(c.shared_up, kWidth, kHidden, 1, 1, rng);
     const Bank sdown(c.shared_down, kHidden, kWidth, 1, 1, rng);
+    std::vector<float> scales(kExperts * 3);
+    for (int e = 0; e < kExperts; ++e) {
+        scales[3 * e]     = 0.7F + float(e % 7) * 0.1F;
+        scales[3 * e + 1] = 0.8F + float(e % 5) * 0.1F;
+        scales[3 * e + 2] = 0.6F + float(e % 11) * 0.05F;
+    }
+    DeviceBuffer d_scales(c.scaled ? scales.size() * sizeof(float) : 0);
+    if (c.scaled) { d_scales.copy_from_host(scales.data(), scales.size() * sizeof(float)); }
     int failures = 0;
     for (const int tokens : c.tokens) {
         const bool device_resident = true;
-        const ops::GgufMoeWeights banks{gate.view(),  up.view(),  down.view(), sgate.view(),
-                                        sup.view(),   sdown.view(), kExperts,  device_resident};
+        const ops::GgufMoeWeights banks{gate.view(),
+                                        up.view(),
+                                        down.view(),
+                                        sgate.view(),
+                                        sup.view(),
+                                        sdown.view(),
+                                        kExperts,
+                                        device_resident,
+                                        kWidth,
+                                        true,
+                                        static_cast<const float*>(d_scales.p)};
         std::normal_distribution<float> normal(0.0f, 1.0f);
         std::uniform_real_distribution<float> unit(0.05f, 1.0f);
         std::vector<__nv_bfloat16> m(std::size_t(kHidden) * tokens);
@@ -292,7 +335,7 @@ int run_case(const Case& c, std::uint32_t seed) {
         Tensor t_m(d_m.p, DType::BF16, {kHidden, tokens}),
             t_ids(d_ids.p, DType::I32, {kTopK, tokens}), t_w(d_w.p, DType::FP32, {kTopK, tokens}),
             t_s(d_s.p, DType::FP32, {tokens}), t_y(d_y.p, DType::FP32, {kHidden, tokens});
-        WorkspaceArena workspace(ops::moe_experts_gguf_workspace_bytes(tokens) + (1U << 20));
+        WorkspaceArena workspace(ops::moe_experts_gguf_workspace_bytes(tokens, c.scaled));
         ops::moe_experts_gguf(t_m, t_ids, t_w, t_s, banks, workspace, t_y, nullptr);
         check(cudaDeviceSynchronize(), "moe_experts_gguf");
         std::vector<float> got(std::size_t(kHidden) * tokens);
@@ -314,13 +357,14 @@ int run_case(const Case& c, std::uint32_t seed) {
                 x[i] = __bfloat162float(m[std::size_t(t) * kHidden + i]);
             }
             double* want = oracle.data() + std::size_t(t) * kHidden;
-            // Experts sharing a matrix share its output for this token.
-            std::vector<std::vector<double>> outputs(c.distinct);
+            // Scaled experts may share blocks but keep different external multipliers.
+            std::vector<std::vector<double>> outputs(c.scaled ? c.expert_pool : c.distinct);
             for (int j = 0; j < kTopK; ++j) {
                 const int e = ids[t * kTopK + j];
-                auto& o     = outputs[e % c.distinct];
+                auto& o     = outputs[c.scaled ? e : e % c.distinct];
                 if (o.empty()) {
-                    o = expert_output(gate.rows_of(e), up.rows_of(e), down.rows_of(e), x);
+                    o = expert_output(gate.rows_of(e), up.rows_of(e), down.rows_of(e), x,
+                                      c.scaled ? scales.data() + 3 * e : nullptr);
                 }
                 for (int r = 0; r < kHidden; ++r) { want[r] += weights[t * kTopK + j] * o[r]; }
             }
@@ -355,7 +399,8 @@ int run_case(const Case& c, std::uint32_t seed) {
                 const std::size_t at = s == 0 ? 0 : n - 1; // the part with the shared expert
                 std::vector<DeviceBuffer> tables, fixed;
                 std::vector<Tensor> parts;
-                WorkspaceArena part_workspace(ops::moe_experts_gguf_part_workspace_bytes(tokens));
+                WorkspaceArena part_workspace(
+                    ops::moe_experts_gguf_part_workspace_bytes(tokens, c.scaled));
                 for (std::size_t p = 0; p < n; ++p) {
                     const int begin = ends[p], end = ends[p + 1];
                     tables.push_back(gate.range_table(begin, end));
@@ -367,10 +412,17 @@ int run_case(const Case& c, std::uint32_t seed) {
                                                     bank.row_bytes};
                     };
                     const std::size_t base = tables.size() - 3;
-                    const ops::GgufMoeWeights part_banks{
-                        view(gate, base), view(up, base + 1), view(down, base + 2),
-                        sgate.view(),     sup.view(),         sdown.view(),
-                        kExperts,         device_resident};
+                    const ops::GgufMoeWeights part_banks{view(gate, base),
+                                                         view(up, base + 1),
+                                                         view(down, base + 2),
+                                                         sgate.view(),
+                                                         sup.view(),
+                                                         sdown.view(),
+                                                         kExperts,
+                                                         device_resident,
+                                                         kWidth,
+                                                         true,
+                                                         static_cast<const float*>(d_scales.p)};
                     fixed.emplace_back(std::size_t(kHidden) * tokens * 8);
                     parts.push_back(Tensor(fixed.back().p, DType::I64, {kHidden, tokens}));
                     ops::moe_experts_gguf_part(t_m, t_ids, t_w, p == at ? &t_s : nullptr,
@@ -409,7 +461,8 @@ int run_case(const Case& c, std::uint32_t seed) {
                 const std::size_t n = layout.experts.size() - 1;
                 std::vector<DeviceBuffer> buffers, fixed;
                 std::vector<Tensor> parts;
-                WorkspaceArena part_workspace(ops::moe_experts_gguf_part_workspace_bytes(tokens));
+                WorkspaceArena part_workspace(
+                    ops::moe_experts_gguf_part_workspace_bytes(tokens, c.scaled));
                 const auto table_of = [&](const DeviceBuffer& run) {
                     DeviceBuffer table(sizeof(void*));
                     table.copy_from_host(&run.p, sizeof(void*));
@@ -467,7 +520,9 @@ int run_case(const Case& c, std::uint32_t seed) {
                         view(sdown.format, buffers[base + 5], down_bytes),
                         kExperts,
                         device_resident,
-                        width};
+                        width,
+                        true,
+                        static_cast<const float*>(d_scales.p)};
                     buffers.push_back(std::move(gate_run));
                     buffers.push_back(std::move(up_run));
                     buffers.push_back(std::move(down_run));
@@ -619,20 +674,20 @@ int run_case(const Case& c, std::uint32_t seed) {
                 failures += differ == 0 ? 0 : 1;
             }
         }
-        if (tokens > 8) {
+        if (tokens > 8 || c.scaled) {
             // Banks not declared device resident are refused past eight tokens.
-            ops::GgufMoeWeights mapped = banks;
-            mapped.device_resident     = false;
-            bool refused               = false;
-            try {
-                ops::moe_experts_gguf(t_m, t_ids, t_w, t_s, mapped, workspace, t_y, nullptr);
-            } catch (const std::invalid_argument&) {
-                refused = true;
+            if (tokens > 8) {
+                ops::GgufMoeWeights mapped = banks;
+                mapped.device_resident     = false;
+                bool refused               = false;
+                try {
+                    ops::moe_experts_gguf(t_m, t_ids, t_w, t_s, mapped, workspace, t_y, nullptr);
+                } catch (const std::invalid_argument&) { refused = true; }
+                std::cout << (refused ? "OK   " : "FAIL ") << c.name << " T=" << tokens
+                          << ": banks read across the bus are " << (refused ? "" : "not ")
+                          << "refused\n";
+                failures += refused ? 0 : 1;
             }
-            std::cout << (refused ? "OK   " : "FAIL ") << c.name << " T=" << tokens
-                      << ": banks read across the bus are " << (refused ? "" : "not ")
-                      << "refused\n";
-            failures += refused ? 0 : 1;
             // The experts of each kind: a mixed call routes both.
             std::vector<int> uses(kExperts, 0);
             for (const std::int32_t e : ids) { ++uses[e]; }
@@ -707,7 +762,8 @@ int run_case(const Case& c, std::uint32_t seed) {
                     if (e % 2 != 0 && uses[e] <= ops::kGgufMoeVectorPairs) {
                         const auto* x = reinterpret_cast<const std::uint16_t*>(m.data()) +
                                         (p / kTopK) * std::size_t(kHidden);
-                        const auto y = cpu_expert(gate, up, down, e, x);
+                        const auto y = cpu_expert(gate, up, down, e, x,
+                                                  c.scaled ? scales.data() + 3 * e : nullptr);
                         products.insert(products.end(), y.begin(), y.end());
                         pairs.push_back(std::int32_t(p));
                     } else {
@@ -726,6 +782,73 @@ int run_case(const Case& c, std::uint32_t seed) {
         failures += against_oracle(got, "");
     }
     return failures;
+}
+
+// A call of more than 6,553 tokens (more pairs than a grid has rows) equals the same tokens in two
+// calls bit for bit: Flash-Next's IQ3_XXS gate and up with IQ4_NL down on the matrix kernel, and
+// MXFP4, which only the vector kernel takes, its down products' input quantized over every pair.
+int wide_call(const char* name, QType gate_up, QType down_format, std::uint32_t seed) {
+    constexpr int kTokens = 6600, kHalf = kTokens / 2;
+    std::mt19937 rng(seed);
+    using Q = QType;
+    const Bank gate(gate_up, kWidth, kHidden, 4, kExperts, rng);
+    const Bank up(gate_up, kWidth, kHidden, 4, kExperts, rng);
+    const Bank down(down_format, kHidden, kWidth, 4, kExperts, rng);
+    const Bank sgate(Q::GGUF_Q6_K, kWidth, kHidden, 1, 1, rng);
+    const Bank sup(Q::GGUF_Q6_K, kWidth, kHidden, 1, 1, rng);
+    const Bank sdown(Q::GGUF_IQ4_NL, kHidden, kWidth, 1, 1, rng);
+    const ops::GgufMoeWeights banks{gate.view(), up.view(),    down.view(), sgate.view(),
+                                    sup.view(),  sdown.view(), kExperts,    true,
+                                    kWidth,      true,         nullptr};
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::uniform_real_distribution<float> unit(0.05f, 1.0f);
+    std::vector<__nv_bfloat16> m(std::size_t(kHidden) * kTokens);
+    for (auto& v : m) { v = __float2bfloat16(normal(rng)); }
+    std::vector<std::int32_t> ids(std::size_t(kTopK) * kTokens);
+    std::vector<float> weights(ids.size()), shared(kTokens);
+    std::vector<int> pool(kExperts);
+    std::iota(pool.begin(), pool.end(), 0);
+    for (int t = 0; t < kTokens; ++t) {
+        std::shuffle(pool.begin(), pool.end(), rng);
+        for (int j = 0; j < kTopK; ++j) {
+            ids[t * kTopK + j]     = pool[j];
+            weights[t * kTopK + j] = unit(rng);
+        }
+        shared[t] = unit(rng);
+    }
+    DeviceBuffer d_m(m.size() * 2), d_ids(ids.size() * 4), d_w(weights.size() * 4),
+        d_s(shared.size() * 4), d_y(std::size_t(kHidden) * kTokens * 4),
+        d_halves(std::size_t(kHidden) * kTokens * 4);
+    d_m.copy_from_host(m.data(), m.size() * 2);
+    d_ids.copy_from_host(ids.data(), ids.size() * 4);
+    d_w.copy_from_host(weights.data(), weights.size() * 4);
+    d_s.copy_from_host(shared.data(), shared.size() * 4);
+    WorkspaceArena workspace(ops::moe_experts_gguf_workspace_bytes(kTokens, false));
+    const auto run = [&](int first, int tokens, void* y) {
+        const auto at = [&](const DeviceBuffer& b, std::size_t per_token, std::size_t bytes) {
+            return static_cast<std::uint8_t*>(b.p) + std::size_t(first) * per_token * bytes;
+        };
+        Tensor t_m(at(d_m, kHidden, 2), DType::BF16, {kHidden, tokens}),
+            t_ids(at(d_ids, kTopK, 4), DType::I32, {kTopK, tokens}),
+            t_w(at(d_w, kTopK, 4), DType::FP32, {kTopK, tokens}),
+            t_s(at(d_s, 1, 4), DType::FP32, {tokens}),
+            t_y(static_cast<std::uint8_t*>(y) + std::size_t(first) * kHidden * 4, DType::FP32,
+                {kHidden, tokens});
+        ops::moe_experts_gguf(t_m, t_ids, t_w, t_s, banks, workspace, t_y, nullptr);
+        check(cudaDeviceSynchronize(), "moe_experts_gguf wide");
+    };
+    run(0, kTokens, d_y.p);
+    run(0, kHalf, d_halves.p);
+    run(kHalf, kTokens - kHalf, d_halves.p);
+    std::vector<float> whole(std::size_t(kHidden) * kTokens), halves(whole.size());
+    d_y.copy_to_host(whole.data(), whole.size() * 4);
+    d_halves.copy_to_host(halves.data(), halves.size() * 4);
+    bool finite = true;
+    for (const float v : whole) { finite = finite && std::isfinite(v); }
+    const bool same = finite && std::memcmp(whole.data(), halves.data(), whole.size() * 4) == 0;
+    std::cout << (same ? "OK   " : "FAIL ") << name << " wide call T=" << kTokens
+              << ": equals two calls of " << kHalf << '\n';
+    return same ? 0 : 1;
 }
 
 } // namespace
@@ -872,6 +995,17 @@ int main() {
              4,
              {1, 3, 8, 9, 64, 260},
              kExperts},
+            {"nvfp4 scaled bank",
+             Q::GGUF_NVFP4,
+             Q::GGUF_NVFP4,
+             Q::GGUF_NVFP4,
+             Q::GGUF_Q8_0,
+             Q::GGUF_Q8_0,
+             Q::GGUF_Q8_0,
+             4,
+             {1, 3, 8, 9, 24, 65},
+             30,
+             true},
             {"q3_k bank",
              Q::GGUF_Q3_K,
              Q::GGUF_Q3_K,
@@ -886,6 +1020,8 @@ int main() {
         int failures       = 0;
         std::uint32_t seed = 4242;
         for (const auto& c : cases) { failures += run_case(c, seed++); }
+        failures += wide_call("iq3_xxs/iq4_nl", QType::GGUF_IQ3_XXS, QType::GGUF_IQ4_NL, seed++);
+        failures += wide_call("mxfp4", QType::GGUF_MXFP4, QType::GGUF_MXFP4, seed++);
         std::cout << (failures == 0 ? "OK" : "FAIL") << " MoE experts GGUF\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

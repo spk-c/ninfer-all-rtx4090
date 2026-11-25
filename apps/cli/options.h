@@ -54,6 +54,7 @@ struct Options {
     std::optional<std::uint32_t> kv_resident_positions; // Flash-Next: --kv-resident
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    bool kv_cache_automatic = false; // no --kv-dtype (EngineOptions::kv_cache_automatic)
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     VisionResidency vision_residency       = VisionResidency::Resident;
@@ -93,6 +94,8 @@ struct Options {
 
     std::vector<TokenId> stop_token_ids;
     std::vector<StopString> stop_strings;
+    // --bad-word: text the reply never contains (ExecutionOptions::bad_words).
+    std::vector<std::string> bad_words;
 
     // Omitted fields are resolved from the loaded model and rendered prompt mode by Engine.
     SamplingOverrides sampling;

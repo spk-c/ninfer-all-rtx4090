@@ -4,6 +4,7 @@
 #include "ggml_bridge.h"
 #include "ggml_bridge_mmq_launch.cuh"
 #include "ggml_bridge_vec_launch.cuh"
+#include "q8_1_value.cuh"
 
 #include "../../common/device_tier.h"
 #include "../../common/fixed_point.cuh"
@@ -61,31 +62,24 @@ const DeviceFacts& device_facts() {
 
 namespace {
 
-// x BF16 [columns][k] -> the vector kernel's planar q8 activation: ggml's q8_1 numbers, one warp per
-// 32 values, element i of column c read from x[c][input_columns[i]] when a gather is given.
+// x BF16 [columns][k] -> the vector kernel's planar q8 activation: ggml's q8_1 numbers, one warp
+// per 32 values, element i of column c read from x[c][input_columns[i]] when a gather is given.
+// Grid row y takes columns y, y + gridDim.y, ... (a grid has at most 65535 rows).
 constexpr int kQuantizeThreads = 256;
-
-// Value i of column `column` into the planar q8_1 activation; every lane of the warp takes part.
-__device__ __forceinline__ void quantize_vector_value(float xi, int i, int column,
-                                                      std::int8_t* __restrict__ qs,
-                                                      half2* __restrict__ ds, int k) {
-    const float amax = warp_reduce_max<QK8_1>(fabsf(xi));
-    const float sum  = warp_reduce_sum<QK8_1>(xi);
-    const float d    = amax / 127.0f;
-    qs[std::int64_t(column) * k + i] = amax == 0.0f ? 0 : static_cast<std::int8_t>(roundf(xi / d));
-    if (i % QK8_1 == 0) { ds[std::int64_t(column) * (k / QK8_1) + i / QK8_1] = make_half2(d, sum); }
-}
+constexpr int kQuantizeRows    = 65535;
 
 __launch_bounds__(kQuantizeThreads) __global__
     void quantize_vector_kernel(const __nv_bfloat16* __restrict__ x,
                                 const std::int32_t* __restrict__ input_columns,
-                                std::int8_t* __restrict__ qs, half2* __restrict__ ds, int k) {
-    const int i      = blockDim.x * blockIdx.x + threadIdx.x;
-    const int column = blockIdx.y;
+                                std::int8_t* __restrict__ qs, half2* __restrict__ ds, int k,
+                                int columns) {
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= k) { return; }
     const int source = input_columns != nullptr ? input_columns[i] : i;
-    quantize_vector_value(__bfloat162float(x[std::int64_t(column) * k + source]), i, column, qs, ds,
-                          k);
+    for (int column = blockIdx.y; column < columns; column += gridDim.y) {
+        quantize_q8_1_value(__bfloat162float(x[std::int64_t(column) * k + source]), i, column, qs,
+                            ds, k);
+    }
 }
 
 // FP32 columns: output column c reads x column source[c] (zeros for a negative entry), each value
@@ -94,20 +88,21 @@ __launch_bounds__(kQuantizeThreads) __global__
     void quantize_vector_f32_kernel(const float* __restrict__ x,
                                     const std::int32_t* __restrict__ source,
                                     const float* __restrict__ scale, std::int8_t* __restrict__ qs,
-                                    half2* __restrict__ ds, int k) {
-    const int i      = blockDim.x * blockIdx.x + threadIdx.x;
-    const int column = blockIdx.y;
+                                    half2* __restrict__ ds, int k, int columns) {
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= k) { return; }
-    const int from = source != nullptr ? source[column] : column;
-    float xi       = 0.0f;
-    if (from >= 0) {
-        xi = x[std::int64_t(from) * k + i];
-        if (scale != nullptr) { xi = __fmul_rn(xi, scale[i]); }
+    for (int column = blockIdx.y; column < columns; column += gridDim.y) {
+        const int from = source != nullptr ? source[column] : column;
+        float xi       = 0.0f;
+        if (from >= 0) {
+            xi = x[std::int64_t(from) * k + i];
+            if (scale != nullptr) { xi = __fmul_rn(xi, scale[i]); }
+        }
+        quantize_q8_1_value(xi, i, column, qs, ds, k);
     }
-    quantize_vector_value(xi, i, column, qs, ds, k);
 }
 
-using VectorLaunch = void (*)(const VecArgs&, int, bool, cudaStream_t);
+using VectorLaunch = void (*)(const VecJobs&, int, bool, cudaStream_t);
 using MoeLaunch    = void (*)(const MoeVecArgs&, int, int, bool, cudaStream_t);
 
 MoeLaunch moe_launcher(GgmlType type) {
@@ -711,43 +706,67 @@ void quantize_vector_activation(const __nv_bfloat16* x, int k, int columns,
                                 const std::int32_t* input_columns, void* out,
                                 cudaStream_t stream) {
     // Whole warps of 32 values: a warp past K leaves as one, before its reductions.
-    if (k <= 0 || k % QK8_1 != 0 || columns <= 0 || columns > 65535) {
+    if (k <= 0 || k % QK8_1 != 0 || columns <= 0) {
         throw std::invalid_argument("gguf vector activation: K must be whole 32-value blocks");
     }
     auto* base = static_cast<std::uint8_t*>(out);
-    const dim3 blocks((k + detail::kQuantizeThreads - 1) / detail::kQuantizeThreads, columns, 1);
+    const dim3 blocks((k + detail::kQuantizeThreads - 1) / detail::kQuantizeThreads,
+                      std::min(columns, detail::kQuantizeRows), 1);
     detail::quantize_vector_kernel<<<blocks, detail::kQuantizeThreads, 0, stream>>>(
         x, input_columns, reinterpret_cast<std::int8_t*>(base),
-        reinterpret_cast<half2*>(base + detail::vec_scales_offset(k, columns)), k);
+        reinterpret_cast<half2*>(base + detail::vec_scales_offset(k, columns)), k, columns);
     detail::check(cudaGetLastError(), "vector activation launch");
 }
 
 void quantize_vector_activation_f32(const float* x, int k, int columns, const std::int32_t* source,
                                     const float* scale, void* out, cudaStream_t stream) {
-    if (k <= 0 || k % QK8_1 != 0 || columns <= 0 || columns > 65535) {
+    if (k <= 0 || k % QK8_1 != 0 || columns <= 0) {
         throw std::invalid_argument("gguf vector activation: K must be whole 32-value blocks");
     }
     auto* base = static_cast<std::uint8_t*>(out);
-    const dim3 blocks((k + detail::kQuantizeThreads - 1) / detail::kQuantizeThreads, columns, 1);
+    const dim3 blocks((k + detail::kQuantizeThreads - 1) / detail::kQuantizeThreads,
+                      std::min(columns, detail::kQuantizeRows), 1);
     detail::quantize_vector_f32_kernel<<<blocks, detail::kQuantizeThreads, 0, stream>>>(
         x, source, scale, reinterpret_cast<std::int8_t*>(base),
-        reinterpret_cast<half2*>(base + detail::vec_scales_offset(k, columns)), k);
+        reinterpret_cast<half2*>(base + detail::vec_scales_offset(k, columns)), k, columns);
     detail::check(cudaGetLastError(), "vector activation launch");
 }
 
-void vector_product(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
-                    const void* activation, int columns, const VectorOutput& out,
-                    cudaStream_t stream) {
+namespace {
+
+detail::VecStore vector_store(const VectorOutput& out) {
     if ((out.bf16 == nullptr) == (out.f32 == nullptr) ||
         (out.epilogue == Epilogue::GateProduct && out.gate == nullptr)) {
         throw std::invalid_argument("gguf vector product: invalid output");
     }
-    const detail::VecStore store{out.bf16,     out.f32,  out.column_stride,
-                                 out.epilogue, out.gate, out.gate_column_stride,
-                                 static_cast<int>(out.activation)};
-    detail::vector_launch(type)(
-        detail::vector_args(weight, row_bytes, rows, k, activation, columns, store), columns,
-        false, stream);
+    return detail::VecStore{out.bf16,     out.f32,  out.column_stride,
+                            out.epilogue, out.gate, out.gate_column_stride,
+                            static_cast<int>(out.activation)};
+}
+
+} // namespace
+
+void vector_product(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
+                    const void* activation, int columns, const VectorOutput& out,
+                    cudaStream_t stream) {
+    detail::VecJobs jobs{};
+    jobs.job[0] =
+        detail::vector_args(weight, row_bytes, rows, k, activation, columns, vector_store(out));
+    jobs.count = 1;
+    detail::vector_launch(type)(jobs, columns, false, stream);
+}
+
+void vector_products(GgmlType type, std::int64_t row_bytes, int k,
+                     std::span<const VectorJob> products, int columns, cudaStream_t stream) {
+    if (products.empty() || products.size() > std::size_t(kMaxVectorJobs)) {
+        throw std::invalid_argument("gguf vector products: 1..4 products");
+    }
+    detail::VecJobs jobs{};
+    for (const VectorJob& p : products) {
+        jobs.job[jobs.count++] = detail::vector_args(p.weight, row_bytes, p.rows, k, p.activation,
+                                                     columns, vector_store(p.out));
+    }
+    detail::vector_launch(type)(jobs, columns, false, stream);
 }
 
 void vector_swiglu(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
@@ -757,9 +776,10 @@ void vector_swiglu(GgmlType type, const void* weight, std::int64_t row_bytes, in
     const detail::VecStore store{out,     nullptr, out_column_stride,
                                  Epilogue::Store, nullptr, 0,
                                  static_cast<int>(gate_activation)};
-    detail::vector_launch(type)(
-        detail::vector_args(weight, row_bytes, rows, k, activation, columns, store), columns,
-        true, stream);
+    detail::VecJobs jobs{};
+    jobs.job[0] = detail::vector_args(weight, row_bytes, rows, k, activation, columns, store);
+    jobs.count  = 1;
+    detail::vector_launch(type)(jobs, columns, true, stream);
 }
 
 std::size_t moe_routing_bytes(int experts, int pairs) {

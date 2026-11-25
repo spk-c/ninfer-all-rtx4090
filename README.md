@@ -40,12 +40,13 @@ An RTX 4090 / CUDA 13.4 deployment of the [Huihui Qwen3.8 27B GSQ-RCO IQ3_S, Vis
 
 A C++/CUDA inference engine for the Qwen3.5 model family (Qwen3.6 and Qwen3.8 27B, Qwen3.6-35B-A3B,
 their fine-tunes and Ternary Bonsai 2), Qwen3.8-Flash-Next and Edge0's latent-MoE models built on it,
-Gemma 4 26B-A4B, Recursive's Flint and DeepSeek-V4.1-Flash, on NVIDIA GPUs from Volta to consumer Blackwell, from 8 GB of memory. It serves the OpenAI, Anthropic
-and llama.cpp APIs from one GPU, or from up to eight as pipeline stages on Linux. The same chat model
+Gemma 4 26B-A4B and 31B, Recursive's Flint, DeepSeek-V4.1-Flash and Thinking Machines' looped
+Inkling 2 Mini, on NVIDIA GPUs from Volta to consumer Blackwell, from 8 GB of memory. It serves the
+OpenAI, Anthropic and llama.cpp APIs from one GPU, or from up to eight as pipeline stages on Linux. The same chat model
 answers [typed decisions](docs/serving.md#typed-decisions): choice, yes/no and score questions about
 a state, each option with its probability, through TypeSafe's System One and OpenAI's Decisions APIs.
 
-[What's New](#whats-new) · [Quick start](#quick-start) · [Supported GPUs](#supported-gpus) · [Models](#artifacts) ·
+**[What's New](#whats-new)** · [Quick start](#quick-start) · [Supported GPUs](#supported-gpus) · [Supported Models](#supported-models) ·
 [Highlights](#highlights) · [Features](#features) · [Docker](#docker) · [Building](#building) ·
 [Documentation](docs/README.md)
 
@@ -63,8 +64,13 @@ carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits ea
 
 <!-- Novelties only: a new model, family, artifact, platform, option, endpoint, format or mode, or a measured speedup of a path that worked. No fixes of any kind (crashes, wrong output, failed starts, missed cases, regressions and the speedups that win them back, the options and defaults they bring), no guards, diagnostics, internal, CI, build, test or documentation changes, and no chronicle: a date without a novelty gets no line. One line per date, a few words per item, each linked to the document with its details; no descriptions, mechanisms, measurements or hardware. Full rule: CONTRIBUTING.md, "Documentation describes the current state". -->
 
+- **2026-11-23:** Inkling 2 [decoding faster](docs/inkling2.md#what-runs), [decoding faster after long prompts](docs/inkling2.md#long-contexts) and [prefilling long prompts faster](docs/inkling2.md#long-contexts); Gemma 4 and Flint decoding faster on Blackwell cards ([Gemma 4](docs/gemma4.md#what-runs), [Flint](docs/flint.md#what-runs)); Flint [decoding faster with `int8`, `rk8v4` and `rk4v4` KV](docs/flint.md#kv-cache); Flash-Next [prefilling long prompts faster](docs/qwen3-8-flash-next.md#execution); faster prompt chunks with [`cp.async` tiles](docs/device-profiles.md#what-is-calibrated) for NVFP4 weights; vLLM's [`bad_words`](docs/serving.md#banned-words), strings a reply never writes, and the CLI's [`--bad-word`](docs/cli.md); [`--no-structured-output-instruction`](docs/serving.md#structured-output), which keeps a constrained request's messages as the caller sent them; [device profiles](docs/gpus.md) for six more GPUs; Inkling 2 Mini [on Turing](docs/inkling2.md#long-contexts).
+- **2026-11-22:** [POST /shutdown](docs/serving.md#stop-the-server), the HTTP form of the graceful stop, registered by [`--admin-token`](docs/serving.md#server-options); [POST /v1/answer_now](docs/serving.md#answer-now), which ends a running reply's thinking; Inkling 2's [MXFP8 KV cache](docs/inkling2.md#kv-cache), its default (`--kv-dtype mxfp8`), and its [`int8`, `rk8v4` and `rk4v4` KV formats](docs/inkling2.md#kv-cache); Flint's [`int8`, `rk8v4` and `rk4v4` KV formats](docs/flint.md#kv-cache); for Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Flash-Next a [disk tier, prefix cache file and session slots](docs/serving.md#context-cache-of-the-other-families) (`--disk-kv-path`, `--prefix-cache-file`, `--slot-save-path`), and a checkpoint inside a long message, so a document followed by another question resumes after the document; [thinking budgets](docs/serving.md#openai-chat-completions) and `--reasoning-loop conclude` for Inkling 2, Flint and Gemma 4; Inkling 2 [prefilling and decoding faster at long contexts](docs/inkling2.md#long-contexts).
+- **2026-11-21:** [Inkling 2 Mini](docs/inkling2.md), the first looped transformer, from Unsloth's UD-IQ4_XS GGUF with the release's vision tower and DSpark drafter, [published](#supported-models); its [Q8_0 vision tower](docs/inkling2.md#converting) from a llama.cpp mmproj, and IsValorum's [APEX-I MiniPlus](docs/inkling2.md#apex-i-miniplus), [published](#supported-models); Unsloth's [UD-IQ1_M, UD-Q2_K_XL and UD-Q3_K_XL](docs/inkling2.md#smaller-quantizations) (8.2 to 13.4 GiB), [published](#supported-models); Unsloth's [UD-Q8_K_XL](docs/inkling2.md#ud-q8_k_xl) with its BF16 attention, head and experts (22.1 GiB), [published](#supported-models).
+- **2026-11-20:** Faster GGUF prompt chunks with [`cp.async` tiles](docs/device-profiles.md#what-is-calibrated) for Q4_0, Q5_0, Q8_0, IQ4_NL, Q5_K, Q2_0, IQ4_XS and IQ1_M weights; [device profiles](docs/gpus.md) for nine more GPUs.
+- **2026-11-19:** [Gemma 4 31B](docs/gemma4.md#gemma-4-31b) with its MTP assistant and vision tower, [published](#supported-models); [Basalt Flash-Next pack and serving-JSON conversion](docs/basalt-conversion.md), [Q8PLE n-gram tables](docs/qwen3-8-flash-next.md#q8ple-tables) and their [conversion from NVIDIA's FP8 PLE](docs/flash-next-native-dflash2.md#q8ple-directly-from-nvidia-fp8) with a [source-preserving Flash-Next recipe](docs/flash-next-native-dflash2.md), and [native FP16 KV](docs/qwen3-8-flash-next.md#native-fp16-kv) for Flash-Next and Edge0 (`--kv-dtype fp16`).
 - **2026-11-16:** [System One image boxes and image URLs](docs/serving.md#image-boxes), [`--media-urls`](docs/serving.md#media-urls) that sets the size of a fetched media URL (URLs are refused without it), and Qwen3.8-27B GGUFs with a [condensed vocabulary](docs/weight-conversion.md#a-condensed-vocabulary).
-- **2026-11-13:** [Edge0-145B and Edge0-120B](docs/edge0.md), latent-MoE models on the Flash-Next skeleton, converted from Edge0's release folders and [published](#artifacts) for all four releases with the base model's Vision tower, ggml's [NVFP4 blocks](docs/gguf.md), Flash-Next and Edge0 models reading [either family's n-gram table](docs/qwen3-8-flash-next.md#another-table-of-the-same-shape), [DSpine drafting](docs/cli.md#speculative-decoding) in every family from a drafter artifact of its own (`--spec dspine --draft-model`) with [Tencent's Qwen3.8-27B drafter converted](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3), [`--adaptive-mtp` for DFlash, DFlash2 and DSpine](docs/serving.md#adaptive-mtp) on Qwen3.5-core models, and DeepSeek-V4.1 [hot Engram rows in RAM](docs/deepseek-v41.md#the-hot-row-profile) (`--ngram-residency ram-hot`), with a hot-row profile in the published Engram table and in [Edge0's FP8 n-gram table](docs/edge0.md).
+- **2026-11-13:** [Edge0-145B and Edge0-120B](docs/edge0.md), latent-MoE models on the Flash-Next skeleton, converted from Edge0's release folders and [published](#supported-models) for all four releases with the base model's Vision tower, ggml's [NVFP4 blocks](docs/gguf.md), Flash-Next and Edge0 models reading [either family's n-gram table](docs/qwen3-8-flash-next.md#another-table-of-the-same-shape), [DSpine drafting](docs/cli.md#speculative-decoding) in every family from a drafter artifact of its own (`--spec dspine --draft-model`) with [Tencent's Qwen3.8-27B drafter converted](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3), [`--adaptive-mtp` for DFlash, DFlash2 and DSpine](docs/serving.md#adaptive-mtp) on Qwen3.5-core models, and DeepSeek-V4.1 [hot Engram rows in RAM](docs/deepseek-v41.md#the-hot-row-profile) (`--ngram-residency ram-hot`), with a hot-row profile in the published Engram table and in [Edge0's FP8 n-gram table](docs/edge0.md).
 - **2026-11-12:** [Launch configuration files](docs/cli.md#launch-configuration-files) (`--config`), with [one for each launch recipe](docs/recipes.md) in `configs/`.
 - **2026-11-11:** [Faster prefill](docs/maintainer/qwen3_5-model.md#prefill-decode-and-mtp) and [request preparation](docs/maintainer/qwen3_5-model.md#request-preparation) in every family, disk experts read [from a second drive or straight into GPU memory](docs/expert-disk-reads.md) (`--expert-mirror`, `--expert-direct`), and [Gumbel-max sampling with drafts drawn the same way](docs/cli.md#speculative-decoding) (`--gumbel-sampling`).
 - **2026-11-10:** [DFlash2 drafting for Qwen3.6-35B-A3B](docs/cli.md#speculative-decoding), Flash-Next artifacts of [Unsloth's Dynamic v3.1 GGUFs](docs/qwen3-8-flash-next.md#convert), Flash-Next prompts past 8,192 tokens [prefilling 1.1-1.4 times as fast](docs/qwen3-8-flash-next.md#expert-placements) with host or disk experts, Qwen3.5-core prompts that the hybrid cache taps [prefilling in one pass](docs/maintainer/hybrid-prefix-cache-spec.md#72-in-pass-exact-taps) (a 213-token first prompt 11% sooner), the hybrid cache over pipeline stages and tensor parallelism with [`--use-alt-prefix-caching`](docs/serving.md#server-options), DeepSeek-V4.1 [attention caches in the release's FP8/FP4 codes](docs/deepseek-v41.md#what-runs), DSpark drafting with host or disk experts [keeping 64 drafter experts a block on the GPU](docs/deepseek-v41.md#the-drafters-experts), 1.12 times as fast on an RTX 4090 (`--draft-experts`), Flash-Next with device experts [decoding 1.10 times as fast](docs/qwen3-8-flash-next.md#execution) (1.12 with MTP), and context lookup that [keeps the occurrence it copies](docs/flint.md#measurements), 1.06-1.40 times as fast on answers that copy one of two versions of a file (`--lookup-ngram`), and [`--kv-dtype bf16p`](docs/cli.md#context-and-memory), BF16's KV bits in 23% fewer bytes.
@@ -87,7 +93,7 @@ carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits ea
   Dense Qwen3.5-core models gain `--tensor-parallel`.
 - **2026-10-24:** [Flint](docs/flint.md#measurements) decodes 348 tok/s on an RTX 5090 and 210 on an RTX 4090 with host experts.
 - **2026-10-23:** NInfer supports [Flint](docs/flint.md) from Unsloth's UD-Q4_K_XL GGUF.
-  [Native releases](https://github.com/iamwavecut/ninfer-all/releases) cover Windows and Debian 13 with CUDA 12.9 and 13.4.
+  [Native releases](https://github.com/iamwavecut/ninfer-all/releases/latest) cover Windows and Debian 13 with CUDA 12.9 and 13.4.
 - **2026-10-22:** [Typed decisions](docs/serving.md#typed-decisions) are available at `/v1/decisions` and `/v1/systemone`.
   Every model family supports YaRN.
 - **2026-10-20:** [CPU threads compute a share of host experts](docs/qwen3-8-flash-next.md#the-cpu-share) beside the GPU.
@@ -103,7 +109,7 @@ carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits ea
 
 ## Quick start
 
-Download an artifact ([all models](#artifacts)) and serve it from the [Docker image](#docker). The server
+Download an artifact ([all models](#supported-models)) and serve it from the [Docker image](#docker). The server
 speaks the OpenAI and Anthropic APIs on http://localhost:8080/v1, answers typed decisions there, and
 each card picks up its device profile on its own.
 
@@ -190,11 +196,11 @@ Every card by name, with what has run on it:
 
 | GPU memory | Runs | Measured on |
 |---|---|---|
-| 8 GB | Ternary Bonsai 2 27B (24,576 tokens with `rk4v4`, no MTP); Qwen3.8-Flash-Next with its experts in host memory or on disk | RTX 3060 Ti |
+| 8 GB | Ternary Bonsai 2 27B (24,576 tokens with `rk4v4`, no MTP); Qwen3.8-Flash-Next and Inkling 2 Mini with their experts in host memory or on disk | RTX 3060 Ti; RTX 5060 for Inkling 2 Mini |
 | 11 GB | Ternary Bonsai 2 27B (200,704 tokens with `rk4v4`; 143,360 with MTP) | RTX 2080 Ti |
-| 12 GB | Ternary Bonsai 2 27B (266,240 tokens); Qwen3.8-27B GSQ-RCO IQ3_S (8,192 tokens, no MTP) | RTX 3060 |
-| 16 GB | Gemma 4 26B-A4B Q4_0 (61,440 tokens); Qwen3.8-27B IQ3_S (241,664 tokens); the official Qwen3.8-27B with `--embedding-q4 --lm-head-q4` | Tesla V100-SXM2-16GB |
-| 24 GB | the official Qwen3.8-27B and its MXFP8 tune; Qwen3.6-35B-A3B `groupwise-int` on an RTX 3090; Flash-Next with every expert on the GPU over two cards; DeepSeek-V4.1-Flash with its experts in host memory or on disk | RTX 3090, RTX 4090, TITAN RTX |
+| 12 GB | Ternary Bonsai 2 27B (266,240 tokens); Qwen3.8-27B GSQ-RCO IQ3_S (8,192 tokens, no MTP); Inkling 2 Mini with its experts in host memory | RTX 3060; also the RTX 5070 for Inkling 2 Mini |
+| 16 GB | Gemma 4 26B-A4B Q4_0 (61,440 tokens); Qwen3.8-27B IQ3_S (241,664 tokens); the official Qwen3.8-27B with `--embedding-q4 --lm-head-q4`; Inkling 2 Mini with its experts in host memory | Tesla V100-SXM2-16GB; RTX 5080, 5060 Ti, 4080 Super, 4060 Ti and A4000 for Inkling 2 Mini |
+| 24 GB | Gemma 4 31B Q4_0 (101,376 tokens; 87,040 with MTP); the official Qwen3.8-27B and its MXFP8 tune; Qwen3.6-35B-A3B `groupwise-int` on an RTX 3090; Flash-Next with every expert on the GPU over two cards; DeepSeek-V4.1-Flash with its experts in host memory or on disk | RTX 3090, RTX 4090, TITAN RTX |
 | 32 GB | Qwen3.6-35B-A3B NVFP4 (Blackwell only) | RTX 5090 |
 | 48 GB | Flash-Next Q2_0 with every expert on one card | L40S, RTX PRO 6000 |
 
@@ -204,14 +210,14 @@ Every card by name, with what has run on it:
 <summary><b>Device profiles and limits</b> — how a card gets its kernel routes</summary>
 
 - **Device profiles.** A profile picks the kernel route of every operation and width. The binary
-  carries profiles measured on 48 GPU models, from the Tesla V100 and RTX 2060 Super to the RTX PRO
+  carries profiles measured on 66 GPU models, from the Tesla V100 and RTX 2060 Super to the RTX PRO
   6000 (the Profile column of [supported GPUs](docs/gpus.md#cards)); a built-in profile applies to
   the same GPU name, compute capability and SM count. Any other card is calibrated once at first
-  start, which takes about half a minute to three and a half minutes, and the result is stored for
-  later starts; `ninfer-calibrate` measures again after a driver or clock change
-  ([device profiles](docs/device-profiles.md)). The `70` build runs its own
-  routes, so the V100 profiles hold only the GDN prefill switch and, for the 32 GB card, the Q8 MoE
-  prefill frontier.
+  start, which takes from 12 seconds on a Tesla V100 to about six minutes on the smallest cards,
+  and the result is stored for later starts; `ninfer-calibrate` measures again after a driver or
+  clock change ([device profiles](docs/device-profiles.md)). The `70` build runs its own
+  routes, so the V100 profiles hold only the GDN prefill switch, the GGUF load schedules and, for
+  the SXM2 32 GB card, the Q8 MoE prefill frontier.
 - **Architecture limits.** NVFP4 expert weights need a `120a` build. The Turing and Volta builds
   replace instructions their GPUs lack and reshape kernels to their shared memory
   ([Turing](docs/build-linux.md#turing-sm_75), [Tesla V100](docs/build-linux.md#tesla-v100-sm_70)).
@@ -221,49 +227,113 @@ Every card by name, with what has run on it:
 
 </details>
 
-## Artifacts
+## Supported Models
 
-Each name links to its Hugging Face card; a row of several builds links each build, with their sizes
-in the same order. The Flash-Next and Edge0 rows end with a link to
-[their n-gram tables](#flash-next-n-gram-tables), the DeepSeek rows with their Engram table. `hf download REPO FILE.ninfer --local-dir models`
-fetches a file. The Bonsai, GSQ-RCO, Flash-Next, Edge0, Gemma 4, Flint and DeepSeek-V4.1-Flash artifacts use
-formats that only this engine reads.
+Each name links to its Hugging Face card. `hf download REPO FILE.ninfer --local-dir models` fetches a file.
+The Bonsai, GSQ-RCO, Flash-Next, Edge0, Gemma 4, Flint, DeepSeek-V4.1-Flash and Inkling 2 artifacts use formats that only this engine reads.
+Rows go from the fewest bits per weight to the most.
 ✓ means the artifact carries the component, — that it does not.
+Drafting lists the drafters the artifact carries; a linked one is an artifact of its own.
+Flash-Next, Edge0 and DeepSeek-V4.1-Flash models also need an n-gram table, an artifact of its own:
+their Notes link it, and [N-gram tables](#n-gram-tables) lists them all.
 
-| Model | Size, GiB | Weights | Vision | MTP | DFlash2 | Proposal head | Notes |
-|---|---:|---|:-:|:-:|:-:|:-:|---|
-| [Ternary Bonsai 2 27B](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3) | 8.87 | ternary, 2.125 bits | ✓ | ✓ | ✓ | ✓ | Bonsai-trained MTP head and DFlash2 adapter |
-| Qwen3.8-27B: [official](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) · [GSQ-RCO IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3) | 19.03 · 13.99 | groupwise-int (Q4/Q5) · GGUF blocks, 3.5 bits | ✓ | ✓ | ✓ | ✓ | the official artifact, which the reference tables use; ISTA-DASLab's GGUF blocks byte for byte with a Q6_K MTP head |
-| [Qwen3.8-27B, abliterated](https://huggingface.co/WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | ✓ | ✓ | ✓ | the official recipe |
-| [Qwen3.8-27B Uncensored, HauhauCS Aggressive](https://huggingface.co/WaveCut/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-DFlash2-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | ✓ | ✓ | ✓ | the tune's MTP head |
-| [Qwen3.8-27B MXFP8-CRACK](https://huggingface.co/WaveCut/Qwen3.8-27B-MXFP8-CRACK-NInfer-v3) | 16.96 | groupwise-int | ✓ | ✓ | — | ✓ |  |
-| [Qwen3.6-35B-A3B NVFP4](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 21.04 | NVFP4 experts, Q8 projections | ✓ | ✓ | ✓ | ✓ | RedHatAI's NVFP4 experts code for code, incoai's DFlash2 drafter; `sm_120a` GPUs only |
-| Qwen3.8-Flash-Next: [GSQ-RCO Q2_0](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) · [GSQ-RCO IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) · [UD-IQ2_XS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ2_XS-NInfer-v3) · [UD-IQ3_XXS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ3_XXS-NInfer-v3) · [n-gram tables](#flash-next-n-gram-tables) | 38.23 · 54.24 · 47.43 · 54.66 | GGUF blocks: ISTA-DASLab's GSQ-RCO 2.4 · 3.5 bits, Unsloth Dynamic v3.1 | ✓ | ✓ | ✓ | — | shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter |
-| Qwen3.8-Flash-Next Coder GSQ-RCO: [IQ1_M](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) · [n-gram tables](#flash-next-n-gram-tables) | 30.76 | GGUF blocks | ✓ | ✓ | ✓ | — | expert-pruned coding build, 256 experts per layer; shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter |
-| Edge0-145B: [NVFP4](https://huggingface.co/WaveCut/Edge0-145B-NVFP4-NInfer-v3) · [q3k](https://huggingface.co/WaveCut/Edge0-145B-q3k-NInfer-v3) · [n-gram tables](#flash-next-n-gram-tables) | 54.41 · 47.43 | NVFP4 · Q3_K/IQ4_NL latent experts, Q8_0 encoders and decoders | ✓ | ✓ | — | — | Edge0's release byte for byte, the base model's Vision tower; experts in host memory or on disk on one 48 GB card |
-| Edge0-120B: [NVFP4](https://huggingface.co/WaveCut/Edge0-120B-NVFP4-NInfer-v3) · [q3k](https://huggingface.co/WaveCut/Edge0-120B-q3k-NInfer-v3) · [n-gram tables](#flash-next-n-gram-tables) | 39.58 · 34.60 | NVFP4 · Q3_K/IQ4_NL latent experts, Q4_0 encoders and decoders | ✓ | ✓ | — | — | Edge0's release byte for byte, the base model's Vision tower; every expert on one 48 GB card |
-| [Gemma 4 26B-A4B it QAT](https://huggingface.co/WaveCut/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-NInfer-v3) | 14.75 | GGUF Q4_0 blocks | ✓ | ✓ | — | — | Google's QAT GGUF byte for byte; the MTP column is Google's QAT assistant |
-| [Flint UD-Q4_K_XL](https://huggingface.co/WaveCut/Flint-UD-Q4_K_XL-NInfer-v3) | 23.38 | GGUF blocks, Q8_0 to IQ3_S | — | — | — | — | Unsloth's UD-Q4_K_XL GGUF byte for byte; drafts by context lookup |
-| DeepSeek-V4.1-Flash-1017 GSQ-RCO: [IQ1_M](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-NInfer-v3) · [Engram table](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-Engram-IQ4_NL-NInfer-v3) | 117.18 · 103.32 | GGUF blocks, IQ1_S to IQ2_S experts | ✓ | — | — | — | ISTA-DASLab's GGUF byte for byte; experts in host memory or on disk; the release's vision tower (images); the release's DSpark drafter in beamster's STQ encoding (`--spec dspark`), or context lookup |
-| DeepSeek-V4.1-Flash-1017 GSQ-RCO Coder: [IQ2_XXS](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-NInfer-v3) · [Engram table](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-Engram-IQ4_NL-NInfer-v3) | 71.85 · 103.32 | GGUF blocks, IQ1_M to IQ2_XS experts | ✓ | — | — | — | ISTA-DASLab's expert-pruned coding build byte for byte, 192 of 384 experts per block; otherwise as the IQ1_M artifact |
+### Ternary Bonsai 2 27B
 
-DeepSeek-V4.1-Flash models read the Engram table in their row, which the model names by digest; pass
-it with `--ngram-table`. The Engram table holds the release's IQ4_NL rows.
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Ternary Bonsai 2 27B](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3) | 8.87 | ternary, 2.125 bits | ✓ | MTP<br>DFlash2<br>Proposal head | Bonsai-trained MTP head and DFlash2 adapter |
+
+### Qwen3.8-27B
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [GSQ-RCO IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3) | 13.99 | GGUF blocks, 3.5 bits | ✓ | MTP<br>DFlash2<br>Proposal head<br>[DSpine](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | ISTA-DASLab's GGUF blocks byte for byte with a Q6_K MTP head |
+| [Official](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | 19.03 | groupwise-int (Q4/Q5) | ✓ | MTP<br>DFlash2<br>Proposal head<br>[DSpine](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | The official artifact, which the reference tables use |
+| [Abliterated](https://huggingface.co/WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | MTP<br>DFlash2<br>Proposal head<br>[DSpine](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | The official recipe |
+| [Uncensored, HauhauCS Aggressive](https://huggingface.co/WaveCut/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-DFlash2-NInfer-v3) | 19.03 | groupwise-int (Q4/Q5) | ✓ | MTP<br>DFlash2<br>Proposal head<br>[DSpine](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | The tune's MTP head |
+| [MXFP8-CRACK](https://huggingface.co/WaveCut/Qwen3.8-27B-MXFP8-CRACK-NInfer-v3) | 16.96 | groupwise-int | ✓ | MTP<br>Proposal head<br>[DSpine](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | Without bundled DFlash2 adapter |
+| [DSpine Drafter (Tencent)](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3) | 2.27 | Q8 layers and a BF16 code bridge | — | — | Drafter artifact loaded with `--spec dspine --draft-model` beside any Qwen3.8-27B artifact |
+
+### Qwen3.6-35B-A3B
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [NVFP4](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 21.04 | NVFP4 experts, Q8 projections | ✓ | MTP<br>DFlash2<br>Proposal head | RedHatAI's NVFP4 experts code for code, incoai's DFlash2 drafter; `sm_120a` GPUs only |
+
+### Qwen3.8-Flash-Next
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Coder GSQ-RCO IQ1_M](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) | 30.76 | GGUF blocks | ✓ | MTP<br>DFlash2 | Expert-pruned coding build, 256 experts per layer; shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; requires an n-gram table ([IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) or [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3)) |
+| [GSQ-RCO Q2_0](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) | 38.23 | GGUF blocks: ISTA-DASLab's GSQ-RCO 2.4 bits | ✓ | MTP<br>DFlash2 | Shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; requires an n-gram table ([IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) or [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3)) |
+| [UD-IQ2_XS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ2_XS-NInfer-v3) | 47.43 | GGUF blocks: Unsloth Dynamic v3.1 | ✓ | MTP<br>DFlash2 | Shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; requires an n-gram table ([IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) or [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3)) |
+| [GSQ-RCO IQ3_S](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) | 54.24 | GGUF blocks: ISTA-DASLab's GSQ-RCO 3.5 bits | ✓ | MTP<br>DFlash2 | Shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; requires an n-gram table ([IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) or [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3)) |
+| [UD-IQ3_XXS](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-UD-IQ3_XXS-NInfer-v3) | 54.66 | GGUF blocks: Unsloth Dynamic v3.1 | ✓ | MTP<br>DFlash2 | Shared-Q8_0 MTP, incoai's Q4_0 DFlash2 drafter; requires an n-gram table ([IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) or [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3)) |
+
+### Edge0
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Edge0-120B q3k](https://huggingface.co/WaveCut/Edge0-120B-q3k-NInfer-v3) | 34.60 | Q3_K/IQ4_NL latent experts, Q4_0 encoders and decoders | ✓ | MTP | Edge0's release byte for byte, base model's Vision tower; every expert on one 48 GB card; requires an n-gram table ([FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3) or [IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3)) |
+| [Edge0-145B q3k](https://huggingface.co/WaveCut/Edge0-145B-q3k-NInfer-v3) | 47.43 | Q3_K/IQ4_NL latent experts, Q8_0 encoders and decoders | ✓ | MTP | Edge0's release byte for byte, base model's Vision tower; experts in host memory or on disk on one 48 GB card; requires an n-gram table ([FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3) or [IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3)) |
+| [Edge0-120B NVFP4](https://huggingface.co/WaveCut/Edge0-120B-NVFP4-NInfer-v3) | 39.58 | NVFP4 latent experts, Q4_0 encoders and decoders | ✓ | MTP | Edge0's release byte for byte, base model's Vision tower; every expert on one 48 GB card; requires an n-gram table ([FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3) or [IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3)) |
+| [Edge0-145B NVFP4](https://huggingface.co/WaveCut/Edge0-145B-NVFP4-NInfer-v3) | 54.41 | NVFP4 latent experts, Q8_0 encoders and decoders | ✓ | MTP | Edge0's release byte for byte, base model's Vision tower; experts in host memory or on disk on one 48 GB card; requires an n-gram table ([FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3) or [IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3)) |
+
+### Gemma 4
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Gemma 4 26B-A4B it QAT](https://huggingface.co/WaveCut/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-NInfer-v3) | 14.75 | GGUF Q4_0 blocks | ✓ | MTP | Google's QAT GGUF byte for byte; MTP is Google's QAT assistant |
+| [Gemma 4 31B it QAT](https://huggingface.co/WaveCut/gemma-4-31B-it-QAT-Q4_0-MTP-NInfer-v3) | 17.77 | GGUF Q4_0 blocks | ✓ | MTP | Google's QAT GGUF byte for byte, the dense model; MTP is Google's QAT assistant for it |
+
+### Flint
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Flint UD-Q4_K_XL](https://huggingface.co/WaveCut/Flint-UD-Q4_K_XL-NInfer-v3) | 23.38 | GGUF blocks, Q8_0 to IQ3_S | — | — | Unsloth's UD-Q4_K_XL GGUF byte for byte; drafts by context lookup |
+
+### DeepSeek-V4.1-Flash
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [GSQ-RCO IQ1_M](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-NInfer-v3) | 117.18 | GGUF blocks, IQ1_S to IQ2_S experts | ✓ | DSpark | ISTA-DASLab's GGUF byte for byte; experts in host memory or on disk; vision tower (images); DSpark drafter (`--spec dspark`) or context lookup; requires the [Engram table](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-Engram-IQ4_NL-NInfer-v3) |
+| [GSQ-RCO Coder IQ2_XXS](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-NInfer-v3) | 71.85 | GGUF blocks, IQ1_M to IQ2_XS experts | ✓ | DSpark | ISTA-DASLab's expert-pruned coding build byte for byte, 192 of 384 experts per block; otherwise as the IQ1_M artifact; requires the [Engram table](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-Engram-IQ4_NL-NInfer-v3) |
+
+### Inkling 2 Mini
+
+| Model | Size, GiB | Weights | Vision | Drafting | Notes |
+|---|---:|---|:-:|---|---|
+| [Inkling 2 Mini UD-IQ1_M](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-IQ1_M-NInfer-v3) | 8.28 | GGUF blocks, IQ1_S to IQ2_S [gate; up], Q2_0 down banks | ✓ | DSpark | Unsloth's UD-IQ1_M GGUF byte for byte; otherwise as UD-IQ4_XS |
+| [Inkling 2 Mini UD-Q2_K_XL](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-Q2_K_XL-NInfer-v3) | 9.48 | GGUF blocks, IQ1_S to IQ2_S [gate; up], Q2_0 and NVFP4 down banks | ✓ | DSpark | Unsloth's UD-Q2_K_XL GGUF byte for byte, its one MXFP4 bank as the same values in Q8_0; otherwise as UD-IQ4_XS |
+| [Inkling 2 Mini APEX-I MiniPlus V2.1](https://huggingface.co/WaveCut/Inkling-2-Mini-APEX-I-MiniPlus-V2.1-NInfer-v3) | 12.89 | GGUF blocks, IQ3_XXS and IQ3_S experts | ✓ | DSpark | IsValorum's APEX-I MiniPlus GGUF byte for byte with its Q8_0 vision tower; Unsloth's DSpark drafter; otherwise as UD-IQ4_XS |
+| [Inkling 2 Mini UD-Q3_K_XL](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-Q3_K_XL-NInfer-v3) | 13.50 | GGUF blocks, NVFP4 and IQ3 experts | ✓ | DSpark | Unsloth's UD-Q3_K_XL GGUF byte for byte; otherwise as UD-IQ4_XS |
+| [Inkling 2 Mini UD-IQ4_XS](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-IQ4_XS-NInfer-v3) | 15.46 | GGUF blocks, NVFP4 experts in 20 of 24 layers | ✓ | DSpark | Unsloth's UD-IQ4_XS GGUF byte for byte; Q8_0 vision tower (images); DSpark drafter, by default for one request at a time, or context lookup |
+| [Inkling 2 Mini UD-Q8_K_XL](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-Q8_K_XL-NInfer-v3) | 22.15 | BF16 attention, head, token table and layers 20-23's experts; NVFP4 experts in 20 layers | ✓ | DSpark | Unsloth's UD-Q8_K_XL GGUF byte for byte; a card of 32 GB or more, or host experts; otherwise as UD-IQ4_XS |
+
 Tencent's [DSpine drafter for Qwen3.8-27B](https://huggingface.co/WaveCut/Qwen3.8-27B-DSpine-b16-NInfer-v3)
 (2.27 GiB, Q8 layers and a BF16 code bridge) is an artifact of its own, which
 `--spec dspine --draft-model` loads beside any Qwen3.8-27B artifact.
 
-### Flash-Next n-gram tables
+### N-gram tables
 
-Every Qwen3.8-Flash-Next and Edge0 model reads any table below with `--ngram-table`. A model names
-the table it was converted with, and the engine accepts any table of the model's shape, in any row
-format ([another table of the same shape](docs/qwen3-8-flash-next.md#another-table-of-the-same-shape)).
+A model names the table it was converted with by digest; pass the table with `--ngram-table`.
+
+Every Qwen3.8-Flash-Next and Edge0 model reads either of these two tables. The engine accepts any
+table of the model's shape, in any row format
+([another table of the same shape](docs/qwen3-8-flash-next.md#another-table-of-the-same-shape)).
 Perplexity: the first 40 KB of WikiText, INT8 KV, one A40.
 
 | Table | Size, GiB | Rows | Hot-row profile | Named by | Perplexity: Flash-Next Q2_0 · Edge0-120B-q3k |
 |---|---:|---|:-:|---|---|
 | [IQ4_NL](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) | 26.92 | IQ4_NL blocks, 90 bytes a row: the GSQ-RCO and Unsloth releases' table byte for byte | ✓ | Flash-Next builds, Coder | 2.542153 · 5.017691 |
 | [FP8](https://huggingface.co/WaveCut/Edge0-ngram-table-FP8-NInfer-v3) | 48.38 | FP8 E4M3 codes and an FP16 scale, 162 bytes a row: Edge0's `ple-fp8.gguf` codes byte for byte, its one scale in every row | ✓ | Edge0 builds | 2.531971 · 4.964565 |
+
+DeepSeek-V4.1-Flash models read the Engram table, the release's IQ4_NL rows with a hot-row profile
+(`--ngram-residency ram-hot`).
+
+| Table | Size, GiB | Rows | Hot-row profile | Named by |
+|---|---:|---|:-:|---|
+| [Engram](https://huggingface.co/WaveCut/DeepSeek-V4.1-Flash-Engram-IQ4_NL-NInfer-v3) | 103.32 | IQ4_NL blocks: the release's rows | ✓ | GSQ-RCO IQ1_M, Coder IQ2_XXS |
 
 The official NInfer artifacts (Qwen3.6-27B, Qwen3.6-35B-A3B and Qwen3.8-27B, `groupwise-int` and
 `nvfp4`) load too; the [documentation map](docs/README.md#model-artifacts) links them. Weight
@@ -275,8 +345,9 @@ conversion shows how the [Bonsai](docs/weight-conversion.md#ternary-bonsai-2-27b
 Ternary Bonsai 2 27B decodes 397 tok/s on an RTX 5090 with DFlash2 and holds a 978,944-token context with
 every planted code found. Qwen3.8-Flash-Next decodes 138 tok/s with every expert on one RTX PRO 6000, and
 96 tok/s with its experts in host memory on one RTX 5090. DeepSeek-V4.1-Flash decodes 52 tok/s on one
-RTX 5090, 48 on one RTX PRO 6000 and 39 on one RTX 4090 with its 106.7 GiB of experts in host memory. Every table of
-every card is on the [performance page](docs/performance.md).
+RTX 5090, 48 on one RTX PRO 6000 and 39 on one RTX 4090 with its 106.7 GiB of experts in host memory. Inkling 2 Mini
+decodes 182 tok/s on an RTX 5090, 1.4 to 2.8 times llama.cpp's rate on 25 cards, and runs on an 8 GB card with its
+experts in host memory. Every table of every card is on the [performance page](docs/performance.md).
 
 *Click a section to expand it.*
 
@@ -389,12 +460,54 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
 
 </details>
 
+<details>
+<summary><b>Inkling 2 Mini</b> — 182 tok/s on an RTX 5090, 1.4 to 2.8 times llama.cpp's decode, from 8 GB</summary>
+
+Unsloth's UD-IQ4_XS GGUF with the vision tower and the DSpark drafter (a 15.4 GiB artifact), one request, F16 KV,
+November 21, 2026, against llama.cpp on the same GGUF (Unsloth's build `b12588-mix-c0c3de8`; mainline
+llama.cpp does not load it). A prompt of 10,000 tokens and a decode of 128, in tok/s, NInfer-all / llama.cpp:
+
+| Card | Experts | Prefill of 10,000 tokens | Decode |
+|---|---|---:|---:|
+| RTX 5090 | on the card | 6,664 / 2,318 | 182.1 / 96.9 |
+| RTX 4090 | on the card | 4,537 / 2,307 | 140.1 / 75.0 |
+| RTX 3090 | on the card | 2,046 / 1,236 | 112.0 / 59.5 |
+| RTX 5080 | in host memory | 3,238 / 1,377 | 116.5 / 41.3 |
+| RTX 3060 12 GB | in host memory | 759 / 387 | 48.8 / 24.8 |
+| RTX 5060 8 GB | in host memory | 1,074 / 293 | 33.1 / 14.7 |
+
+On cards of 8 to 16 GB the routed experts stay in pinned host memory and the card caches the most used,
+while llama.cpp places the model with its own `--fit`. From disk (`--expert-residency disk`) the RTX 5060
+prefills 591 tok/s and decodes 9.6. While one request runs, the release's DSpark drafter decodes the same
+text 1.06 to 1.33 times as fast with the experts on the card. Every card, the drafter and the hosts are in
+[Inkling 2 Mini's measurements](docs/inkling2.md#across-cards).
+
+With the [Docker image](#docker), or the same `--config` on a
+[native release](https://github.com/iamwavecut/ninfer-all/releases/latest):
+
+```bash
+hf download WaveCut/Inkling-2-Mini-UD-IQ4_XS-NInfer-v3 Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer --local-dir models
+
+# 24 GB and more: every expert on the card, images, DSpark, a 64K-token context.
+docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -w / \
+  -v "$PWD/models:/models" -v ninfer-cache:/cache \
+  ghcr.io/iamwavecut/ninfer-all:cuda13.4 serve --config /opt/ninfer/configs/inkling2-mini.ini
+
+# 8 to 16 GB: the experts in 13.1 GiB of pinned host memory, a 32K-token context
+# (the 8 GB RTX 5060 above ran with --max-context 12288).
+docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -w / \
+  -v "$PWD/models:/models" -v ninfer-cache:/cache \
+  ghcr.io/iamwavecut/ninfer-all:cuda13.4 serve --config /opt/ninfer/configs/inkling2-mini-host.ini
+```
+
+</details>
+
 ## Features
 
 *Click a section to expand it.*
 
 <details>
-<summary><b>Models and weight formats</b> — Qwen3.5 family, GGUF block formats, Ternary Bonsai 2, Flash-Next, Gemma 4, Flint, DeepSeek-V4.1-Flash</summary>
+<summary><b>Models and weight formats</b> — Qwen3.5 family, GGUF block formats, Ternary Bonsai 2, Flash-Next, Gemma 4, Flint, DeepSeek-V4.1-Flash, Inkling 2 Mini</summary>
 
 - **Qwen3.5 family.** Dense and MoE (`Qwen3_5ForCausalLM`, `Qwen3_5MoeForCausalLM`) with MTP,
   DFlash (35B-A3B) and DFlash2 (Qwen3.8-27B, 35B-A3B) drafters, Vision for images and video, and
@@ -427,6 +540,10 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   for speculative decoding. On an RTX 3090 it prefills a 10,000-token prompt at 6,045 tok/s and decodes at 215
   tok/s, 190 after 10,000 tokens, against llama.cpp's 4,697, 169 and 152 on the same GGUF; with two
   drafts a round chat answers decode at 291 tok/s instead of 209 ([Gemma 4](docs/gemma4.md)).
+- **Gemma 4 31B.** The dense model from Google's QAT Q4_0 GGUF (16.4 GiB on the GPU) with its own
+  QAT assistant and the vision tower, on one 24 GB card: on an RTX 3090 it holds 101,376 tokens of
+  F16 context and decodes 42 tok/s plainly, 95 to 110 tok/s with two drafts a round
+  ([Gemma 4 31B](docs/gemma4.md#gemma-4-31b)).
 - **Flint.** Recursive's 39.8B coding MoE (2.5B active), from a llama.cpp GGUF such as Unsloth's
   UD-Q4_K_XL, imported block for block (23.4 GiB): sliding-window and position-free full-attention
   blocks with learned sinks, 256 routed experts beside a shared one, up to eight concurrent
@@ -451,7 +568,19 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   to 38.9 tok/s and prefills 8,086 tokens at 938 tok/s; on the same host
   Strata 0.2.6 decodes at 34 to 40 tok/s and prefills at 635 to 690
   ([DeepSeek-V4.1-Flash](docs/deepseek-v41.md)).
-- **CPU share of host and disk experts.** With Flash-Next, Gemma 4, Flint or native Qwen3.5/3.6
+- **Inkling 2 Mini.** Thinking Machines' looped 26.4B MoE (3.4B active per token), the engine's
+  first looped transformer, from Unsloth's UD-IQ4_XS GGUF (15.4 GiB), its UD-IQ1_M to UD-Q3_K_XL (8.2 to 13.4 GiB), its UD-Q8_K_XL (22.1 GiB) or
+  IsValorum's APEX-I MiniPlus (12.8 GiB) imported block for block: 24 stored layers run as 48 visits, the 12 core layers three
+  times with messages between passes, sliding-window and full attention with a learned distance
+  table and sinks, depth attention over the earlier layers' states, 128 routed experts, up to eight
+  concurrent requests with prefix reuse through host memory, the model's own reasoning and tool-call
+  blocks, structured output, typed decisions, images through the release's vision tower, the
+  release's DSpark drafter and context-lookup drafting, and experts on the GPU, in pinned host
+  memory or in the artifact's files. On an RTX 3090 it prefills a 10,000-token prompt at 2,031 tok/s
+  and decodes at 111.4 tok/s, 95.9 after 10,000 tokens, against llama.cpp's 1,228, 58.6 and 55.9 on
+  the same GGUF; DSpark decodes greedy answers 1.14 to 1.41 times as fast
+  ([Inkling 2 Mini](docs/inkling2.md)).
+- **CPU share of host and disk experts.** With Flash-Next, Gemma 4, Flint, Inkling 2 or native Qwen3.5/3.6
   MoE experts off the GPU, or DeepSeek-V4.1-Flash's experts in host memory, CPU threads compute a
   share of each decode call's cache misses from host memory while the GPU copies the rest, bit for
   bit equal to the GPU's products (`--expert-dma-share auto`). The pool takes `min(physical cores, usable CPUs / 2)` threads by
@@ -477,12 +606,19 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   published artifact carries (3.58 GiB on the card), it decodes 1.28 to 2.07 times as fast on an
   RTX PRO 6000; on an RTX 4090, whose expert cache it shrinks, it decodes code and reasoning 1.19
   and 1.21 times as fast and other requests 0.85 to 1.02 times.
+- Inkling 2 Mini drafts with the release's DSpark drafter (`--spec dspark`, 1 to 7 drafts), three
+  non-causal blocks over the target's tapped states and a recurrent head that corrects the target
+  head's logits; without `--spec` it drafts while the Engine serves one request at a time, 3 drafts
+  a round adapting to their survival, and the output is plain decoding's. On an RTX 3090 it decodes
+  greedy answers 1.14 to 1.41 times as fast and sampled ones 0.99 to 1.24 times; over two RTX
+  3090s with `--tensor-parallel`, where it also drafts by default, 1.33 to 1.70 and 1.18 times.
 - A DSpine drafter is an artifact of its own (`--spec dspine --draft-model PATH`): 1 to 15 drafts
-  on Qwen3.5-core models and Qwen3.8-Flash-Next, 1 to 7 on Gemma 4, Flint and DeepSeek-V4.1.
+  on Qwen3.5-core models and Qwen3.8-Flash-Next, 1 to 7 on Gemma 4, Flint, DeepSeek-V4.1 and
+  Inkling 2.
   Tencent's drafter for Qwen3.8-27B, converted, decodes a code answer 3.08 times and a prose answer
   1.86 times as fast as plain decoding on an RTX 5090, where DFlash2 reaches 3.29 and 2.05
   ([measurements](docs/performance.md#dspine-on-qwen38-27b)).
-- Flint, which has no drafter, and DeepSeek-V4.1-Flash without `--spec` draft by context lookup
+- Flint, which has no drafter, DeepSeek-V4.1-Flash without `--spec` and Inkling 2 draft by context lookup
   (`--lookup-ngram N`, 1 to 7 drafts): what followed the last N tokens' earlier occurrence (the one
   the sequence was already copying while it still matches, else the newest), verified in one pass of
   decode rows.
@@ -501,14 +637,17 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   and `bf16p` keeps BF16's bits in 784 bytes instead of 1,024
   ([context and memory](docs/cli.md#context-and-memory)).
 - Up to 1,048,576 tokens of context, four times the native window, with plain RoPE or YaRN
-  (`--rope-yarn`, for Qwen3.5, Qwen3.8-Flash-Next and Gemma 4; Flint's full-attention blocks carry
-  no rotation and DeepSeek-V4.1's compressed blocks the release's own YaRN, so neither takes
-  scaling).
+  (`--rope-yarn`, for Qwen3.5, Qwen3.8-Flash-Next and Gemma 4; Flint's full-attention blocks and
+  Inkling 2's attention carry no rotation and DeepSeek-V4.1's compressed blocks the release's own
+  YaRN, so none of them takes scaling).
 - A hybrid prefix cache by default, which shares content-addressed KV blocks and sparse state
   snapshots across requests on the device and in pinned host memory; or a checkpoint catalog
   (`--use-original-prefix-caching`) with an optional disk tier that survives restarts
   (`--disk-kv-path`, `--disk-kv-restore`) and endpoint and branch anchors that let an edited or
   regenerated turn resume where it left the conversation.
+  Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Flash-Next keep state images in pinned host memory
+  with a disk tier, a prefix cache file and session slots of their own
+  ([Serving](docs/serving.md#context-cache-of-the-other-families)).
 - Precision trades that buy context: `--embedding-q4`, `--lm-head-q6`, `--gdn-state-fp16`
   ([quality trades](docs/maintainer/quality-trade-experiments.md)).
 - A token embedding kept in mapped host memory (`--embedding-residency host`), which frees its
@@ -560,8 +699,8 @@ the release's vision tower ([images](docs/deepseek-v41.md#images)).
   heads, of the attention's KV heads with their cache and of the dense FFN rows or MoE experts in
   any weight format, sized to the card, and reads only those per token
   ([tensor parallelism](docs/maintainer/pipeline-stages.md#tensor-parallelism)), Qwen3.8-Flash-Next
-  its GDN key heads, attention KV heads and routed experts. Gemma 4, Flint and DeepSeek-V4.1-Flash
-  divide only their routed experts this way.
+  its GDN key heads, attention KV heads and routed experts. Gemma 4, Flint, DeepSeek-V4.1-Flash and
+  Inkling 2 divide only their routed experts this way.
 - FP8 A8 and NVFP4 W4A4 tensor-core routes on every `120a` build, an FP4 tensor-core prompt kernel
   for an NVFP4 KV cache, and programmatic dependent launches on Blackwell.
 

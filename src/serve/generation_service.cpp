@@ -308,6 +308,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.prefill_stall_budget_ms   = options.prefill_stall_budget_ms;
     engine_options.fast_prefill_kernel      = options.fast_prefill_kernel;
     engine_options.kv_cache                 = options.kv_cache;
+    engine_options.kv_cache_automatic       = options.kv_cache_automatic;
     engine_options.enable_vision            = options.enable_vision;
     engine_options.grafts                   = options.grafts;
     options.steering.apply(engine_options);
@@ -395,6 +396,7 @@ GenerationService::GenerationService(
     engine_options.diagnostic_observer   = std::move(diagnostic_observer);
     engine_options.slot_auto_save.listener = std::move(auto_save_listener);
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    refuse_family_options();
     // A request that says nothing about thinking gets its template's default. Qwen's templates
     // think unless told not to; Gemma 4's chat template keeps thinking off unless enable_thinking
     // asks for it, so without --no-thinking or a request flag a Gemma 4 server answers directly.
@@ -409,6 +411,34 @@ GenerationService::GenerationService(
     count_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     branch_memo_ = std::make_shared<BranchMemo>(kBranchMemoRecords);
+}
+
+void GenerationService::refuse_family_options() const {
+    // Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Flash-Next keep context caches of their own,
+    // with a prefix cache file and session slots but not the hybrid prefix cache. Those options
+    // would start and do nothing.
+    const std::string architecture = engine_->load_summary().architecture;
+    const bool own_cache =
+        architecture == "Gemma4ForCausalLM" || architecture == "FlintForCausalLM" ||
+        architecture == "DeepseekV41ForCausalLM" || architecture == "Inkling2ForCausalLM" ||
+        architecture == "Qwen4ExpForCausalLM";
+    const bool own_cache_file = own_cache && options_.hybrid_cache_flag == "--prefix-cache-file";
+    if (!own_cache && !options_.catalog_cache_flag.empty()) {
+        throw std::invalid_argument(options_.hybrid_cache_flag +
+                                    " configures the hybrid prefix cache, and " +
+                                    options_.catalog_cache_flag +
+                                    " selects the checkpoint catalog");
+    }
+    if (!options_.hybrid_cache_flag.empty() && !own_cache_file &&
+        engine_->options().context_cache.mode != ninfer::ContextCacheMode::Hybrid) {
+        throw std::invalid_argument(options_.hybrid_cache_flag +
+                                    " configures the hybrid prefix cache, which " + architecture +
+                                    " artifacts do not have");
+    }
+    if (!options_.slot_save_path.empty() && engine_->slot_states().empty()) {
+        throw std::invalid_argument("--slot-save-path saves session slots, which " + architecture +
+                                    " artifacts do not have");
+    }
 }
 
 std::size_t GenerationService::admitted_requests() const {
@@ -740,8 +770,30 @@ StagedRequest GenerationService::stage_impl(const GenerationRequest& incoming,
             prompt = engine_->prepare(std::move(input), control);
         }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
-        prepared.enable_thinking = prompt.summary().starts_in_reasoning;
+        // Inkling 2 opens its thinking blocks itself, whatever the prompt ends with; Flint and
+        // Gemma 4 open their reasoning themselves while the template leaves thinking on. Their chat
+        // requests keep their thinking budget.
+        const std::string architecture = engine_->load_summary().architecture;
+        const bool model_opens_thinking =
+            !request.raw_prompt &&
+            (architecture == "Inkling2ForCausalLM" ||
+             ((architecture == "FlintForCausalLM" || architecture == "Gemma4ForCausalLM") &&
+              semantics.enable_thinking != false));
+        prepared.enable_thinking = prompt.summary().starts_in_reasoning || model_opens_thinking;
+        if (model_opens_thinking && semantics.enable_thinking == false) {
+            // `enable_thinking: false` or a forced call set the lowest effort, at which Inkling may
+            // still open a thinking block: the budget and the loop guard hold for it as well.
+            request_options.execution.thinking.budget = request.thinking_budget
+                                                            ? request.thinking_budget
+                                                            : options_.default_thinking_budget;
+            request_options.execution.thinking.loop = options_.reasoning_loop;
+            prepared.thinking_budget                = request_options.execution.thinking.budget;
+        }
         if (!prepared.enable_thinking) {
+            // A reply that does not reason refuses an answer-now request.
+            if (request_options.execution.thinking.answer_now) {
+                request_options.execution.thinking.answer_now->mark_answering();
+            }
             request_options.execution.thinking.budget.reset();
             prepared.thinking_budget.reset();
             prepared.effective_thinking_budget.reset();

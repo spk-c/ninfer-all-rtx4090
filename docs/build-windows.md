@@ -92,7 +92,12 @@ repository root: `nvcc` writes `.exp` and `.lib` files next to the output.
 Windows builds differ from Linux builds in three places: they decode PNG images natively (a
 prebuilt FFmpeg tree may have no PNG decoder), they pass the NVFP4 TMA descriptors through device
 memory, since MSVC cannot pass them by value, and WDDM charges pinned host memory against the
-card's memory. Every Windows build offers `--wddm-evictable-budget`, which sizes the KV cache against
+card's memory. Host experts pin only what the GPU's shared memory segment can still lock (DXGI's
+budget, about half the RAM) less 4 GiB, and the automatic host tier of the context cache only what
+is left of it; experts past that are read from the artifact's files. `--expert-host-mib N` replaces
+that budget: the block pins up to `N` MiB until the host refuses a part, and a later startup pin
+may then fail. Under WSL2 host experts read the same budget through `/dev/dxg`; it does not depend
+on the memory WSL2 is given, and without it they pin until the host refuses a part. Every Windows build offers `--wddm-evictable-budget`, which sizes the KV cache against
 the card's memory less the weights and a 512 MiB desktop floor instead of what is free at startup,
 and commits the device arenas at startup. Another process that later takes memory makes WDDM page
 some of this process's memory out, which slows generation until it comes back. WDDM may queue a
@@ -101,10 +106,16 @@ experts, which put a host-to-device copy behind a device-side wait for the host,
 with queued copies; it uses mapped host memory and a copy kernel on Windows and under WSL2
 ([native host banks](qwen3-8-flash-next.md#the-expert-cache)). GGUF host experts with staged
 misses, whose service copies the missing experts while a replayed layer waits for them on the
-device, hung while the warm-up prepared the CUDA Graphs on Windows; there and under WSL2 their
-passes run eagerly. This repository has no Windows or WSL2 host:
-`ninfer_qwen4_exp_hybrid_experts_test` runs both exchanges on Linux and only the mapped one under
-WDDM, where it has not run yet. A process started
+device, hung while the warm-up prepared the CUDA Graphs on Windows; on Windows and under WSL2 the
+service copies a decode or verification call's experts with a kernel that reads them in place
+(`NINFER_MISS_COPY_KERNEL=0` forces the copy engine, `1` the kernel on any driver). Native Qwen
+MoE, Gemma MoE, Flint, DeepSeek-V4.1-Flash and Inkling 2 with host or disk experts deliver the
+missing experts while a replayed graph waits for them on the device, so on Windows and under WSL2
+they run their passes eagerly, without CUDA Graphs, and wait for the misses on the host. This
+repository has no Windows or WSL2 host: `ninfer_qwen4_exp_hybrid_experts_test` and
+`ninfer_qwen4_exp_expert_misses_test` run both forms on Linux and only the kernel under WDDM,
+where they have not run yet, and the eager passes of the other families have not run there
+either. A process started
 by a low-priority parent (a Task Scheduler task at its default priority, a service, some IDE
 terminals) inherits I/O priority Low, and Windows throttles its reads; the Engine raises such a
 priority to normal before it reads the artifact and logs that it did, or warns when Windows refuses

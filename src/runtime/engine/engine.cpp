@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "text/bad_words.h"
 #include "text/structured_output.h"
 
 #include "artifact/reader.h"
@@ -16,15 +17,18 @@
 #include "runtime/engine/model_instance.h"
 #include "runtime/engine/deepseek_v41_core.h"
 #include "runtime/engine/flint_core.h"
+#include "runtime/engine/inkling2_core.h"
 #include "runtime/engine/gemma4_core.h"
 #include "runtime/engine/qwen4_exp_core.h"
 #include "runtime/engine/slot_spill_guard.h"
+#include "core/snapshot_checksum.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -42,19 +46,34 @@
 namespace ninfer {
 namespace {
 
-// Gemma 4, Flint, DeepSeek-V4.1 and Flash-Next: families with a core of their own, not the
-// Qwen3.5 load and Program.
+// Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Flash-Next: families with a core of their own, not
+// the Qwen3.5 load and Program.
 bool own_family_artifact(const std::filesystem::path& path) {
     return runtime::is_gemma4_artifact(path) || runtime::is_flint_artifact(path) ||
-           runtime::is_deepseek_v41_artifact(path) || runtime::is_qwen4_exp_artifact(path);
+           runtime::is_deepseek_v41_artifact(path) || runtime::is_inkling2_artifact(path) ||
+           runtime::is_qwen4_exp_artifact(path);
 }
 
-// Those families keep context caches of their own, which the checkpoint catalog's options
-// configure; the hybrid prefix cache, the server's default, belongs to the Qwen3.5 Program.
+// Those families keep context caches of their own (context_image_store.h), which the checkpoint
+// catalog's options configure, with a disk tier (--disk-kv-path) and a prefix cache file
+// (--prefix-cache-file) of their own; the hybrid prefix cache, the server's default, belongs to the
+// Qwen3.5 Program, and so do prompt grafts, saves of evicted sessions and model suspend.
 EngineOptions with_family_context_cache(EngineOptions options) {
-    if (own_family_artifact(options.artifact_path)) {
-        options.context_cache.mode = ContextCacheMode::Legacy;
+    if (!own_family_artifact(options.artifact_path)) { return options; }
+    const char* option = nullptr;
+    if (!options.grafts.empty()) {
+        option = "--graft";
+    } else if (options.slot_auto_save.enabled) {
+        option = "--auto-save-evicted";
+    } else if (options.suspend.enabled) {
+        option = "--model-suspend";
     }
+    if (option != nullptr) {
+        throw std::invalid_argument(std::string(option) +
+                                    " applies to Qwen3_5ForCausalLM and Qwen3_5MoeForCausalLM "
+                                    "artifacts");
+    }
+    options.context_cache.mode = ContextCacheMode::Legacy;
     return options;
 }
 
@@ -80,13 +99,17 @@ EngineOptions with_family_steering(EngineOptions options) {
     return options;
 }
 
-// A drive mirror and the direct path change how disk experts are read.
+// A drive mirror and the direct path change how disk experts are read; a host budget, how many
+// host experts are pinned.
 EngineOptions with_expert_disk_reads(EngineOptions options) {
     const auto& hybrid = options.hybrid_experts;
     if ((!hybrid.mirror.empty() || hybrid.direct == ExpertDirect::On) &&
         options.expert_residency != ExpertResidency::Disk) {
         throw std::invalid_argument(
             "--expert-mirror and --expert-direct on require --expert-residency disk");
+    }
+    if (hybrid.host_bytes && options.expert_residency != ExpertResidency::Host) {
+        throw std::invalid_argument("--expert-host-mib requires --expert-residency host");
     }
     return options;
 }
@@ -95,6 +118,28 @@ EngineOptions with_expert_disk_reads(EngineOptions options) {
 // partial-sum exchange is the Qwen3.5 Program's and Flash-Next's; the other families divide only
 // their routed experts and sum them their own way.
 EngineOptions with_family_attention(EngineOptions options) {
+    // Flash-Next stores FP32 keys and values once in F16; Gemma 4, Flint and Inkling 2 keep F16
+    // caches under either name; DeepSeek-V4.1 refuses it in its core. The Qwen3.5 Program's
+    // attention reads BF16.
+    if (options.kv_cache == KvCacheStorage::Float16 && !own_family_artifact(options.artifact_path)) {
+        throw std::invalid_argument(
+            "--kv-dtype fp16 applies to Qwen4ExpForCausalLM, Gemma 4, Flint and Inkling 2 "
+            "artifacts");
+    }
+    // Inkling 2's release trained with an MXFP8 KV cache, so without --kv-dtype the family stores
+    // MXFP8; no other family implements it. Flint and DeepSeek-V4.1 keep one cache of their own,
+    // which a caller's quantized default (ninfer-perplexity's int8) must not refuse.
+    const bool inkling2 = runtime::is_inkling2_artifact(options.artifact_path);
+    if (inkling2 && options.kv_cache_automatic) {
+        options.kv_cache = KvCacheStorage::Mxfp8;
+    }
+    if (options.kv_cache_automatic && (runtime::is_flint_artifact(options.artifact_path) ||
+                                       runtime::is_deepseek_v41_artifact(options.artifact_path))) {
+        options.kv_cache = KvCacheStorage::BFloat16;
+    }
+    if (options.kv_cache == KvCacheStorage::Mxfp8 && !inkling2) {
+        throw std::invalid_argument("--kv-dtype mxfp8 applies to Inkling2ForCausalLM artifacts");
+    }
     if ((options.tensor_attention != TensorAttention::Heads || options.invariant_attention) &&
         own_family_artifact(options.artifact_path)) {
         throw std::invalid_argument(
@@ -131,11 +176,37 @@ EngineOptions with_family_attention(EngineOptions options) {
 // latent experts and decoders makes a token's step cost enough that MTP's verification pays on
 // prose too (Edge0-120B-q3k on an A40: 1.28 times as fast on prose, 1.84 on code, 1.49 after a
 // 5,415-token document, 1.23 on prose over two tensor-parallel ranks), while eight requests at
-// once decoded 0.84-0.87 times as fast with drafts as without.
+// once decoded 0.84-0.87 times as fast with drafts as without. Inkling 2 drafts with its DSpark
+// drafter whenever it serves one request at a time: three passes of its core make a token's step
+// cost enough that verification pays with device experts too. Three drafts a round adapting from
+// one to three, each round ending after its first draft at or below 0.5, decoded 1.14 times as
+// fast on greedy prose, 1.41 on code and 1.26 after a 5,748-token document on an RTX 3090, and
+// 0.99-1.05 times as fast on prose and 1.24 on code at the release's temperature; with slower
+// decode kernels, a fixed three drafts had decoded sampled prose 0.87-0.95 times as fast, one
+// draft 1.06-1.12 times. Its expert parallelism drafts too: the drafter runs on rank 0 and a
+// verification of up to eight tokens crosses the devices once per MoE block as a decode step does,
+// so on two RTX 3090s without peer access the same rounds decoded 1.33 times as fast on greedy
+// prose, 1.70 on code and 1.18 on sampled prose as the split without drafts.
 EngineOptions with_family_speculation(EngineOptions options) {
     SpeculativeOptions& speculative = options.speculative;
     if (!speculative.automatic || speculative.backend != SpeculativeBackend::None ||
         options.purpose != EnginePurpose::Generation) {
+        return options;
+    }
+    if (runtime::is_inkling2_artifact(options.artifact_path)) {
+        // Inkling 2 drafts with the DSpark drafter its artifact carries while it serves one request
+        // at a time, on one device or over its expert parallelism, a lone round's width adapting
+        // to how far the drafts survive.
+        if (options.max_concurrency != 1 ||
+            !artifact::Reader(options.artifact_path).directory().components.contains("dspark")) {
+            return options;
+        }
+        speculative.backend      = SpeculativeBackend::DSpark;
+        speculative.draft_tokens = SpeculativeOptions::kAutomaticDSparkTokens;
+        speculative.mtp_policy   = MtpDraftPolicy::Adaptive;
+        if (!speculative.draft_min_p) {
+            speculative.draft_min_p = SpeculativeOptions::kAutomaticDSparkMinP;
+        }
         return options;
     }
     const bool flash_next = runtime::is_qwen4_exp_artifact(options.artifact_path);
@@ -266,6 +337,7 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
     resolved.execution.thinking                = options.execution.thinking;
     resolved.execution.structured_output       = std::move(options.execution.structured_output);
+    resolved.execution.bad_words = text::normalize_bad_words(options.execution.bad_words);
     resolved.execution.logprobs                = options.execution.logprobs;
     resolved.execution.readout_tokens          = std::move(options.execution.readout_tokens);
     resolved.execution.speculative_drafting    = options.execution.speculative_drafting;
@@ -456,10 +528,12 @@ public:
     // Flint: likewise.
     using FlintCore = runtime::FlintCore;
     using DeepSeekV41Core = runtime::DeepSeekV41Core;
+    using Inkling2Core    = runtime::Inkling2Core;
     using Core = std::variant<std::monostate, std::unique_ptr<GenerationCore>,
                               std::unique_ptr<HybridGenerationCore>, std::unique_ptr<ScoringCore>,
                               std::unique_ptr<Qwen4ExpCore>, std::unique_ptr<Gemma4Core>,
-                              std::unique_ptr<FlintCore>, std::unique_ptr<DeepSeekV41Core>>;
+                              std::unique_ptr<FlintCore>, std::unique_ptr<DeepSeekV41Core>,
+                              std::unique_ptr<Inkling2Core>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(with_family_speculation(
@@ -492,6 +566,19 @@ public:
             StartupPhaseScope finalize_phase(options.startup_observer,
                                              StartupPhase::EngineFinalize);
             core = std::make_unique<FlintCore>(*flint, device, options);
+            finalize_phase.complete();
+            return;
+        }
+        if (runtime::is_inkling2_artifact(options.artifact_path)) {
+            auto constructed    = runtime::construct_inkling2(options, device);
+            inkling             = std::move(constructed.instance);
+            load                = std::move(constructed.load);
+            load.cuda_sync_mode = device.sync_mode();
+            model_metadata      = std::move(constructed.model_metadata);
+            sampling_defaults   = inkling->frontend.sampling_defaults();
+            StartupPhaseScope finalize_phase(options.startup_observer,
+                                             StartupPhase::EngineFinalize);
+            core = std::make_unique<Inkling2Core>(*inkling, device, options);
             finalize_phase.complete();
             return;
         }
@@ -541,7 +628,8 @@ public:
         }
         if (options.speculative.draft_min_p.value_or(0.0F) != 0) {
             throw std::invalid_argument("--draft-min-p requires Qwen3.8-Flash-Next drafts or a "
-                                        "DSpine drafter of Gemma 4, Flint or DeepSeek-V4.1");
+                                        "DSpine drafter of Gemma 4, Flint, DeepSeek-V4.1 or "
+                                        "Inkling 2");
         }
         auto constructed  = runtime::construct_model(options, device);
         // construct_model returns the resolved options for this instance. Anything the model had
@@ -663,7 +751,29 @@ public:
         for (PendingWrite& item : matching) { write_spill(item); }
     }
 
-    // Session slots are private catalog cells, which only the Legacy context cache has.
+    // Calls `f` with the Engine core of a family that has one of its own (session_slots.h) and
+    // returns true; false for the Qwen3.5-core and scoring cores.
+    template <class F>
+    bool with_own_core(F&& f) const {
+        return std::visit(
+            [&](const auto& state) {
+                using CoreState = std::remove_cvref_t<decltype(state)>;
+                if constexpr (std::is_same_v<CoreState, std::unique_ptr<Qwen4ExpCore>> ||
+                              std::is_same_v<CoreState, std::unique_ptr<Gemma4Core>> ||
+                              std::is_same_v<CoreState, std::unique_ptr<FlintCore>> ||
+                              std::is_same_v<CoreState, std::unique_ptr<DeepSeekV41Core>> ||
+                              std::is_same_v<CoreState, std::unique_ptr<Inkling2Core>>) {
+                    if (state == nullptr) { throw std::logic_error("Engine core is unavailable"); }
+                    f(*state);
+                    return true;
+                } else {
+                    return false;
+                }
+            },
+            core);
+    }
+
+    // The Qwen3.5-core session slots are private catalog cells of the Legacy context cache.
     [[nodiscard]] GenerationCore& generation_core() {
         auto* generation = std::get_if<std::unique_ptr<GenerationCore>>(&core);
         if (generation == nullptr || *generation == nullptr) {
@@ -683,6 +793,7 @@ public:
         return gemma      ? gemma->frontend
                : flint    ? flint->frontend
                : deepseek ? deepseek->frontend
+               : inkling  ? inkling->frontend
                : flash    ? flash->frontend
                           : active->frontend;
     }
@@ -691,6 +802,7 @@ public:
         return gemma      ? gemma->capacity
                : flint    ? flint->capacity
                : deepseek ? deepseek->capacity
+               : inkling  ? inkling->capacity
                : flash    ? flash->capacity
                           : active->capacity;
     }
@@ -704,6 +816,7 @@ public:
     std::unique_ptr<runtime::Gemma4Instance> gemma;
     std::unique_ptr<runtime::FlintInstance> flint;
     std::unique_ptr<runtime::DeepSeekV41Instance> deepseek;
+    std::unique_ptr<runtime::Inkling2Instance> inkling;
     LoadSummary load;
     ModelMetadata model_metadata;
     ModelSamplingDefaults sampling_defaults;
@@ -927,7 +1040,8 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
                           std::is_same_v<CoreState, std::unique_ptr<Impl::Qwen4ExpCore>> ||
                           std::is_same_v<CoreState, std::unique_ptr<Impl::Gemma4Core>> ||
                           std::is_same_v<CoreState, std::unique_ptr<Impl::FlintCore>> ||
-                          std::is_same_v<CoreState, std::unique_ptr<Impl::DeepSeekV41Core>>) {
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::DeepSeekV41Core>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Inkling2Core>>) {
                 return core->score(std::move(prompt.impl_->value), first_target);
             } else {
                 throw std::logic_error("Engine scoring core is unavailable");
@@ -1191,14 +1305,16 @@ GenerationHandle Engine::submit_branches(std::vector<GenerationBranch> branches,
 bool Engine::runs_branches() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     if (impl_->options.purpose != EnginePurpose::Generation) { return false; }
-    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek) { return true; }
+    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek || impl_->inkling) {
+        return true;
+    }
     return impl_->active->program->runs_branched_reads();
 }
 
 bool Engine::read_endpoints_need_drafting() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     if (impl_->options.purpose != EnginePurpose::Generation || impl_->flash || impl_->gemma ||
-        impl_->flint || impl_->deepseek) {
+        impl_->flint || impl_->deepseek || impl_->inkling) {
         return false;
     }
     return impl_->options.speculative.backend != SpeculativeBackend::None;
@@ -1206,7 +1322,7 @@ bool Engine::read_endpoints_need_drafting() const {
 
 std::uint32_t Engine::branch_token_limit() const {
     if (!runs_branches()) { return 0; }
-    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek) {
+    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek || impl_->inkling) {
         return std::numeric_limits<std::uint32_t>::max();
     }
     return impl_->active->program->prefill_batch_capacity();
@@ -1241,7 +1357,7 @@ std::uint32_t Engine::concurrent_output_budget(const PreparedPrompt& prompt) con
         throw std::logic_error("concurrent_output_budget requires a Generation Engine");
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
-    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek) {
+    if (impl_->flash || impl_->gemma || impl_->flint || impl_->deepseek || impl_->inkling) {
         // One sequence at a time: the whole window past the prompt.
         const std::uint32_t prompt_tokens = prompt.impl_->summary.prompt_tokens;
         return prompt_tokens >= impl_->capacity() ? 0U : impl_->capacity() - prompt_tokens + 1U;
@@ -1268,13 +1384,28 @@ SlotSaveResult Engine::save_slot(std::uint32_t slot, const std::string& path,
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     const auto started = std::chrono::steady_clock::now();
     std::scoped_lock io(impl_->slot_io_mutex);
+    SlotSaveResult result;
+    if (impl_->with_own_core([&](auto& core) {
+            runtime::SessionSlotRecord record = core.save_slot(slot, expected_digest);
+            // The file ends with the records' checksum, which a restore checks first.
+            const std::uint64_t checksum = snapshot_checksum(record.bytes);
+            const auto* tail             = reinterpret_cast<const std::uint8_t*>(&checksum);
+            record.bytes.insert(record.bytes.end(), tail, tail + sizeof(checksum));
+            write_snapshot_file(path, record.bytes);
+            result.tokens         = record.tokens;
+            result.bytes          = record.bytes.size();
+            result.session_digest = std::move(record.session_digest);
+        })) {
+        result.seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return result;
+    }
     auto snapshot = impl_->generation_core().save_slot(
         slot, slot_model_binding(impl_->options, impl_->load), expected_digest, path,
         [&] { impl_->spill_guard.claim(path); });
     write_snapshot_file(path, snapshot.bytes);
     impl_->spill_guard.note_authoritative(path, snapshot.tokens);
 
-    SlotSaveResult result;
     result.tokens         = snapshot.tokens;
     result.bytes          = snapshot.bytes.size();
     result.session_digest = std::move(snapshot.session_digest);
@@ -1298,15 +1429,31 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t slot, const std::string& pa
     if (!file.good()) { throw std::invalid_argument("failed to read session snapshot file"); }
     file.close();
 
+    SlotRestoreResult result;
+    result.bytes = bytes.size();
+    if (impl_->with_own_core([&](auto& core) {
+            std::uint64_t checksum = 0;
+            const std::size_t body = bytes.size() - std::min(bytes.size(), sizeof(checksum));
+            if (body != 0) { std::memcpy(&checksum, bytes.data() + body, sizeof(checksum)); }
+            const std::span<const std::uint8_t> records(bytes.data(), body);
+            if (body == 0 || snapshot_checksum(records) != checksum) {
+                throw std::invalid_argument("session snapshot file is corrupt");
+            }
+            auto [tokens, digest] = core.restore_slot(slot, records);
+            result.tokens         = tokens;
+            result.session_digest = std::move(digest);
+        })) {
+        result.seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return result;
+    }
     auto [tokens, digest] = impl_->generation_core().restore_slot(
         slot, std::span<const std::uint8_t>(bytes.data(), bytes.size()),
         slot_model_binding(impl_->options, impl_->load), path,
         [&] { impl_->spill_guard.claim(path); });
     impl_->spill_guard.note_authoritative(path, tokens);
 
-    SlotRestoreResult result;
     result.tokens         = tokens;
-    result.bytes          = bytes.size();
     result.session_digest = std::move(digest);
     result.seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
@@ -1316,6 +1463,11 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t slot, const std::string& pa
 std::uint32_t Engine::erase_slot(std::uint32_t slot, const std::string& expected_digest) {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     std::scoped_lock io(impl_->slot_io_mutex);
+    std::uint32_t erased = 0;
+    if (impl_->with_own_core(
+            [&](auto& core) { erased = core.erase_slot(slot, expected_digest); })) {
+        return erased;
+    }
     return impl_->generation_core().erase_slot(
         slot, expected_digest,
         [&](const std::string& bound_path) { impl_->spill_guard.claim(bound_path); });
@@ -1323,6 +1475,8 @@ std::uint32_t Engine::erase_slot(std::uint32_t slot, const std::string& expected
 
 std::vector<SlotState> Engine::slot_states() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    std::vector<SlotState> states;
+    if (impl_->with_own_core([&](auto& core) { states = core.slot_states(); })) { return states; }
     // A Hybrid context cache or a scoring Engine has no catalog cells to list.
     const auto* generation = impl_->legacy_generation_core();
     return generation != nullptr ? generation->slot_states() : std::vector<SlotState>{};

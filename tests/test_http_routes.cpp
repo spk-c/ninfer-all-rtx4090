@@ -93,6 +93,17 @@ int main() {
                           dashboard.find("'/monitor/gpu?index='") != std::string_view::npos,
                       "embedded dashboard must poll the built-in telemetry endpoints");
 
+    // POST /shutdown is an API route: the engine key applies to it when configured, on top of
+    // its own --admin-token.
+    httplib::Request shutdown_request;
+    shutdown_request.method = "POST";
+    shutdown_request.path   = "/shutdown";
+    failures += check(ninfer::serve::requires_api_key("secret", false, shutdown_request) &&
+                          ninfer::serve::requires_api_key("secret", true, shutdown_request),
+                      "POST /shutdown must retain API-key checks with and without WebUI");
+    failures += check(!ninfer::serve::requires_api_key("", false, shutdown_request),
+                      "without a configured key nothing requires one");
+
     // Route patterns reach the handler under either prefix and keep the endpoint's own captures.
     httplib::Server server;
     server.Post(api_route_pattern("/messages"),

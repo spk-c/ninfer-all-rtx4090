@@ -42,12 +42,26 @@ tower), and MTP speculative decoding (`--spec mtp`). The three published NInfer 
 include Unsloth's shared-Q8_0 MTP block. The upstream GSQ-RCO GGUF sources omit it, so new
 conversions must supply it separately; see [MTP](#mtp-speculative-decoding).
 
-The Q4_K async prompt tiles (`gguf_moe_matrix/q4_k`) apply to Q4_K expert banks whose tables are
-16-byte aligned (`MoeTable::aligned16`): device banks, a rank's share under tensor parallelism, and
-the slot pools that host and disk experts' prompt chunks fill. The published Q2_0, IQ3_S and IQ1_M
-releases have no Q4_K experts.
+Prompt chunks stage the matrix kernel's tiles through `cp.async` (`gguf_matrix/<format>` and
+`gguf_moe_matrix/<format>`, [device profiles](device-profiles.md#what-is-calibrated)) at every
+column tile, 16 to 128 columns, for Q2_0, IQ4_XS, IQ4_NL, Q4_0, Q5_0, Q8_0, Q4_K and Q5_K matrices
+and expert banks and for IQ1_M expert banks, where the card's profile takes them. Expert banks need
+16-byte aligned expert pointers (`MoeTable::aligned16`): device banks, a rank's share under tensor
+parallelism, and the slot pools and caches that host and disk experts fill. IQ3_S, IQ2_* and Q6_K
+keep the synchronous loop. The values are those of the synchronous loop. On an RTX 3090 (350 W)
+with the Q2_0 release's experts in host memory a 3,740-token prompt prefills at 2.38-2.39k instead
+of 2.28-2.29k tokens/s with the synchronous loop, and 16-token windows score at 283 instead of
+267 tokens/s, with the same perplexity.
 
 ## Convert
+
+For native GGUF text weights plus NVIDIA's original FP8 PLE source, use the
+[preservation and DFlash2 recipe](flash-next-native-dflash2.md). It builds Q8PLE directly,
+keeps the specified Basalt operand conventions and attaches DFlash2 without a `.basalt` input.
+
+For an existing Flash-Next `.basalt` pack, use the [Basalt converter](basalt-conversion.md).
+It preserves the pack's Q8PLE, dense overrides, experts, MTP and Vision components instead of
+assembling the published donor combination below.
 
 `--model` needs only the HF checkpoint's configuration and tokenizer files (`config.json`,
 `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`, `generation_config.json`) from
@@ -253,7 +267,7 @@ the same options, and the Docker image's `serve` command takes them with the fil
 | Option | Meaning |
 |---|---|
 | `--expert-residency device\|host\|disk` | expert banks in the stage devices' memory (default); in page-locked host memory that the expert kernels read across the bus; or left in the artifact's files, each layer's routed experts read into a device cache before they run |
-| `--expert-cache-mib N\|auto` | with host or disk experts, device memory for the most used experts: `auto` (default) starts at half of what each device has free after loading less a margin, and once the warm-up has captured the CUDA Graphs and loaded the kernels requests run, and every sequence's snapshot is in place, adds what is still free beyond 384 MiB (the startup line reports the cache and the graphs); with host experts it also takes the prefill buffers and a prompt span's stack between prompts ([the expert cache](#the-expert-cache)); `N` is the cache's size, which the warm-up leaves alone; `0` disables the host-mode cache (disk mode needs one) |
+| `--expert-cache-mib N\|auto` | with host or disk experts, device memory for the most used experts: `auto` (default) starts at half of what each device has free after loading less a margin, and once the warm-up has captured the CUDA Graphs and loaded the kernels requests run, and every sequence's snapshot is in place, adds what is still free beyond 384 MiB (the startup line reports the cache and the graphs); with host experts it also takes the prefill buffers, a prompt span's stack and the workspace of the span's expert calls between prompts ([the expert cache](#the-expert-cache)); `N` is the cache's size, which the warm-up leaves alone; `0` disables the host-mode cache (disk mode needs one) |
 | `--expert-misses staged\|mapped` | GGUF host experts: a decode or verification call copies each routed expert its device cache lacks into device memory by the copy engine while the cached ones run, into a cache slot when one is free or when the expert's routes beat the coldest cached expert the call does not route ([the expert cache](#the-expert-cache)), else into staging (`staged`, the default); or its expert kernels read the missing experts across the bus (`mapped`) |
 | `--expert-dma-share F\|auto` | host or disk experts: fraction of a call's missing experts the GPU runs (copied to it), `0..1`; the CPU computes the rest from RAM while the GPU runs the cached ones. `auto` (the default) gives each call of GGUF experts the split whose copies and CPU products end soonest by the times measured on earlier calls, and copies every miss of native experts. Calls of up to eight tokens (decode steps, one request's verification) give the CPU any missing expert, calls of 9 to 64 tokens (several requests' verifications, short prompt chunks) those with at most eight pairs; wider calls run every expert on the GPU. GGUF CPU products are the GPU's bit for bit ([the CPU share](#the-cpu-share)) |
 | `--expert-tail-skip N` | GGUF host experts with staged misses: a decode or verification call leaves out each routed expert its device cache lacks when every token of the call ranks it past place `N` (`1..9`) of its top ten, instead of copying it; the remaining experts keep their router weights (no renormalization). Lossy, off by default; prefill always runs every routed expert. On an RTX 3090 with Q2_0 and four short chat prompts, `7` decoded 9.0-17.6% and `6` 11.9-24.4% faster, copying 22-43% and 29-52% fewer expert bytes; perplexity over 5,115 tokens scored one token per call went from 4.667 to 4.710 with `7` and 4.688 with `6`, an order opposite to how much each leaves out, so that sample does not resolve the cost |
@@ -313,8 +327,9 @@ drafts, DFlash2, perplexity) takes the text layers' counts of a profile recorded
 (MIT) measured this tier and its constants on Qwen3.8-Flash-Next.
 
 With the automatic cache and host experts, the device buffers that prompt chunks copy a layer's
-uncached experts into (`--expert-prefill-buffers`) and the stack of a prompt span (40 KiB a span
-token: 0.63 GiB for sixteen 1,024-token chunks) are cache slots between prompts: every layer
+uncached experts into (`--expert-prefill-buffers`), the stack of a prompt span (40 KiB a span
+token: 0.63 GiB for sixteen 1,024-token chunks) and the workspace that only the span's expert calls
+reach (1.6 GiB of the 2.3 GiB a 16,384-token call takes) are cache slots between prompts: every layer
 gets the same share of them, free until misses and rounds fill them. A prompt pass takes them
 back: the most routed of the experts they hold move into the slots of colder ones in the cache's
 own memory, the rest leave, and the copies into the buffers wait for the moves. The next decode
@@ -335,6 +350,23 @@ spare and the rest comes from the disk. A read of the artifact's files that fail
 runs (an expert or an n-gram row) fails the requests of that round with `unavailable`; the expert
 cache forgets what it held, the Engine counts an `engine_recoveries` and serves the queue on.
 
+### Host experts that do not all fit
+
+The page-locked block of GGUF host experts holds them in the artifact's order while they fit the
+host's available memory and, on Windows and WSL2, what the GPU's shared memory segment can still
+lock, less 4 GiB for what startup pins after them: WDDM charges page-locked memory there, about half
+of Windows' memory however much WSL2 is given, so 48 GB of experts on a 64 GB Windows machine do not
+pin whole ([#358](https://github.com/iamwavecut/ninfer-all/issues/358)). `--expert-host-mib N` pins
+at most `N` MiB and replaces the segment estimate; the available memory and the host's first refusal
+still end the block. The block registers in parts of about 1 GiB, and a part the host refuses ends
+it. When it holds every expert, the run is the host run above. Otherwise the experts run as disk
+experts do, through the device expert cache: each is copied from its pinned bytes where the block
+holds it and read from the artifact's files where it does not, and the startup line names both
+amounts and what ended the block. The results equal the host and disk runs; host-only options
+(`--expert-misses mapped`, `--expert-tail-skip`, `--expert-prefill-buffers`, `--expert-profile`,
+`--expert-profile-out`) are refused then. Native (non-GGUF) host banks register per layer and are
+not divided this way.
+
 Native host banks copy every miss to the GPU by default (`--expert-dma-share 1`). Values below one
 let the CPU compute a share of the missing experts; this mode is experimental: on one RTX 3090 with
 an 8-core EPYC 7302P it decoded 3.1 tok/s at a share of 0 and 5.3 at 0.5 against 31.4 at 1, and its
@@ -345,7 +377,10 @@ bounded pinned staging. Use `--max-concurrency 1` for native host execution. Und
 and WSL2, recognised by `/dev/dxg`) a device's copies may queue behind one another whatever their
 streams, so the tables, the CPU/GPU partition and the CPU's sum that a decode graph takes after it
 waited for the host reach the device through mapped host memory and a copy kernel; a queued copy
-there would hold back the expert copies that end the wait. The bytes are the same either way.
+there would hold back the expert copies that end the wait. The bytes are the same either way. For
+the same reason the staged misses of GGUF host experts reach the device there by a copy kernel
+that reads them in place, not by the copy engine: a decode or verification call's misses and
+admissions, while a replayed layer waits for them; prompt chunks keep the copy engine.
 
 ### The CPU share
 
@@ -507,7 +542,7 @@ both tables' rows.
 ### Another table of the same shape
 
 A model reads any n-gram table artifact of its hash constants, row count and row width, in any row
-format the runtime decodes (IQ4_NL, FP8 with an FP16 row scale, BF16): the table its `ngram`
+format the runtime decodes (IQ4_NL, Q8_0, FP8 with an FP16 row scale, BF16): the table its `ngram`
 component names, or another one. The engine checks the table's shape against the model's
 configuration, not its values; for another table it warns at startup with both tables' formats and
 digests. A table of the same shape with other values starts too and degrades the output, as a wrong
@@ -526,6 +561,27 @@ with INT8 KV and device experts, the GSQ-RCO Q2_0 release scores 2.542153 with i
 [its guide](edge0.md#with-flash-nexts-table). Q2_0's greedy answer to the sky prompt keeps its
 content and changes its wording with the FP8 table; it decodes at 87.6 and 87.5 tokens per second.
 
+### Q8PLE tables
+
+`qwen3_8_flash_next_gguf` accepts a GGUF containing Q8_0
+`per_layer_token_embd.weight` as `--source ngram=PATH`. Its five 32-value blocks per
+row stay byte-for-byte Q8_0: 170 bytes per row, including the five FP16 scales.
+The 320,001,536-row table occupies 54,400,261,120 payload bytes. Conversion records
+the SHA-256 of those bytes; it neither requantizes the table nor changes the text
+weights, drafter or KV settings. As with IQ4_NL, `--components ngram` writes a
+separate table and `--components text,ngram` embeds it in the model.
+
+```bash
+python3.11 -m tools.convert --model /models/flash-next-config \
+  --recipe qwen3_8_flash_next_gguf --components ngram \
+  --source ngram=/models/ple-q8.gguf --device cpu --out /models/ple-q8.ninfer
+```
+
+The runtime reads the stored signed codes and FP16 scales, rounding each decoded
+value once to the BF16 embedding. The existing disk, RAM and hot-row placements
+use the selected table's row size. Supplying an external Q8PLE table to a model
+converted against IQ4_NL retains the usual format/digest notice described above.
+
 ### Without the n-gram table
 
 The model was trained with its n-gram embedding, so the engine refuses a model whose table it
@@ -534,6 +590,52 @@ all-zero table gives), and warns at startup: this is a non-standard, experimenta
 practical use. On the Q2_0 release it nearly doubles WikiText-2 perplexity, 2.66 to 5.01 over the
 fourteen windows of the comparison below; short factual answers survive, but nothing measured
 improves.
+
+### Native FP16 KV
+
+`--kv-dtype fp16` selects IEEE binary16 K/V storage for Flash-Next and Edge0. The default remains
+`bf16`; this option changes runtime cache precision, independent of the artifact's expert and
+n-gram formats. It also accepts the flat launch setting `"kv-dtype": "fp16"`.
+
+Key/value projections output FP32; key RMSNorm and RoPE stay FP32 until append rounds K and V
+once, nearest-even, into FP16. Sparse attention reads those half values directly with FP32
+accumulation, without a BF16 intermediate or the quantized formats' Hadamard rotation. Main and
+MTP layers, paged storage, host streaming and tensor-parallel KV-head shares use the same path.
+Queries, residual activations, the indexer, GDN state and a DFlash2 drafter's local cache keep their
+existing representations. This follows Basalt's cache-production boundary, rather than its entire
+engine's arithmetic; it does not promise identical generated answers.
+
+FP16 and BF16 both use two bytes per value. With 12 attention layers, two KV heads and 256 values
+per head, main K/V is 24,576 bytes per token: 6 GiB for one full 262,144-position context, before
+MTP and other state. Streaming changes where those bytes reside. FP16 keeps three more fraction
+bits but has a smaller exponent range: values can underflow or overflow where BF16 would remain
+finite. The option is a precision choice, rather than a compression or speed guarantee. Gemma 4
+and Flint keep their F16 caches under this name too; Qwen3.5-core models and DeepSeek-V4.1 refuse
+it.
+
+FP16 against BF16 on Flash-Next Q2_0 with host experts and the IQ4_NL table, on an RTX 3090
+(`ninfer-perplexity`, total NLL in nats). A recall text lists unique random five-digit rooms and
+codes, then the same lines in another order; its row is the NLL of the second list, each code up to
+half the text back:
+
+| text | scored tokens | BF16 | FP16 | FP16 against BF16 |
+|---|---:|---:|---:|---:|
+| WikiText, first 40 KB | 9,481 | 9,110.74 | 9,118.63 | +0.09% |
+| recall 32K, seed 1 | 16,350 | 9,856.67 | 9,831.75 | -0.25% |
+| recall 32K, seed 2 | 16,350 | 10,004.82 | 9,791.49 | -2.1% |
+| recall 64K, seed 1 | 32,745 | 19,888.54 | 20,088.04 | +1.0% |
+| recall 64K, seed 2 | 32,745 | 22,142.36 | 22,119.06 | -0.1% |
+| recall 128K, seed 1 | 65,505 | 53,286.61 | 57,751.11 | +8.4% |
+| recall 128K, seed 2 | 65,505 | 43,566.38 | 44,017.20 | +1.0% |
+
+Forty eight-way choice reads over each list (`/v1/systemone`) picked the right code 40 times of 40
+in both formats from 8K to 128K tokens, and a request took as long in one as in the other (19 and
+20 s at 8K, 31 at 32K, 48 at 64K, 83 and 84 at 128K, `ninfer-serve --max-context 131072`). Prefill
+runs at the same rate in both (587.6 against 588.5 tok/s over the 64K recall text, the KV streamed
+from pinned memory past 32,768 positions). With FP32 keys and values, a BF16 query and FP64
+attention over 1K to 256K synthetic keys, FP16 storage leaves a 2.4 to 3.1 times smaller output
+error than BF16 at every length; in the model the differences go both ways, with no trend in
+length, so BF16 stays the default.
 
 ### Streamed sparse-attention KV
 
@@ -611,8 +713,10 @@ snapshot.
 A turn that a stop string ends resumes where its visible text ends. The sequence keeps only the
 tokens before the one that begins the stop string's match: a round that holds such a token commits
 the tokens before it, and the next step reads the rest. A match that stays open keeps a second
-snapshot of the sequence there (another 74 MiB a sequence, with the context cache), which the turn
-goes back to when the stop string ends it in a later step, so the next prompt continues that state.
+snapshot of the sequence there (another 74 MiB a sequence, with the context cache or
+`--structured-output`, whose [banned words](serving.md#banned-words) go back to the same snapshot),
+which the turn goes back to when the stop string ends it in a later step, so the next prompt
+continues that state.
 Either way only the new tokens are prefilled; the response's prompt summary reports how many were
 reused. A request goes to the free sequence that holds the longest such prefix of its prompt.
 A prefix with images or video is the same only with the same media at the same places (each
@@ -635,8 +739,8 @@ looks for images again at its first step. An image is the paged KV and pooled ke
 of its positions, its recurrent state, and the MTP block's, about 114 MB plus 26 KiB a position in
 BF16 KV. The images live in 8 MiB pages of pinned memory that stay pinned for later images: the
 pages of two images of a whole context (within a quarter of the budget) are pinned at startup.
-Once the Engine has had nothing to run for 50 ms, it pins free pages back up to that many in 64 MiB
-chunks, within the budget; a request that arrives meanwhile waits for the chunk in progress (about
+Once the Engine has had nothing to run for 50 ms, it pins more pages in 64 MiB chunks until the
+whole budget is pinned; a request that arrives meanwhile waits for the chunk in progress (about
 32 ms, [measured](#media-conversations-on-one-rtx-4090)), and the store pins pages itself only when
 the free ones fall short. Pinning while a request waits is slow where the
 experts and the page cache fill the host's memory: on an RTX 4090 host with IQ3_S host experts,
@@ -655,7 +759,9 @@ A request that does not draft (a decision read) runs its prompt without the MTP 
 sequence's snapshots and images carry no MTP state and serve only requests that do not draft.
 With `--disk-kv-restore` a
 prompt also resumes from an image on
-disk, which a later run finds there too.
+disk, which a later run finds there too. A long last message also keeps an image inside it, where a
+later prompt with the same document and another question resumes, and the images also go to a
+prefix cache file and session slot files ([Serving](serving.md#context-cache-of-the-other-families)).
 
 Structured output (`--structured-output` for the server, `--json`/`--json-schema` for the CLI) works
 as for Gemma 4 ([Structured output](gemma4.md#structured-output)): the grammar's token mask applies
@@ -844,7 +950,17 @@ not.
 - The residual is a four-stream hyper-connection stack kept in FP32 between layers.
 - The 36 Gated DeltaNet layers run the Qwen3.5 GDN kernels with a sigmoid output gate; the 12 sparse
   attention layers run the block indexer and attend only to the blocks it selects (plain dense
-  attention below 2,051 positions).
+  attention below 2,051 positions). A call of more than eight tokens attends on tensor cores where
+  they measured faster than the SIMT kernel (1,024 queries over 2,051 positions): on Blackwell in
+  every KV format, on Ampere and Ada in all but the 8-bit-key formats (`int8`, `rk8v4`, `fp8`,
+  `k8v4`), on Turing in all but `bf16` and `bf16p`, whose BF16 tiles it emulates. Volta keeps the
+  SIMT kernel. One CTA per token and KV head takes the head's twelve query heads as one 16-row
+  tile against 32-position tiles of the selected keys and values.
+  A BF16 cache scores exact BF16 products in FP32 and takes the probabilities in three BF16 parts,
+  all 24 bits of each; FP16 tiles (an FP16 or a decoded cache) take the query and the probabilities
+  in two FP16 parts, about 22 bits of each; the softmax and the sums stay FP32. The outputs are not
+  the SIMT kernel's bits, so a later layer's indexer can select other blocks
+  ([measurements](#prompt-attention-on-tensor-cores)).
 - The PLE layer reads its 16 n-gram rows per token from the table's file (IQ4_NL rows decoded on
   the GPU).
 - A layer's projections of one input run together: the GGUF ones quantize the input to q8_1 once,
@@ -880,11 +996,23 @@ not.
   phase that precedes them, and a span's short last chunk runs from the same pool (a 5,669-token
   prompt prefilled at 1,334 instead of 678 tokens/s on an RTX 3090 when spans came; the bank-shaped
   pool and the two phases then took a 9,297-token Q2_0 prompt from 1.12-1.18k to 1.35k tokens/s from
-  a cold expert cache). The expert phase runs up to 4,096 tokens of consecutive chunks in one call,
-  each chunk routed on its own, so the matrix kernel takes 128-column tiles rather than the 32 of a
-  1,024-token chunk; a last chunk of up to 64 tokens (eight with `--expert-tail-skip`) runs alone,
+  a cold expert cache). The expert phase runs a whole span's chunks in one call (16,384 tokens of
+  sixteen 1,024-token chunks under `--max-concurrency 1`) while that call's workspace takes at most a
+  quarter of the memory free when the engine starts, else eight chunks, else 6,144 tokens; each chunk
+  is routed on its own, so the matrix kernel takes 128-column tiles rather than the 32 of a
+  1,024-token chunk. A last chunk of up to 64 tokens (eight with `--expert-tail-skip`) runs alone,
   after the layer's wider calls, since it may copy experts into cache slots those calls read (with
-  IQ3_S, a 31,860-token prompt's expert matrix products took 4.47 instead of 6.52 s on an RTX 3090).
+  IQ3_S, a 31,860-token prompt's expert matrix products took 4.47 instead of 6.52 s on an RTX 3090 at
+  4,096 tokens a call). Between prompts the workspace these calls take beyond the others' is cache
+  slots ([the expert cache](#the-expert-cache)), and a group never takes more than the span's
+  tokens (8,192 under `--max-context 8192`). With IQ3_S, a 31,865-token prompt in BF16 KV prefilled
+  at 2.94-2.95k tokens/s with whole-span calls against 2.74-2.75k at 6,144 tokens a call on an RTX
+  3090 (the expert cache 240 MiB larger, decode with the same tokens at 56.8-57.5 against 57.2-57.6
+  tok/s) and at 7.48-7.60k against 6.99-7.14k on an RTX 5090 (decode 85.7-85.9 against 84.2-86.1
+  tok/s); calls of 8,192 and 12,288 tokens took the RTX 3090 to 2.83k and 2.84k, and whole spans
+  whose workspace stayed out of the cache to 2.93k with 1.5 GiB less expert cache. Latent experts
+  ([Edge0](edge0.md)) run a group's call in slices of 2,048 tokens and keep 6,144-token groups:
+  whole spans prefilled Edge0-120B at 2.42-2.43k against 2.45k tokens/s.
   With two prefill buffers (the default with the automatic expert cache, `--expert-prefill-buffers`)
   the pool has two buffers that consecutive layers alternate between: each layer's copies start as
   soon as the layer two back is done with its buffer, while the layer before it runs. A thread of
@@ -951,10 +1079,7 @@ not.
   shared by the sequences: a step of another sequence than the last captures it again and updates
   the graph in place; the token's position reaches the sparse-attention kernels in device memory.
   Disk experts need the host between a layer's routing and its experts, so their steps stay eager.
-  Under WDDM (Windows, and WSL2) so do the passes of GGUF host experts with staged misses: there a
-  graph's copies queued after a layer's wait for the misses could hold back the service's copies
-  that end it, and the startup log says that graphs are off. `--no-cuda-graph` decodes eagerly
-  everywhere.
+  `--no-cuda-graph` decodes eagerly everywhere.
 - With MTP, a verification of one request (at most eight tokens, so its experts take the vector
   products) replays graphs of its own the same way, and so does the draft chain of one request on
   one GPU, host experts included; several requests' rounds, the MTP catch-up and disk experts run
@@ -1376,6 +1501,52 @@ for these reads. Perplexity with host experts (4,096-token windows advancing by 
 |---|---:|---:|---:|
 | `perplexity-1m` | 3.93783 | 3.93842 | +0.015% |
 | `perplexity-heldout-2026-09` | 4.69573 | 4.69673 | +0.021% |
+
+### Prompt attention on tensor cores
+
+The sparse attention Op at 1,024 queries over 2,051 positions (the first query at position 16,384),
+the SIMT kernel's time over the tensor-core kernel's, 2026-11-23:
+
+| KV format | RTX PRO 4500 Blackwell | RTX 3090 | RTX 2080 Ti |
+|---|---:|---:|---:|
+| `bf16` | 3.15 | 2.76 | 0.32 |
+| `fp16` | 2.01 | 1.67 | 1.21 |
+| `bf16p` | 1.46 | 1.18 | 0.20 |
+| `int8` | 1.19 | 0.94 | 1.73 |
+| `rk8v4` | 1.18 | 0.95 | 1.40 |
+| `fp8` | 1.36 | 0.99 | 1.56 |
+| `k8v4` | 1.34 | 0.99 | 1.53 |
+| `nvfp4` | 1.30 | 1.07 | 1.57 |
+| `rk4v4` | 1.17 | 1.04 | 1.48 |
+| `rk4v4-e8` | 1.17 | 1.04 | 1.50 |
+| `rk2v4-e8` | 1.07 | 1.07 | 1.53 |
+
+The engine runs the tensor-core kernel where the column is above 1: Blackwell in every format,
+Ampere and Ada in all but the four 8-bit-key formats, Turing in all but `bf16` and `bf16p`. The
+Turing column is an Op result only: no Flash-Next prompt was timed on a Turing card.
+
+The IQ3_S release with host experts (`ninfer-serve --expert-residency host --max-context 65536
+--spec none`), one request with a 31,867-token and one with a 5,468-token prompt, prefill in
+tokens/s, one to five runs each:
+
+| GPU | KV | 31,867 tokens, SIMT | tensor cores | 5,468 tokens, SIMT | tensor cores |
+|---|---|---:|---:|---:|---:|
+| RTX 3090 (Xeon W-2170B) | `bf16` | 2,128-2,156 | 2,504-2,514 | 1,464-1,589 | 1,455-1,573 |
+| RTX PRO 4500 Blackwell | `bf16` | 2,708-2,867 | 3,339-3,384 | 2,159-2,314 | 2,339-2,889 |
+| RTX PRO 4500 Blackwell | `int8` | 2,771 | 2,855 | 2,578 | 2,647 |
+| RTX 4090 (EPYC 7B13) | `bf16` | 3,899-4,276 | 4,832-4,945 | 2,407-2,922 | 2,372-2,868 |
+| RTX 4090 (EPYC 7B13) | `rk4v4` | 4,190 | 4,284 | 2,904 | 2,903 |
+
+A 5,468-token prompt spends little of its time in attention, so its spread is the host's. The
+32K answers have the same tokens; some 4K answers differ in later tokens.
+
+The tensor-core outputs are not the SIMT kernel's bits, so a later layer's indexer can select other
+blocks. Perplexity of the first 40 KB of WikiText (9,234 tokens, host experts) on the RTX 3090,
+mean NLL: `bf16` 0.683973 with the SIMT kernel, 0.689371 (+0.79%) with the tensor-core kernel;
+an earlier form that took the probabilities in two BF16 parts gave 0.678268 (-0.83%). The next
+120 KB of the same file (28,977 tokens) on the RTX 4090: 1.292431 with the SIMT kernel, 1.296269
+(+0.30%) with the tensor-core kernel. A run that computed the tensor-core outputs and then
+overwrote them with the SIMT kernel's gave 0.683973, so the kernel changes nothing but its outputs.
 
 ### Against llama.cpp
 
