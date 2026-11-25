@@ -202,3 +202,19 @@ reverse-ordered repetitions at 32K/64K/128K/176128/196608, 512 generated
 tokens, fixed model/corpus/KV and recorded startup sites and fallbacks.
 It rejects a flat arm that silently fails to prepare or falls back.
 Performance qualification remains pending.
+
+## Flat graph factorial outcome and upstream refresh
+
+All 40 same-binary runs on 543f08412 completed, with zero reported flat
+fallbacks and equal speculative acceptance within each context. Raw data:
+profiles/bench/rtx4090-flat-factorial-20261125. Flat draft versus control:
+32K +0.01%, 64K -1.70%, 128K +4.89%, 176128 +8.33%, 196608 -0.33%.
+The 176128 control pair varied from 234.86 to 191.95 tok/s, so this is
+not a reproducible speedup yet; retain opt-in flags and repeat with GPU
+telemetry. Flat target is not yet a compelling incremental win.
+
+Upstream master advanced to 9ba127602 (65 commits since 603a99cae).
+Sync merge 6caf100f resolves four files and preserves every existing
+RTX 4090 profile route. Backports merge with this sync without conflicts.
+New upstream kernels, Bonsai 2.5 formats, WDDM reserves and Inkling2
+changes still require qualification on the integrated revision.
