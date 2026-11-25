@@ -51,15 +51,66 @@ const T* cast_stmt(const statement_ptr& ptr) {
 using visitor_pair = std::pair<std::string, std::vector<statement*>>;
 using visitor_fn   = std::function<void(bool, statement*, std::vector<visitor_pair>)>;
 
-// A lexical frame owns only its local variables; ancestors remain live through the
-// parent link. Captured frames are retained at most once for the duration of a render.
+// Frames own local values, while callable values own their captured frame. Local
+// macro definitions store only a handler with a weak frame link: defining a macro
+// does not itself keep its iteration alive, and recursive local aliases do not cycle.
 struct lexical_frame {
+    struct definition {
+        std::string name;
+        func_handler handler;
+    };
     value_object env = mk_val<value_object>();
+    std::unordered_map<std::string, definition> functions;
     std::shared_ptr<lexical_frame> parent;
-    bool captured = false;
+    bool registered = false;
 
     explicit lexical_frame(std::shared_ptr<lexical_frame> outer = {})
         : parent(std::move(outer)) { env->has_builtins = false; }
+};
+
+struct render_lifetime {
+    bool active = true;
+    std::vector<std::weak_ptr<lexical_frame>> frames;
+
+    void remember(const std::shared_ptr<lexical_frame>& frame) {
+        if (frame->registered) return;
+        // Keep the weak registry proportional to surviving captures, not loop count.
+        if (frames.size() >= 128 && frames.size() % 128 == 0) {
+            std::erase_if(frames, [](const auto& entry) { return entry.expired(); });
+        }
+        frames.push_back(frame);
+        frame->registered = true;
+    }
+
+    void close() noexcept {
+        active = false;
+        // A namespace can explicitly store a closure that refers back to it.
+        // Break such render-owned cycles even if rendering threw or was cancelled.
+        for (const auto& entry : frames) {
+            if (auto frame = entry.lock()) {
+                frame->functions.clear();
+                frame->env.reset();
+                frame->parent.reset();
+            }
+        }
+        frames.clear();
+    }
+};
+
+struct lexical_callable final : value_func_t {
+    std::shared_ptr<lexical_frame> frame;
+    std::weak_ptr<render_lifetime> lifetime;
+
+    lexical_callable(std::string name, func_handler handler,
+                     std::shared_ptr<lexical_frame> scope,
+                     const std::shared_ptr<render_lifetime>& render)
+        : value_func_t(name, handler), frame(std::move(scope)), lifetime(render) {}
+
+    value invoke(const func_args& args) const override {
+        const auto render = lifetime.lock();
+        if (!render || !render->active) throw std::runtime_error("Template render has ended");
+        return value_func_t::invoke(args);
+    }
 };
 
 struct context {
@@ -70,7 +121,8 @@ struct context {
 
     context(std::string source = "")
         : src(std::make_shared<std::string>(std::move(source))),
-          current_time(std::time(nullptr)), frame(std::make_shared<lexical_frame>()) {
+          current_time(std::time(nullptr)), frame(std::make_shared<lexical_frame>()),
+          lifetime(std::make_shared<render_lifetime>()), root(true) {
         set_val("true", mk_val<value_bool>(true));
         set_val("True", mk_val<value_bool>(true));
         set_val("false", mk_val<value_bool>(false));
@@ -79,46 +131,68 @@ struct context {
         set_val("None", mk_val<value_none>());
     }
 
+    ~context() {
+        if (root) lifetime->close();
+    }
+
     std::weak_ptr<lexical_frame> capture_scope() {
-        if (!frame->captured) {
-            captured_scopes->push_back(frame);
-            frame->captured = true;
-        }
+        lifetime->remember(frame);
         return frame;
+    }
+
+    value make_callable(std::string name, func_handler handler) {
+        lifetime->remember(frame);
+        return std::make_shared<lexical_callable>(std::move(name), std::move(handler), frame, lifetime);
     }
 
     context(const context& caller, const std::weak_ptr<lexical_frame>& lexical_scope)
         : src(caller.src), current_time(caller.current_time), checkpoint(caller.checkpoint),
           frame(std::make_shared<lexical_frame>(lexical_scope.lock())),
-          captured_scopes(caller.captured_scopes) {
+          lifetime(caller.lifetime) {
         if (!frame->parent) throw std::runtime_error("macro definition scope has expired");
     }
 
     context(const context& parent)
         : src(parent.src), current_time(parent.current_time), checkpoint(parent.checkpoint),
-          frame(std::make_shared<lexical_frame>(parent.frame)),
-          captured_scopes(parent.captured_scopes) {}
+          frame(std::make_shared<lexical_frame>(parent.frame)), lifetime(parent.lifetime) {}
+
+    context& operator=(const context&) = delete;
 
     value get_val(const std::string& name) {
         value missing;
         const auto key = mk_val<value_string>(name);
-        for (auto current = frame.get(); current; current = current->parent.get()) {
+        for (auto current = frame; current; current = current->parent) {
+            const auto def = current->functions.find(name);
+            if (def != current->functions.end()) {
+                return std::make_shared<lexical_callable>(
+                    def->second.name, def->second.handler, current, lifetime);
+            }
             const auto& found = current->env->at(key, missing);
             if (found) return found;
         }
         return mk_val<value_undefined>(name);
     }
 
-    void set_val(const std::string& name, const value& val) { frame->env->insert(name, val); }
-    void set_val(const value& name, const value& val) { frame->env->insert(name, val); }
+    void set_val(const std::string& name, const value& val) {
+        if (const auto* closure = dynamic_cast<const lexical_callable*>(val.get());
+            closure && closure->frame == frame) {
+            frame->functions.insert_or_assign(name,
+                lexical_frame::definition{closure->name, closure->val_func});
+            frame->env->insert(name, mk_val<value_undefined>(name));
+            return;
+        }
+        frame->functions.erase(name);
+        frame->env->insert(name, val);
+    }
+    void set_val(const value& name, const value& val) { set_val(name->as_string().str(), val); }
     void print_vars() const {
-        printf("Context Variables:\\n%s\\n", value_to_json(frame->env, 2).c_str());
+        printf("Context Variables:\n%s\n", value_to_json(frame->env, 2).c_str());
     }
 
 private:
     std::shared_ptr<lexical_frame> frame;
-    std::shared_ptr<std::vector<std::shared_ptr<lexical_frame>>> captured_scopes =
-        std::make_shared<std::vector<std::shared_ptr<lexical_frame>>>();
+    std::shared_ptr<render_lifetime> lifetime;
+    bool root = false;
 };
 
 // utils for visiting AST nodes

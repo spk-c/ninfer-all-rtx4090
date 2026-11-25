@@ -1,4 +1,6 @@
 #include "text/jinja.h"
+#include <jinja/parser.h>
+#include <algorithm>
 
 #include <atomic>
 #include <cstdio>
@@ -123,6 +125,71 @@ int language_semantics() {
             failures += check(std::string(error.what()).starts_with("error-test:"),
                               "template error omitted its source name");
         }
+    }
+    return failures;
+}
+
+
+int closure_lifetimes() {
+    using namespace jinja;
+    const char* bodies[]{
+        "{% call sink() %}{% endcall %}",
+        "{% macro local() %}{{ token }}{% endmacro %}",
+        "{% call save() %}{{ token }}{% endcall %}",
+        "{% macro local() %}{{ token }}{% endmacro %}{% set ns.f=local %}",
+        "{% macro local() %}{{ token }}{{ ns.f is defined }}{% endmacro %}{% set ns.f=local %}",
+        "{% macro local(n) %}{% if n %}{{ alias(n-1) }}{% else %}{{ token }}{% endif %}"
+        "{% endmacro %}{% set alias=local %}{{ local(2) }}"};
+    const int expected_alive[]{0, 0, 1, 1, 1, 0};
+    int failures = 0;
+    for (std::size_t index = 0; index < std::size(bodies); ++index) {
+        const std::string source =
+            "{% set ns=namespace(f=none) %}"
+            "{% macro sink() %}{{ caller() }}{% endmacro %}"
+            "{% macro save() %}{% set ns.f=caller %}{% endmacro %}"
+            "{% for i in range(32) %}{% set token=make_token() %}" +
+            std::string(bodies[index]) + "{% endfor %}";
+        auto program = parse_from_tokens(lexer().tokenize(source));
+        std::vector<std::weak_ptr<value_t>> tokens;
+        const auto alive = [&] {
+            return std::count_if(tokens.begin(), tokens.end(),
+                                 [](const auto& token) { return !token.expired(); });
+        };
+        {
+            context ctx(source);
+            ctx.set_val("make_token", mk_val<value_func>("make_token", [&](const func_args&) -> value {
+                value token = mk_val<value_string>("value");
+                tokens.emplace_back(token);
+                return token;
+            }));
+            runtime(ctx).execute(program);
+            failures += check(alive() == expected_alive[index],
+                              "closure retained unused iteration values");
+        }
+        failures += check(alive() == 0, "render teardown retained captured values");
+    }
+    // A cancellation/error while a namespace owns a closure must still free its captures.
+    {
+        const std::string source =
+            "{% set ns=namespace(f=none) %}{% for i in range(32) %}{% set token=make_token() %}"
+            "{% macro local() %}{{ token }}{{ ns.f is defined }}{% endmacro %}{% set ns.f=local %}"
+            "{% if i==4 %}{{ raise_exception('stop') }}{% endif %}{% endfor %}";
+        auto program = parse_from_tokens(lexer().tokenize(source));
+        std::vector<std::weak_ptr<value_t>> tokens;
+        bool interrupted = false;
+        try {
+            context ctx(source);
+            ctx.set_val("make_token", mk_val<value_func>("make_token", [&](const func_args&) -> value {
+                auto token = mk_val<value_string>("value");
+                tokens.emplace_back(token);
+                return token;
+            }));
+            runtime(ctx).execute(program);
+        } catch (const std::exception&) { interrupted = true; }
+        failures += check(interrupted && tokens.size() == 5, "exception fixture did not execute");
+        failures += check(std::all_of(tokens.begin(), tokens.end(),
+                                      [](const auto& token) { return token.expired(); }),
+                          "exception teardown retained captured values");
     }
     return failures;
 }
@@ -326,7 +393,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     try {
-        return language_semantics() + origins_and_requests() + literal_content() +
+        return language_semantics() + closure_lifetimes() + origins_and_requests() + literal_content() +
                            trim_boundary_mappings() ==
                        0
                    ? 0

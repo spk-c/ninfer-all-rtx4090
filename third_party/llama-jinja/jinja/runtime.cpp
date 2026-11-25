@@ -672,7 +672,7 @@ value macro_statement::execute_impl(context& ctx) {
         return res;
     };
 
-    ctx.set_val(name, mk_val<value_func>(name, func));
+    ctx.set_val(name, ctx.make_callable(name, func));
     return mk_val<value_undefined>();
 }
 
@@ -696,7 +696,7 @@ value call_statement::execute_impl(context& ctx) {
     };
 
     context call_ctx(ctx);
-    call_ctx.set_val("caller", mk_val<value_func>("caller", func));
+    call_ctx.set_val("caller", ctx.make_callable("caller", func));
 
     func_args args(call_ctx);
 
