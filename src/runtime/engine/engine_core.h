@@ -403,12 +403,27 @@ public:
                     });
                     output.allow_bad_words_rewind(true);
                 }
+                std::optional<PreparedPrompt> pressure_prompt;
+                if constexpr (!kLegacyContextCache) {
+                    const char* flag = std::getenv("NINFER_SM89_LIVE_CONTEXT_REPLAY");
+                    if (kv_lease_growth_ && flag && std::string_view(flag) == "1" &&
+                        pressure_replay_options_eligible(options, member.prompt_summary)) {
+                        try {
+                            pressure_prompt.emplace(instance_.frontend.continue_prompt(
+                                member.prompt, {}, nullptr));
+                        } catch (const std::exception& error) {
+                            publish_diagnostic(diagnostics_, DiagnosticLevel::Warning,
+                                               "context replay snapshot skipped: %s", error.what());
+                        }
+                    }
+                }
                 requests.push_back(std::make_shared<Request>(
                     first_request_id + k, first_publication_order + k, std::move(member.prompt),
                     std::move(output), member.prompt_summary, member.prepare_seconds,
                     std::move(options), member.consumer_mode, member.observation,
                     member.pending_deadline, submitted));
                 requests.back()->requeue = std::move(bad_words);
+                requests.back()->pressure_replay_prompt = std::move(pressure_prompt);
                 effective_budgets.push_back(
                     requests.back()->output.thinking_stats().effective_budget);
             }
@@ -1386,6 +1401,7 @@ private:
     void complete_error(const std::shared_ptr<Request>& request, std::exception_ptr error) {
         release_planning_state(request);
         request->ngram_archive.reset();
+        request->pressure_replay_prompt.reset();
         request->prompt      = {};
         request->model_state = EngineRequestState::ModelFinished;
         request->sequence.reset();
@@ -1410,6 +1426,7 @@ private:
     // guarded so a throw on one step does not skip the rest.
     void force_complete_error(const std::shared_ptr<Request>& request,
                               const std::exception_ptr& error) noexcept {
+        try { request->pressure_replay_prompt.reset(); } catch (...) {}
         try { request->prompt = {}; } catch (...) {}
         try { request->base_plan.reset(); } catch (...) {}
         try {
@@ -1466,6 +1483,7 @@ private:
                 std::chrono::duration<double>(*request->last_token - *request->first_token).count();
         }
         release_planning_state(request);
+        request->pressure_replay_prompt.reset();
         request->prompt      = {};
         request->model_state = EngineRequestState::ModelFinished;
         if (!request->queue_wait_recorded) {
@@ -3181,7 +3199,7 @@ private:
             const char* flag = std::getenv("NINFER_SM89_LIVE_CONTEXT_REPLAY");
             if (!flag || std::string_view(flag) != "1" || !request || !request->sequence ||
                 !request->lane || request->lane->value != lane || !request->budget ||
-                !request->begin || !request->prompt || request->capture_pending ||
+                !request->begin || !request->pressure_replay_prompt || request->capture_pending ||
                 request->terminal_reason || request->cancelled.load(std::memory_order_acquire))
                 return false;
             bool other_active = false;
@@ -3201,7 +3219,7 @@ private:
             std::optional<PreparedPrompt> prepared;
             try {
                 prepared.emplace(instance_.frontend.continue_prompt(
-                    request->prompt, request->generated, nullptr));
+                    *request->pressure_replay_prompt, request->generated, nullptr));
             } catch (const std::exception& error) {
                 publish_diagnostic(diagnostics_, DiagnosticLevel::Warning,
                                    "context replay preparation skipped: %s", error.what());
@@ -3215,11 +3233,12 @@ private:
             if (aborted.salvaged) ++cumulative_stats_.salvaged_continuations;
             request->requeue.emplace(typename Request::RequeueState{
                 .pressure = true,
-                .prompt = std::move(request->prompt),
+                .prompt = std::move(*request->pressure_replay_prompt),
                 .requested_output_tokens = limit,
                 .sampling = request->options.execution.sampling,
                 .target = count,
             });
+            request->pressure_replay_prompt.reset();
             remove_completed_slot(lane);
             try {
                 requeue_committed_prefix(request, std::move(prepared));

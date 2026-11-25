@@ -199,6 +199,8 @@ struct RequestRecord {
     const std::uint64_t id;
     const std::uint64_t publication_order;
     PreparedPrompt prompt;
+    // Admission consumes prompt; opt-in recovery needs its own immutable source.
+    std::optional<PreparedPrompt> pressure_replay_prompt;
     std::unique_ptr<typename ModelContract::NgramArchive::Request> ngram_archive;
     bool ngram_admission_checked = false;
     OutputSession output;
@@ -251,7 +253,8 @@ struct RequestRecord {
     std::int32_t retained_slot = -1;
     std::string retained_session_digest;
 
-    // Banned-word rewind or one-shot KV pressure replay. The Program cannot take a sequence\n    // back to an earlier state, so a
+    // Banned-word rewind or one-shot KV pressure replay. The Program cannot take a sequence
+    // back to an earlier state, so a
     // rewind ends the request's sequence and queues the request again: its prompt is then the
     // submitted one followed by the generated tokens the rewind keeps, and its first draw is the
     // rewound position (EngineCore::requeue_committed_prefix).

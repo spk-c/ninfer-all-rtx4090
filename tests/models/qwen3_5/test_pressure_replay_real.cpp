@@ -44,6 +44,8 @@ int main() {
         constexpr unsigned wanted=4352;
         request.execution.requested_output_tokens = wanted;
         request.execution.sampling.temperature = 0.0f;
+        request.execution.sampling.presence_penalty = 0.0f;
+        request.execution.sampling.frequency_penalty = 0.0f;
         request.execution.allow_prefix_reuse = true;
         request.stop.include_model_defaults = false;
         request.output.raw = true;
