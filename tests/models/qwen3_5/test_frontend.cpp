@@ -1330,6 +1330,23 @@ int test_tool_definitions_in_prompt() {
     return failures;
 }
 
+
+int test_malformed_tool_history() {
+    int failures = 0;
+    for (const auto* arguments : {"{", "[]", "null", "42", "\"text\""}) {
+        auto assistant = chat_message(ninfer::ChatRole::Assistant, "");
+        assistant.tool_calls.push_back({.id = "", .name = "lookup", .arguments_json = arguments});
+        bool rejected = false;
+        try {
+            (void)render_chat({chat_message(ninfer::ChatRole::User, "weather?"), assistant});
+        } catch (const std::invalid_argument& e) {
+            rejected = std::string(e.what()).find("messages[1].tool_calls[0]") != std::string::npos;
+        }
+        failures += check(rejected, "malformed tool history must be rejected with call position");
+    }
+    return failures;
+}
+
 int test_adjacent_tool_message_boundary() {
     fi::ChatMessage assistant = chat_message(ninfer::ChatRole::Assistant, "");
     assistant.tool_calls.push_back(
@@ -4820,6 +4837,7 @@ int main() {
     failures += test_rewrite_checkpoint_trace();
     failures += test_open_turn_rewrite_checkpoint();
     failures += test_adjacent_tool_message_boundary();
+    failures += test_malformed_tool_history();
     failures += test_literal_cache_boundary();
     failures += test_reasoning_effort_substitution();
     failures += test_selected_template_recovery_boundary();
