@@ -218,3 +218,22 @@ Sync merge 6caf100f resolves four files and preserves every existing
 RTX 4090 profile route. Backports merge with this sync without conflicts.
 New upstream kernels, Bonsai 2.5 formats, WDDM reserves and Inkling2
 changes still require qualification on the integrated revision.
+
+## Integrated upstream qualification (a1b0a82ce)
+
+The 641-step Windows CUDA 13.4 build and focused qualification finished
+successfully. Four CTest targets passed, including the full GGUF Linear
+test (63.71 s). Four new RAM/disk prompt-settlement cases and the Windows
+failure-control case passed. Flat target prepared 42 sites in two
+profiles, five startup replays and no fallbacks, producing the same 512
+tokens as default. Live pressure replay retained 3973 tokens and both
+4352-token requests completed. These are focused regression results, not
+a complete test suite or a release qualification. See
+profiles/bench/rtx4090-upstream-sync-20261125.
+
+Official Bonsai 2.5 PTQ1_0 and PQ2_0 files downloaded and verified.
+The dedicated benchmark runner fixes rk8v4 and a 262144-token capacity,
+compares plain and MTP3 with two reversed repetitions at six prompt depths,
+and captures GPU telemetry. Results are local engine benchmarks using
+a fixed repeated token corpus, not directly equivalent to the upstream
+server benchmarks or model-quality measurements.

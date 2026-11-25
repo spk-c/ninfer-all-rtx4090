@@ -1,0 +1,3 @@
+[engine] device profile nvidia-geforce-rtx-4090-sm89: 169 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27; Q4_K matrix and MoE async tiles at 450 W, 2026-11-06; GGUF, NVFP4 W4A8-int and cuBLAS prefill routes at 450 W, 2026-11-19; NVFP4 matrix and MoE async tiles at 450 W, 2026-11-23; calibrated route catalog at 450 W, 2026-11-23; MoE vector columns at 450 W, 2026-11-24; PTQ1_0 matrix async tiles at 450 W, 2026-11-24)
+SM89 flat draft graph DFlash: 2 profiles, 42 sites, 5 startup replays, 0 fallbacks
+flat model real: 512 generated tokens across 16384 boundary

@@ -1,0 +1,42 @@
+[
+  {
+    "test": "focused-ctest",
+    "exit": 0
+  },
+  {
+    "test": "ram-prompt-settle-0",
+    "exit": 0
+  },
+  {
+    "test": "ram-prompt-settle-8",
+    "exit": 0
+  },
+  {
+    "test": "disk-prompt-settle-0",
+    "exit": 0
+  },
+  {
+    "test": "disk-prompt-settle-8",
+    "exit": 0
+  },
+  {
+    "test": "failure-control",
+    "exit": 0
+  },
+  {
+    "test": "default",
+    "exit": 0
+  },
+  {
+    "test": "flat-target",
+    "exit": 0
+  },
+  {
+    "test": "token-equivalence",
+    "exit": 0
+  },
+  {
+    "test": "pressure-real",
+    "exit": 0
+  }
+]

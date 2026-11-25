@@ -1,0 +1,3 @@
+START expert-delivery case failure-control
+truncated source: error propagated and GPU wait released PASS
+PASS expert-delivery case failure-control (exit 0)
