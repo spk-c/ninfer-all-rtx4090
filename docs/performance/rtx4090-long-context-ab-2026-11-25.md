@@ -43,3 +43,30 @@ Linux RTX5090 (sm120a) and DGX Spark (sm121a), and changes KV/layout interfaces;
 it must not replace the RTX4090 Windows fork by a blind merge.
 
 No stable tag or master changes. No candidate speedup claimed before paired measurements.
+
+## Completed paired A/B: 859d76b7
+
+All 12 runs finished successfully (two alternating AB/BA pairs at each context).
+Both experimental flags were enabled on the candidate. The exact benchmark
+binaries and model/corpus hashes are recorded under
+profiles/bench/rtx4090-neroued-20261125/manifest.json, alongside all 12 raw
+reports and logs. The repeated corpus in this paired experiment has the same
+token count as the reference fixture but uses different trailing newline
+serialization; use its manifest hash, not the earlier single-run file hash.
+
+| Context | Baseline decode tok/s | Candidate decode tok/s | Decode delta | Prefill delta |
+|---:|---:|---:|---:|---:|
+| 32768 | 241.278896 | 233.079614 | -3.40% | +6.11% |
+| 65536 | 253.614670 | 245.273506 | -3.29% | -1.31% |
+| 131072 | 227.385206 | 221.188425 | -2.73% | -1.83% |
+
+The regression is observed for this workload; two pairs and a 128-token
+decode are not enough to isolate causality. Upstream changes to route profiles
+(68 vs 130 routed keys), build/runtime differences and the experimental flags
+are confounded. Both flags remain opt-in. No release promotion.
+
+A five-arm follow-up (baseline, candidate defaults, buckets only, startup
+calibration only, both) uses scripts/ab-sm89-factorial.ps1 with the exact
+same original candidate binary, same corpus/model, 512 decode tokens and
+reversed arm order on alternate repetitions. The results must be assessed
+before choosing a performance optimization or promoting a release.
