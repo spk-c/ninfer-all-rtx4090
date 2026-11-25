@@ -29,7 +29,7 @@ int main() {
                 {"root ::= Token(6) prefix ExcludeToken(5)\nprefix ::= \"<\"", {6}, 4, true},
             };
             for (const auto& c : cases) {
-                auto g = edge_compiler.compile({StructuredOutputKind::Grammar, c.grammar});
+                auto g = edge_compiler.compile({.kind = StructuredOutputKind::Grammar, .grammar = c.grammar});
                 g->accept(c.prefix);
                 std::vector<std::uint32_t> before(1), after(1), speculative(2);
                 g->fill_masks(before, {});
