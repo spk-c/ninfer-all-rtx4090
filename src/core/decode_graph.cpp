@@ -48,9 +48,16 @@ void check_graph(cudaError_t status, const char* operation) {
 cudaGraph_t active_capture(cudaStream_t stream) {
     cudaStreamCaptureStatus status;
     cudaGraph_t graph = nullptr;
-    check_graph(
-        cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph, nullptr, nullptr, nullptr),
-        "cudaStreamGetCaptureInfo");
+    // CUDA 13 promoted the edge-data variants to the unversioned APIs.
+    // CUDA 12 still exposes the shorter capture-info signature.
+#if CUDART_VERSION >= 13000
+    const auto result =
+        cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph, nullptr, nullptr, nullptr);
+#else
+    const auto result =
+        cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph, nullptr, nullptr);
+#endif
+    check_graph(result, "cudaStreamGetCaptureInfo");
     if (status != cudaStreamCaptureStatusActive)
         throw std::logic_error("inline graph recording requires an active parent capture");
     return graph;
@@ -80,13 +87,19 @@ bool cooperative_kernel(cudaGraphNode_t node) {
 }
 
 std::vector<cudaGraphNode_t> dependent_nodes(cudaGraphNode_t node) {
+    const auto query = [&](cudaGraphNode_t* nodes, std::size_t* count) {
+#if CUDART_VERSION >= 13000
+        return cudaGraphNodeGetDependentNodes(node, nodes, nullptr, count);
+#else
+        return cudaGraphNodeGetDependentNodes(node, nodes, count);
+#endif
+    };
     std::size_t count = 0;
-    check_graph(cudaGraphNodeGetDependentNodes(node, nullptr, nullptr, &count),
-                "cudaGraphNodeGetDependentNodes");
+    check_graph(query(nullptr, &count), "cudaGraphNodeGetDependentNodes");
     std::vector<cudaGraphNode_t> nodes(count);
     if (count)
-        check_graph(cudaGraphNodeGetDependentNodes(node, nodes.data(), nullptr, &count),
-                    "cudaGraphNodeGetDependentNodes");
+        check_graph(query(nodes.data(), &count), "cudaGraphNodeGetDependentNodes");
+    nodes.resize(count);
     return nodes;
 }
 
