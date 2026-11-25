@@ -70,3 +70,44 @@ calibration only, both) uses scripts/ab-sm89-factorial.ps1 with the exact
 same original candidate binary, same corpus/model, 512 decode tokens and
 reversed arm order on alternate repetitions. The results must be assessed
 before choosing a performance optimization or promoting a release.
+
+## Five-arm follow-up: 859d76b7, 512 decode tokens
+
+All 30 runs completed (two repetitions, reversed arm order).
+Raw reports: profiles/bench/rtx4090-neroued-factorial-20261125.
+
+| Context | v0.1.3 | Candidate default | Buckets | Calibration | Both |
+|---:|---:|---:|---:|---:|---:|
+| 32768 | 262.78 | 260.46 | 260.48 | 260.42 | 259.88 |
+| 65536 | 245.67 | 250.22 | 249.90 | 250.25 | 250.36 |
+| 131072 | 214.29 | 220.86 | 220.98 | 220.42 | 220.26 |
+
+Candidate default: -0.88%, +1.85%, +3.07% decode; prefill almost unchanged.
+Neither experimental flag demonstrates a reproducible improvement over
+candidate defaults; both stay off. The first short-decode regression does
+not generalize to the longer decode workload. These are two repetitions,
+not a statistical guarantee. The corpus repeats a fixture and is not a
+representative production workload.
+
+## Subsequent experimental migration
+
+Dense BF16 paged draft attention now uses canonical bucket resource promises
+when NINFER_SM89_ATTENTION_BUCKETS=1, clamped to the actual logical context
+capacity. Planning and execution use the same envelope. The standalone
+SM89 graph-slice test passed 28 replays with two alternating physical page
+values, zero-length through 196608-token frontiers, T=2 and T=12, and an
+analytic nonconstant oracle with exact inactive tails. Qwen3.5 context,
+decode, graph and startup planning translation units compiled.
+
+NINFER_SM89_PHYSICAL_STARTUP_CALIBRATION=1 (in addition to the startup
+calibration flag) optionally uses distinct preallocated KV pages, including
+the target and any paged draft backend, at 64/2112/8192/32768 tokens when
+capacity permits. Admission checks account for earlier probes, available
+pages and per-address limits; the cap is 1024 pages per pool and the soft
+probe time budget is five seconds. Pages are released after startup. This
+provides physically backed synthetic latency priors, not an acceptance
+estimate or a full physical cost-model fit. Host budget tests passed;
+real-model qualification is still required.
+
+The full donor flat graph suite, remaining causal/sparse attention migration
+and live request preemption/replay remain unimplemented.
