@@ -121,6 +121,9 @@ if(NOT WIN32)
     ENVIRONMENT "NINFER_CUDA_SYNC=")
 endif()
 
+ninfer_add_test(ninfer_startup_speculative_calibration_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_startup_speculative_calibration.cpp")
+
 ninfer_add_test(ninfer_graph_profile_index_test STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_graph_profile_index.cpp")
 

@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
+#include "models/qwen3_5/program/startup_speculative_calibration.h"
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "runtime/contract/draft_sampling.h"
@@ -9,6 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <chrono>
+#include <cstdlib>
+#include <cstdio>
+#include <string_view>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -589,6 +594,62 @@ void ProgramImpl::prepare_graphs() {
     }
     if (!ngram_graphs.profiles.empty()) {
         instantiate_graph_family(ngram_graphs, "ngram", device, prepare_profile);
+    }
+
+    // Opt-in until qualified on real-model workloads. The representative
+    // backing aliases historical pages; only seed short-context latency, never
+    // acceptance or long-context bandwidth. Existing graph topology is retained.
+    const char* calibration = std::getenv("NINFER_SM89_STARTUP_CALIBRATION");
+    if ((mtp_controller || masked_controller) && calibration &&
+        std::string_view(calibration) == "1") {
+        auto& family = mtp_controller ? mtp_graphs : dflash_graphs;
+        std::vector<GraphProfileIndex::Entry> entries;
+        for (std::size_t i = 0; i < family.profiles.size(); ++i) {
+            const auto& p = family.profiles[i];
+            entries.push_back({p.batch_size, p.verify_window, p.min_execution_frontier,
+                               p.max_execution_frontier, p.topology_class, i});
+        }
+        const auto schedule = startup_speculative_probes(entries, capacity, max_concurrency);
+        const auto started = std::chrono::steady_clock::now();
+        std::size_t measured = 0;
+        for (const auto& probe : schedule) {
+            if (std::chrono::steady_clock::now() - started > std::chrono::seconds(3)) break;
+            const auto& entry = family.index.select(probe.batch, probe.window, probe.frontier);
+            auto& profile = family.profiles.at(entry.profile);
+            auto topology = std::ranges::find(family.topologies, entry.topology,
+                                               &DecodeGraphTopology::topology_class);
+            if (topology == family.topologies.end())
+                throw std::logic_error("calibration topology unavailable");
+            if (topology->installed_profile != entry.profile) {
+                topology->executable.update(profile.definition);
+                topology->installed_profile = entry.profile;
+            }
+            topology->executable.upload(device.stream);
+            device.synchronize();
+            std::array<double, 3> samples{};
+            for (unsigned rep = 0; rep <= samples.size(); ++rep) {
+                prepare_representative(probe.frontier, probe.batch, probe.window);
+                // Unlike copy graph warmup, these probes represent neural rounds.
+                if (io.dflash_decode) {
+                    for (std::uint32_t row = 0; row < probe.batch; ++row)
+                        dflash_host_ingress->copy_rows[row] = 0;
+                }
+                device.synchronize();
+                const auto begin = std::chrono::steady_clock::now();
+                topology->executable.launch(device.stream);
+                device.synchronize();
+                if (rep) samples[rep-1] = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - begin).count();
+            }
+            std::ranges::sort(samples);
+            if (mtp_controller)
+                mtp_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
+            else
+                masked_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
+            ++measured;
+        }
+        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (synthetic short-context latency priors)\\n",
+                     measured, schedule.size());
     }
 
     clear_stable_controls();

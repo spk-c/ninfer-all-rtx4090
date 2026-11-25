@@ -191,6 +191,14 @@ private:
 
 class MtpAdaptiveBatchController final {
 public:
+    // Startup graph probes provide a latency prior, not draft-survival or
+    // request/cohort evidence. Live rounds continue adapting this estimate.
+    void seed_cost(std::uint32_t batch, std::uint32_t window,
+                   double seconds, std::uint32_t context) noexcept {
+        if (window > maximum_window_) return;
+        for (unsigned i = 0; i < 4; ++i) costs_.observe(batch, window, seconds, context);
+    }
+
     // `floor_window` is the narrowest width the controller settles on while every row has that
     // many drafts ready: 3 where narrower widths cost about as much (the Qwen3.5 Programs, whose
     // drafts are ready before the round), 1 where each draft is a step of its own.
@@ -596,6 +604,22 @@ public:
             batch.wide_over_narrow =
                 batch.widths[1].seconds / std::max(batch.widths[0].seconds, 1e-9F);
         }
+    }
+
+    void seed_cost(std::uint32_t batch, std::uint32_t window,
+                   double seconds, std::uint32_t context) noexcept {
+        if (!batch || batch > kAdaptiveMtpMaximumBatch ||
+            (window != wide_ && window != narrow_) ||
+            !(seconds > 0.0) || !std::isfinite(seconds) ||
+            !(static_cast<float>(seconds) > 0.0F) ||
+            !std::isfinite(static_cast<float>(seconds))) return;
+        Batch& state = batches_[context_bucket(context)][batch - 1U];
+        Width& width = state.widths[index(window)];
+        width.seconds = static_cast<float>(seconds);
+        width.samples = kMeasuredRounds;
+        width.last_round = state.rounds;
+        if (state.widths[0].samples && state.widths[1].samples)
+            state.wide_over_narrow = state.widths[1].seconds / state.widths[0].seconds;
     }
 
     // Whether the last select() moved the selected width.
