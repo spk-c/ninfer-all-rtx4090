@@ -1129,7 +1129,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         submit_range.emplace(nvtx::Name::DecodeDFlashSubmit, nvtx::Category::DFlash,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable    = nullptr;
-        execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier);
+        execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, capacity);
         auto target_envelope                 = target_envelope_for(maximum_frontier);
         if (use_cuda_graph) {
             DecodeGraphFamily& family   = copy_round ? ngram_graphs : dflash_graphs;
@@ -1138,7 +1138,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                      maximum_frontier, "DFlash batch", verify_drafts);
             executable = &install_graph_profile(family, profile, "DFlash batch");
             envelopes =
-                dflash_envelopes(profile.min_execution_frontier, profile.max_execution_frontier);
+                dflash_envelopes(profile.min_execution_frontier, profile.max_execution_frontier, capacity);
             target_envelope = target_envelope_for(profile.max_execution_frontier);
         }
 

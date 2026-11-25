@@ -1285,7 +1285,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                          {dimension(draft->attention.head_dim),
                                           dimension(draft->attention.num_attention_heads),
                                           dimension(draft->attention.num_key_value_heads)},
-                                         {0, plan.capacity}, width, width, batch)));
+                                         draft_full_envelope(plan.capacity, plan.capacity), width, width, batch)));
                     for (const auto& block : parameters.draft->layers) {
                         add_scratch(layout, block.output, tokens, tokens);
                     }

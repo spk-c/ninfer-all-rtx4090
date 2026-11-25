@@ -126,6 +126,11 @@ ninfer_add_test(ninfer_sliding_bucket_graph_test
   LIBRARIES ninfer_ops ninfer_core)
 set_tests_properties(ninfer_sliding_bucket_graph_test PROPERTIES SKIP_RETURN_CODE 77)
 
+ninfer_add_test(ninfer_dense_context_bucket_graph_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_dense_context_bucket_graph.cpp"
+  LIBRARIES ninfer_ops ninfer_core)
+set_tests_properties(ninfer_dense_context_bucket_graph_test PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_startup_speculative_calibration_test STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_startup_speculative_calibration.cpp")
 

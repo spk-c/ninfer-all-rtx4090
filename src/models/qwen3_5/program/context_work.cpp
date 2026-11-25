@@ -309,11 +309,12 @@ execution::MtpCausalAttentionEnvelopes mtp_causal_attention_envelopes(std::uint3
 }
 
 execution::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier,
-                                            std::uint32_t max_frontier) {
+                                            std::uint32_t max_frontier,
+                                              std::uint32_t capacity) {
     (void)min_frontier;
     return execution::DFlashEnvelopes{
         .local = draft_sliding_envelope(max_frontier),
-        .full  = {0, max_frontier},
+        .full  = draft_full_envelope(max_frontier, capacity),
     };
 }
 

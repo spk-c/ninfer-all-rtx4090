@@ -193,7 +193,9 @@ void ProgramImpl::prepare_graphs() {
             std::vector<DeviceKVPageHandle> pages;
             pages.reserve(batch_size);
             for (std::uint32_t row = 0; row < batch_size; ++row) {
-                pages.push_back(addresses.physical_page(allocations[row], 0));
+                const auto allocation = allocations.at(row);
+                for (std::uint32_t page = 0; page < addresses.mapped_pages(allocation); ++page)
+                    pages.push_back(addresses.physical_page(allocation, page));
             }
             cache.page_pool().zero_pages(pages, compute_streams);
         };
@@ -526,7 +528,7 @@ void ProgramImpl::prepare_graphs() {
             prepare_representative(code_warm.min, 1, family_window);
             device.synchronize();
             execution::dflash_decode_batch(dflash_state, 1, family_window,
-                                           dflash_envelopes(code_warm.min, code_warm.max),
+                                           dflash_envelopes(code_warm.min, code_warm.max, capacity),
                                            code_warm_target, nullptr);
             device.synchronize();
 
@@ -560,7 +562,7 @@ void ProgramImpl::prepare_graphs() {
 
                     execution::capture_dflash_decode_batch(
                         dflash_state, static_cast<std::int32_t>(batch_size), family_window,
-                        dflash_envelopes(planned.min, planned.max), target_envelope,
+                        dflash_envelopes(planned.min, planned.max, capacity), target_envelope,
                         profile.definition);
                 }
             }
@@ -596,9 +598,10 @@ void ProgramImpl::prepare_graphs() {
         instantiate_graph_family(ngram_graphs, "ngram", device, prepare_profile);
     }
 
-    // Opt-in until qualified on real-model workloads. The representative
-    // backing aliases historical pages; only seed short-context latency, never
-    // acceptance or long-context bandwidth. Existing graph topology is retained.
+    // Opt-in until qualified on real-model workloads. By default these are
+    // short-context repeated-page priors. A second, independent opt-in uses
+    // distinct preallocated pages for bounded physical latency probes.
+    // Neither path infers acceptance from synthetic tokens.
     const char* calibration = std::getenv("NINFER_SM89_STARTUP_CALIBRATION");
     if ((mtp_controller || masked_controller) && calibration &&
         std::string_view(calibration) == "1") {
@@ -609,11 +612,58 @@ void ProgramImpl::prepare_graphs() {
             entries.push_back({p.batch_size, p.verify_window, p.min_execution_frontier,
                                p.max_execution_frontier, p.topology_class, i});
         }
-        const auto schedule = startup_speculative_probes(entries, capacity, max_concurrency);
+        const char* physical_flag = std::getenv("NINFER_SM89_PHYSICAL_STARTUP_CALIBRATION");
+        const bool physical = physical_flag && std::string_view(physical_flag) == "1";
+        const auto schedule = startup_speculative_probes(entries, capacity, max_concurrency, physical);
+        const auto can_back = [&](qwen3_5::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                                  const std::vector<KVAddressSpaceHandle>& allocations,
+                                  const SpeculativeProbe& probe, std::uint32_t pages) {
+            std::vector<std::uint32_t> mapped;
+            for (auto allocation : allocations) mapped.push_back(addresses.mapped_pages(allocation));
+            if (!startup_physical_backing_fits(mapped, probe.batch, pages,
+                                               cache.page_pool().unpromised_free_pages(),
+                                               addresses.page_capacity()))
+                return false;
+            for (std::uint32_t row = 0; row < probe.batch; ++row)
+                if (mapped[row] < pages &&
+                    !addresses.can_resize_entitlement(allocations[row], pages)) return false;
+            return true;
+        };
+        const auto back = [&](KVAddressSpaceStore& addresses,
+                              const std::vector<KVAddressSpaceHandle>& allocations,
+                              const SpeculativeProbe& probe, std::uint32_t tokens,
+                              std::uint32_t pages) {
+            for (std::uint32_t row = 0; row < probe.batch; ++row) {
+                const auto allocation = allocations.at(row);
+                if (addresses.mapped_pages(allocation) >= pages) continue;
+                addresses.resize_entitlement(allocation, pages);
+                addresses.ensure_mapped_to_tokens(allocation, tokens, compute_streams);
+            }
+        };
         const auto started = std::chrono::steady_clock::now();
-        std::size_t measured = 0;
+        std::size_t measured = 0, resource_skipped = 0;
         for (const auto& probe : schedule) {
-            if (std::chrono::steady_clock::now() - started > std::chrono::seconds(3)) break;
+            if (std::chrono::steady_clock::now() - started >
+                std::chrono::seconds(physical ? 5 : 3)) break;
+            if (physical) {
+                const auto tokens = probe.frontier + probe.window + 1U;
+                const auto page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+                const auto pages = (tokens + page_size - 1U) / page_size;
+                auto* backend = decoder->mtp_cache() != nullptr ? decoder->mtp_cache()
+                               : (dflash && dflash->full ? &*dflash->full : nullptr);
+                const auto& backend_allocations = decoder->mtp_cache() != nullptr
+                                               ? mtp_capture_allocations : dflash_capture_allocations;
+                if (!can_back(decoder->text_kv, *text_kv_addresses, text_capture_allocations,
+                              probe, pages) ||
+                    (backend && !can_back(*backend, *backend_kv_addresses, backend_allocations,
+                                          probe, pages))) {
+                    ++resource_skipped;
+                    continue;
+                }
+                back(*text_kv_addresses, text_capture_allocations, probe, tokens, pages);
+                if (backend) back(*backend_kv_addresses, backend_allocations, probe, tokens, pages);
+                device.synchronize();
+            }
             const auto& entry = family.index.select(probe.batch, probe.window, probe.frontier);
             auto& profile = family.profiles.at(entry.profile);
             auto topology = std::ranges::find(family.topologies, entry.topology,
@@ -648,8 +698,11 @@ void ProgramImpl::prepare_graphs() {
                 masked_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
             ++measured;
         }
-        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (synthetic short-context latency priors)\n",
-                     measured, schedule.size());
+        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (%s; %zu resource skips)\n",
+                     measured, schedule.size(),
+                     physical ? "distinct physical KV pages, synthetic token latency priors"
+                              : "synthetic short-context latency priors",
+                     resource_skipped);
     }
 
     clear_stable_controls();
