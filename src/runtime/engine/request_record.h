@@ -251,11 +251,13 @@ struct RequestRecord {
     std::int32_t retained_slot = -1;
     std::string retained_session_digest;
 
-    // Banned words (bad_words). The Program cannot take a sequence back to an earlier state, so a
+    // Banned-word rewind or one-shot KV pressure replay. The Program cannot take a sequence\n    // back to an earlier state, so a
     // rewind ends the request's sequence and queues the request again: its prompt is then the
     // submitted one followed by the generated tokens the rewind keeps, and its first draw is the
-    // rewound position (EngineCore::requeue_bad_words_rewind).
-    struct BadWordsRequeue {
+    // rewound position (EngineCore::requeue_committed_prefix).
+    struct RequeueState {
+        // Pressure replay retains every committed token and gets at most one retry.
+        bool pressure = false;
         // The prompt as submitted, which every requeue continues.
         PreparedPrompt prompt;
         // The submitted output limit and sampling, which a requeue resolves again.
@@ -273,7 +275,7 @@ struct RequestRecord {
         GenerationTimings timings;
         SpeculativeStats speculative;
     };
-    std::optional<BadWordsRequeue> bad_words;
+    std::optional<RequeueState> requeue;
 
     std::mutex mutex;
     std::condition_variable cv;
