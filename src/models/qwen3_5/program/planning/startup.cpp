@@ -6,6 +6,7 @@
 #include "models/qwen3_5/execution/linear.h"
 #include "models/qwen3_5/execution/mtp.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
+#include "models/qwen3_5/program/draft_attention_buckets.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen3_5/frontend/graft.h"
@@ -1221,7 +1222,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                              dimension(draft->attention.num_attention_heads),
                                              dimension(draft->attention.num_key_value_heads)},
                                             dimension(draft->sliding_window.value_or(0)),
-                                            {0, plan.capacity}, width, width, batch));
+                                            draft_sliding_envelope(plan.capacity), width, width, batch));
                         finish_branch(true);
                     }
                     {
@@ -1279,7 +1280,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                           dimension(draft->attention.num_attention_heads),
                                           dimension(draft->attention.num_key_value_heads)},
                                          dimension(draft->sliding_window.value_or(0)),
-                                         {0, plan.capacity}, width, width, batch),
+                                         draft_sliding_envelope(plan.capacity), width, width, batch),
                                      ops::context_softmax_attention_workspace_capacity_bytes(
                                          {dimension(draft->attention.head_dim),
                                           dimension(draft->attention.num_attention_heads),

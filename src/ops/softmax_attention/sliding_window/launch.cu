@@ -65,10 +65,12 @@ sliding_window_attention_resolve_plan(std::uint32_t window, SlidingWindowMask ma
     // Keep enough independent KV-head CTAs for small batches, but limit repeated Q loads,
     // FP32 partial writes and merge traffic as the batch/query block grows.
     const int direct_context_limit = window == 2048 && tokens > 8 && batch >= 6 ? 128 : 96;
-    const bool direct = envelope.max_context <= static_cast<std::uint32_t>(direct_context_limit);
+    const bool direct = !envelope.bucket_stable &&
+                        envelope.max_context <= static_cast<std::uint32_t>(direct_context_limit);
     constexpr int key_block          = 32;
     const int reduce_warps           = window == 2048 ? 4 : 1;
-    const std::uint32_t context_rows = std::min(envelope.max_context, window - 1u);
+    const std::uint32_t context_rows =
+        envelope.bucket_stable ? window - 1u : std::min(envelope.max_context, window - 1u);
     const std::int32_t context_tiles = (context_rows + key_block - 1u) / key_block;
     int split_limit                  = 32;
     if (window == 2048) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/ops/attention_geometry.h"
+#include "ninfer/ops/context_bucket.h"
 
 #include "core/arena.h"
 #include "core/cyclic_kv_cache.h"
@@ -16,7 +17,14 @@ namespace ninfer::ops {
 struct SlidingWindowAttentionExecutionEnvelope {
     std::uint32_t min_context = 0;
     std::uint32_t max_context = 0;
+    // Opt-in fixed kernel topology across canonical context buckets.
+    bool bucket_stable = false;
 };
+
+[[nodiscard]] constexpr SlidingWindowAttentionExecutionEnvelope
+sliding_window_bucket_envelope(ContextBucket bucket) {
+    return {0, context_bucket_tokens(bucket), true};
+}
 
 // Which temporary query rows a live query row sees: every live one of its batch row (a DFlash
 // block), or those at or before it (a DSpine block, causal inside the block).
