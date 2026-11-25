@@ -4,6 +4,7 @@
 #include "artifact/reader.h"
 #include "core/qtype.h"
 #include "core/tensor_split.h"
+#include "core/weight_view.h"
 #include "models/expert_parallel.h"
 #include "models/qwen3_5/frontend/tokenizer.h"
 #include "models/qwen3_5/load/bindings.h"
@@ -55,29 +56,47 @@ void tail(Bindings& b, WeightId id) {
     }
 }
 
-// Resolve stored GGUF rows directly. Disk mode validates without materializing the bank.
+// A bank's stored rows, one blob an expert: MXFP8 has a code blob and a scale blob.
+struct BankBlobs {
+    std::vector<ExpertBlob> rows;   // per expert: GGUF block rows, BF16 rows or MXFP8 codes
+    std::vector<ExpertBlob> scales; // per expert: MXFP8 scale rows; empty for other formats
+};
+
+// Resolve stored bank rows directly. Disk mode validates without materializing the bank.
 // Host mode borrows the materializer's pinned parent. Neither path repacks model weights.
-std::vector<ExpertBlob> expert_blobs(const artifact::Reader& reader,
-                                    const artifact::ParameterReference& reference,
-                                    const artifact::MaterializedArtifact& backing,
-                                    std::uint64_t experts, std::uint64_t rows, std::uint64_t k,
-                                    QType& format, std::uint64_t& row_bytes) {
-    std::vector<ExpertBlob> result;
+// MXFP8 rows are split (codes, then scales), so each expert gets a code blob and a scale blob.
+BankBlobs expert_blobs(const artifact::Reader& reader,
+                       const artifact::ParameterReference& reference,
+                       const artifact::MaterializedArtifact& backing, std::uint64_t experts,
+                       std::uint64_t rows, std::uint64_t k, QType& format,
+                       std::uint64_t& row_bytes) {
+    BankBlobs result;
     const auto& parts = reference.binding.parts;
     if (parts.size() != 1) {
         throw artifact::ArtifactError(reference.name + ": expert bank must be one stored region");
     }
     const auto& part = parts.front();
     const auto& geometry = reader.geometry(part.object);
-    const bool bf16 = geometry.format == QType::BF16;
-    if ((!is_gguf(geometry.format) && !bf16) || geometry.shape.size() != 2 ||
+    const bool bf16  = geometry.format == QType::BF16;
+    const bool mxfp8 = geometry.format == QType::MXFP8;
+    if ((!is_gguf(geometry.format) && !bf16 && !mxfp8) || geometry.shape.size() != 2 ||
         geometry.shape[1] != k || part.begin % k || part.end - part.begin != experts * rows * k) {
         throw artifact::ArtifactError(reference.name +
-                                      ": experts must be stored GGUF block rows or BF16 rows");
+                                      ": experts must be stored GGUF block, BF16 or MXFP8 rows");
     }
     format = geometry.format;
+    std::uint64_t scale_row_bytes = 0;
     if (bf16) {
         row_bytes = k * 2;
+    } else if (mxfp8) {
+        // The expert products step through K unpadded: a row of codes is K bytes, of scales K/32.
+        if (geometry.layout != QuantLayout::RowSplit || geometry.padded_columns != k ||
+            geometry.code_bytes_per_row != k || geometry.scale_bytes_per_row != k / 32) {
+            throw artifact::ArtifactError(
+                reference.name + ": MXFP8 experts need row-split rows of K a multiple of 128");
+        }
+        row_bytes       = k;
+        scale_row_bytes = k / 32;
     } else {
         const auto block = gguf_block_shape(format);
         if (k % block.elements) {
@@ -86,25 +105,34 @@ std::vector<ExpertBlob> expert_blobs(const artifact::Reader& reader,
         row_bytes = k / block.elements * block.bytes;
     }
     reader.validate_object(part.object);
-    const auto start = part.begin / k * row_bytes;
-    for (std::uint64_t e = 0; e < experts; ++e) {
+    // A host expert the pinned block could not hold is read from the files, as on disk.
+    const bool pinned = reference.residency == artifact::Residency::PinnedOrFiles &&
+                        backing.pinned(part.object);
+    const auto* parent = pinned ? backing.pinned_parent(part.object).data : nullptr;
+    const auto blob_at = [&](std::uint64_t offset, std::uint64_t bytes, std::uint64_t tail) {
         ExpertBlob blob;
-        blob.bytes = rows * row_bytes;
-        blob.zero_tail = kRowTail;
-        const auto offset = start + e * blob.bytes;
-        // A host expert the pinned block could not hold is read from the files, as on disk.
-        if (reference.residency == artifact::Residency::PinnedOrFiles &&
-            backing.pinned(part.object)) {
-            const auto* parent = backing.pinned_parent(part.object).data;
-            blob.pinned = parent + offset;
+        blob.bytes     = bytes;
+        blob.zero_tail = tail;
+        if (pinned) {
+            blob.pinned        = parent + offset;
             blob.pinned_region = reinterpret_cast<std::uintptr_t>(parent);
         } else {
             const auto logical = reader.directory().tensor(part.object).offset + offset;
-            for (const auto& segment : reader.segments(logical, blob.bytes)) {
+            for (const auto& segment : reader.segments(logical, bytes)) {
                 blob.extents.push_back({segment.file_index, segment.file_offset, segment.bytes});
             }
         }
-        result.push_back(std::move(blob));
+        return blob;
+    };
+    const auto first_row = part.begin / k;
+    for (std::uint64_t e = 0; e < experts; ++e) {
+        const auto row = first_row + e * rows;
+        // The MXFP8 products read no byte past a row; GGUF products may read whole K steps past it.
+        result.rows.push_back(blob_at(row * row_bytes, rows * row_bytes, mxfp8 ? 0 : kRowTail));
+        if (mxfp8) {
+            result.scales.push_back(blob_at(geometry.scale_offset + row * scale_row_bytes,
+                                            rows * scale_row_bytes, 0));
+        }
     }
     return result;
 }
@@ -176,17 +204,21 @@ bool has_dspark(const artifact::Reader& reader) {
     return is_inkling2(reader) && component_is(reader, "dspark", "Inkling2DSpark");
 }
 
+bool has_dflash2(const artifact::Reader& reader) {
+    return is_inkling2(reader) && component_is(reader, "dflash2", "Inkling2DFlash2");
+}
+
 std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOptions& options,
                                   DeviceContext& device, const StartupObserver* observer) {
     if (!is_inkling2(reader)) {
         throw artifact::ArtifactError("the artifact's text component is not Inkling2ForCausalLM");
     }
     TextConfig config = parse_text_config(reader.directory().component("text").config);
+    if (int(options.dspark) + int(options.dflash2) + int(!options.dspine.empty()) > 1) {
+        throw std::invalid_argument("Inkling 2 drafts with one drafter: its DSpark or DFlash2 "
+                                    "drafter or a DSpine drafter");
+    }
     if (!options.dspine.empty()) {
-        if (options.dspark) {
-            throw std::invalid_argument("Inkling 2 drafts with one drafter: its DSpark drafter or "
-                                        "a DSpine drafter");
-        }
         dspine::check_target(dspine::read_config(options.dspine), config.hidden_size,
                              config.vocab_size, config.visit_count(), "Inkling 2");
     }
@@ -198,6 +230,10 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
     if (options.dspark && !has_dspark(reader)) {
         throw artifact::ArtifactError("the artifact carries no Inkling 2 DSpark drafter (convert "
                                       "with --components text,dspark)");
+    }
+    if (options.dflash2 && !has_dflash2(reader)) {
+        throw artifact::ArtifactError("the artifact carries no Inkling 2 DFlash2 drafter (convert "
+                                      "with --components text,dflash2)");
     }
     artifact::Binder binder(reader);
     FrontendResources resources = bind_resources(binder, config, vision);
@@ -431,6 +467,64 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
             dw.layers.push_back(layer);
         }
     }
+    // The DFlash2 drafter on rank 0: its projections in the formats the converter chose, its
+    // norms, convolution bases and the selector's codebooks BF16.
+    std::optional<dflash2::Config> dflash2_config;
+    struct DFlash2LayerIds {
+        WeightId input_norm, post_attention_norm, query_norm, key_norm, attention_base, mlp_base;
+        WeightId query, key, value, output, gate, up, down, attention_projection, mlp_projection;
+    };
+    struct DFlash2Ids {
+        WeightId context_norm, final_norm, feature_projection, selector_projection, predecessor,
+            successor;
+        std::vector<DFlash2LayerIds> layers;
+    };
+    std::optional<DFlash2Ids> dflash2_ids;
+    if (options.dflash2) {
+        const dflash2::Config& fc = dflash2_config.emplace(
+            parse_dflash2_config(reader.directory().component("dflash2").config, config));
+        const std::uint64_t dq = fc.query_width(), dkv = fc.key_width();
+        const std::uint64_t inner = fc.intermediate_size, rank = fc.selector_rank;
+        const std::uint64_t coefficients = 4 * std::uint64_t(fc.conv_groups());
+        const auto bf16 = [&](const std::string& name, artifact::Shape shape) {
+            return b.direct(name, std::move(shape), QType::BF16);
+        };
+        DFlash2Ids& ids = dflash2_ids.emplace();
+        const std::string n = "dflash2/";
+        ids.context_norm = bf16(n + "context_norm", {h});
+        ids.final_norm   = bf16(n + "final_norm", {h});
+        ids.feature_projection =
+            b.parameter(n + "feature_projection", {h, std::uint64_t(fc.taps()) * h},
+                        {n + "target_features"});
+        ids.selector_projection = b.parameter(n + "candidate_selector/hidden_projection",
+                                              {rank, h}, {n + "final_hidden"});
+        ids.predecessor =
+            bf16(n + "candidate_selector/predecessor_codebook", {fc.vocab_size, rank});
+        ids.successor = bf16(n + "candidate_selector/successor_codebook", {fc.vocab_size, rank});
+        for (std::uint32_t i = 0; i < fc.num_hidden_layers; ++i) {
+            const std::string p = n + "layers/" + std::to_string(i) + "/";
+            const std::string a = p + "attention/";
+            DFlash2LayerIds layer;
+            layer.input_norm          = bf16(p + "input_norm", {h});
+            layer.post_attention_norm = bf16(p + "post_attention_norm", {h});
+            layer.query_norm          = bf16(a + "query_norm", {fc.head_dim});
+            layer.key_norm            = bf16(a + "key_norm", {fc.head_dim});
+            layer.attention_base      = bf16(p + "attention_conv/base_kernel", {2, 2, h});
+            layer.mlp_base            = bf16(p + "mlp_conv/base_kernel", {2, 2, h});
+            layer.query  = b.parameter(a + "query", {dq, h}, {p + "attention_input"});
+            layer.key    = b.parameter(a + "key", {dkv, h}, {p + "attention_input"});
+            layer.value  = b.parameter(a + "value", {dkv, h}, {p + "attention_input"});
+            layer.output = b.parameter(a + "output", {h, dq}, {a + "output_input"});
+            layer.gate   = b.parameter(p + "mlp/gate", {inner, h}, {p + "mlp_input"});
+            layer.up     = b.parameter(p + "mlp/up", {inner, h}, {p + "mlp_input"});
+            layer.down   = b.parameter(p + "mlp/down", {h, inner}, {p + "mlp_product"});
+            layer.attention_projection = b.parameter(
+                p + "attention_conv/kernel_projection", {coefficients, h}, {p + "attention_norm"});
+            layer.mlp_projection = b.parameter(p + "mlp_conv/kernel_projection",
+                                               {coefficients, h}, {p + "mlp_norm"});
+            ids.layers.push_back(layer);
+        }
+    }
     InstanceInfo info;
     info.name            = reader.directory().metadata.value("name", std::string("Inkling-2-Mini"));
     info.metadata_json   = reader.directory().metadata.dump();
@@ -448,11 +542,26 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
                                bank.gate_up_row_bytes);
         auto down = expert_blobs(reader, reference[1], backing, e, h, w, bank.down_type,
                                  bank.down_row_bytes);
-        for (std::size_t x = 0; x < gu.size(); ++x) {
-            bank.delivery.experts.push_back({std::move(gu[x]), std::move(down[x])});
+        const bool mxfp8 = bank.gate_up_type == QType::MXFP8;
+        if (mxfp8 != (bank.down_type == QType::MXFP8)) {
+            throw artifact::ArtifactError(reference[0].name +
+                                          ": a layer's expert banks are both MXFP8 or neither");
         }
-        // Gate rows, up rows, the [gate; up] parent, down rows: the executor's expert tables.
-        bank.delivery.aliases = {{0, 0}, {0, w * bank.gate_up_row_bytes}, {0, 0}, {1, 0}};
+        for (std::size_t x = 0; x < gu.rows.size(); ++x) {
+            if (mxfp8) {
+                bank.delivery.experts.push_back({std::move(gu.rows[x]), std::move(down.rows[x]),
+                                                 std::move(gu.scales[x]),
+                                                 std::move(down.scales[x])});
+            } else {
+                bank.delivery.experts.push_back({std::move(gu.rows[x]), std::move(down.rows[x])});
+            }
+        }
+        // The executor's expert tables: gate rows, up rows, the [gate; up] parent and down rows,
+        // or for MXFP8 the [gate; up] scales, down scales, [gate; up] codes and down codes.
+        bank.delivery.aliases =
+            mxfp8 ? std::vector<ExpertAlias>{{2, 0}, {3, 0}, {0, 0}, {1, 0}}
+                  : std::vector<ExpertAlias>{
+                        {0, 0}, {0, w * bank.gate_up_row_bytes}, {0, 0}, {1, 0}};
         expert_banks.push_back(std::move(bank));
     }
     auto model = std::unique_ptr<Model>(new Model(std::move(config), std::move(weights),
@@ -466,6 +575,49 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
     model->vision_placement_ = options.vision;
     model->dspark_config_    = std::move(dspark_config);
     model->dspark_           = std::move(dspark);
+    if (dflash2_ids) {
+        const auto tensor = [&](WeightId id, std::initializer_list<std::int32_t> extents) {
+            const Tensor t = weight_tensor(model->weight(id).view, extents);
+            if (t.dtype != DType::BF16) {
+                throw artifact::ArtifactError(model->weight(id).name + ": must be BF16");
+            }
+            return t;
+        };
+        const auto linear = [&](WeightId id) {
+            return ops::prepare_linear_weight(model->input(id));
+        };
+        const dflash2::Config& fc = *dflash2_config;
+        const auto hh = std::int32_t(h), d = std::int32_t(fc.head_dim);
+        const auto rank = std::int32_t(fc.selector_rank), rows = std::int32_t(fc.vocab_size);
+        dflash2::Operands p;
+        p.context_norm         = tensor(dflash2_ids->context_norm, {hh});
+        p.final_norm           = tensor(dflash2_ids->final_norm, {hh});
+        p.feature_projection   = linear(dflash2_ids->feature_projection);
+        p.selector_projection  = linear(dflash2_ids->selector_projection);
+        p.predecessor_codebook = tensor(dflash2_ids->predecessor, {rank, rows});
+        p.successor_codebook   = tensor(dflash2_ids->successor, {rank, rows});
+        for (const auto& lw : dflash2_ids->layers) {
+            dflash2::LayerOperands l;
+            l.input_norm           = tensor(lw.input_norm, {hh});
+            l.post_attention_norm  = tensor(lw.post_attention_norm, {hh});
+            l.query_norm           = tensor(lw.query_norm, {d});
+            l.key_norm             = tensor(lw.key_norm, {d});
+            l.attention_base       = tensor(lw.attention_base, {hh, 2, 2});
+            l.mlp_base             = tensor(lw.mlp_base, {hh, 2, 2});
+            l.query                = linear(lw.query);
+            l.key                  = linear(lw.key);
+            l.value                = linear(lw.value);
+            l.output               = linear(lw.output);
+            l.gate                 = linear(lw.gate);
+            l.up                   = linear(lw.up);
+            l.down                 = linear(lw.down);
+            l.attention_projection = linear(lw.attention_projection);
+            l.mlp_projection       = linear(lw.mlp_projection);
+            p.layers.push_back(std::move(l));
+        }
+        model->dflash2_config_ = std::move(dflash2_config);
+        model->dflash2_        = std::move(p);
+    }
     if (options.experts == ExpertResidency::Disk || model->expert_file_bytes() > 0) {
         for (const auto& file : reader.directory().files) {
             model->expert_files_.push_back(file.path ? options.artifact.parent_path() / *file.path
