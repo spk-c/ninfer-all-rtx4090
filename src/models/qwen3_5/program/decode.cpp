@@ -1049,6 +1049,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         std::any_of(matches.begin(), matches.end(),
                     [](const NgramProposer::Match& match) { return !match.tokens.empty(); });
     std::uint32_t neural_drafts = draft_window;
+    std::uint32_t adaptive_context = 0;
     if (masked_controller && !copy_round &&
         std::all_of(lanes.begin(), lanes.end(),
                     [this](std::uint32_t lane) { return lane < max_concurrency; })) {
@@ -1057,6 +1058,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             const SequenceState& sequence = active_sequence(lanes[row]);
             signals[row]                  = &requests[lanes[row]].masked_signal;
+            adaptive_context = std::max(adaptive_context, sequence.execution_frontier);
             room[row] = std::min(budgets[row].generated_tokens_remaining,
                                  capacity > sequence.execution_frontier
                                      ? capacity - sequence.execution_frontier
@@ -1064,7 +1066,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         }
         neural_drafts = masked_controller->select(
             std::span<const MaskedWidthSignal* const>(signals.data(), lanes.size()),
-            std::span<const std::uint32_t>(room.data(), lanes.size()));
+            std::span<const std::uint32_t>(room.data(), lanes.size()), adaptive_context);
     }
     const std::uint32_t verify_drafts = copy_round ? ngram_draft_window : neural_drafts;
     const bool drafter_runs           = !copy_round || lanes.size() > 1;
@@ -1276,7 +1278,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             if (!matches[row].tokens.empty()) {
                 record_ngram_round(request, matches[row], extent,
                                    static_cast<std::uint32_t>(accepted_i));
-            } else if (masked_controller && extent == verify_drafts) {
+            } else if (masked_controller && !copy_round && extent == verify_drafts) {
                 // A round its budget cut short says nothing of the width's survival.
                 masked_controller->observe_round(request.masked_signal, verify_drafts,
                                                  static_cast<std::uint32_t>(accepted_i));
@@ -1295,7 +1297,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         }
         if (masked_controller && !copy_round) {
             masked_controller->observe_execution(static_cast<std::uint32_t>(lanes.size()),
-                                                 verify_drafts, seconds);
+                                                 verify_drafts, seconds, adaptive_context);
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(dflash_host_egress->licensed_tokens.data(),

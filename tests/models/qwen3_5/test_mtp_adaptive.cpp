@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <span>
 #include <stdexcept>
 
@@ -190,6 +191,27 @@ void the_masked_width_follows_survival_and_cost() {
             "eight rows of full survival left the wide round");
 }
 
+
+void masked_calibration_isolated_by_batch_and_context() {
+    MaskedWidthController controller;
+    controller.reset(15, 7);
+    auto signal = controller.pooled();
+    const std::array<const MaskedWidthSignal*, 1> one{&signal};
+    const std::array<const MaskedWidthSignal*, 2> two{&signal, &signal};
+    const std::array<std::uint32_t, 1> room{4096};
+    const std::array<std::uint32_t, 2> room2{4096, 4096};
+    for (int n = 0; n < 4; ++n)
+        controller.observe_execution(1, 15, 0.020, 1024);
+    require(controller.select(one, room, 1024) == 7, "calibration never probes narrow");
+    require(controller.select(two, room2, 1024) == 15, "probe leaked into another batch");
+    require(controller.select(one, room, 65536) == 15, "probe leaked into another context bucket");
+    require(controller.select(one, std::array<std::uint32_t, 1>{8}, 65536) == 7,
+            "near context/output boundary needlessly chose a wide round");
+    for (int n = 0; n < 8; ++n)
+        controller.observe_execution(1, 15, std::numeric_limits<double>::infinity(), 65536);
+    require(controller.select(one, room, 65536) == 15, "nonfinite timings triggered a probe");
+}
+
 void the_packed_plan_spends_rows_on_survival() {
     MtpAdaptiveSignal accepting;
     MtpAdaptiveSignal rejecting;
@@ -291,6 +313,7 @@ int main() {
         costs_are_measured_then_scaled();
         the_controller_widens_and_narrows();
         the_masked_width_follows_survival_and_cost();
+        masked_calibration_isolated_by_batch_and_context();
         the_packed_plan_spends_rows_on_survival();
         the_gate_runs_the_faster_mode();
     } catch (const std::exception& error) {
