@@ -3,6 +3,7 @@
 
 #include "core/arena.h"
 #include "core/decode_graph.h"
+#include "models/qwen3_5/program/flat_draft_graph.h"
 #include "core/device.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/rope.h"
@@ -142,6 +143,7 @@ struct DFlashBatchContext {
     Tensor& continuation_hidden_store;
     bool ngram                           = false;
     std::uint32_t neural_proposal_drafts = 0;
+    detail::FlatDraftGraph* draft_readouts = nullptr;
 };
 
 struct DFlashAppendContext {
@@ -256,7 +258,8 @@ void dflash_append_context(PrefillContext& state, const Tensor& features, const 
 void capture_dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,
                                  std::uint32_t k, DFlashEnvelopes envelopes,
                                  ops::CausalAttentionExecutionEnvelope target_envelope,
-                                 DecodeGraphDefinition& definition);
+                                 DecodeGraphDefinition& definition,
+                                 detail::FlatDraftGraph* flat = nullptr);
 void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
                          DFlashEnvelopes envelopes,
                          ops::CausalAttentionExecutionEnvelope target_envelope,

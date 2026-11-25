@@ -33,9 +33,15 @@ public:
     }
 
     void record(cudaStream_t stream, const Capture& capture) {
+        record(stream, capture, range_.first);
+    }
+
+    void record(cudaStream_t stream, const Capture& capture, ops::ContextBucket initial) {
         if (patches_.empty() || !slice_.empty())
             throw std::logic_error("bucket site must be prepared and recorded once");
-        slice_.capture(stream, [&] { capture(range_.first); });
+        if (!ops::valid_context_bucket(initial) || initial < range_.first || initial > range_.last)
+            throw std::invalid_argument("initial bucket outside prepared range");
+        slice_.capture(stream, [&] { capture(initial); });
         if (slice_.size() != patches_.front().params().size())
             throw std::logic_error("bucket site parent differs from variants");
     }

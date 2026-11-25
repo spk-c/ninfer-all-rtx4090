@@ -394,15 +394,28 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
                 Tensor attention = work.alloc(
                     DType::BF16, {dimension(config.attention.head_dim),
                                   dimension(config.attention.num_attention_heads), width, batch});
-                ops::sliding_window_attention(
-                    query, key, value, positions, valid_columns, state_slots,
-                    {dimension(config.attention.head_dim),
-                     dimension(config.attention.num_attention_heads),
-                     dimension(config.attention.num_key_value_heads)},
-                    dimension(config.sliding_window.value_or(0)), ops::SlidingWindowMask::Symmetric,
-                    static_cast<float>(1.0 / std::sqrt(double(config.attention.head_dim))),
-                    state.dflash.local_layer(static_cast<std::uint32_t>(layer_index)),
-                    envelopes.local, work, attention, stream);
+                const ops::AttentionHeadGeometry geometry{
+                    dimension(config.attention.head_dim),
+                    dimension(config.attention.num_attention_heads),
+                    dimension(config.attention.num_key_value_heads)};
+                const auto window = dimension(config.sliding_window.value_or(0));
+                const auto scale = static_cast<float>(1.0 / std::sqrt(double(config.attention.head_dim)));
+                const auto context = state.dflash.local_layer(static_cast<std::uint32_t>(layer_index));
+                if (state.draft_readouts) {
+                    state.draft_readouts->readout(work, stream,
+                        {query.data, key.data, value.data, positions.data, valid_columns.data,
+                         state_slots.data, context.k.data, context.v.data, nullptr, attention.data},
+                        [=](ops::ContextBucket bucket, WorkspaceArena& arena, cudaStream_t capture_stream) mutable {
+                            ops::sliding_window_attention(query, key, value, positions, valid_columns,
+                                state_slots, geometry, window, ops::SlidingWindowMask::Symmetric,
+                                scale, context, ops::sliding_window_bucket_envelope(bucket),
+                                arena, attention, capture_stream);
+                        });
+                } else {
+                    ops::sliding_window_attention(query, key, value, positions, valid_columns,
+                        state_slots, geometry, window, ops::SlidingWindowMask::Symmetric, scale,
+                        context, envelopes.local, work, attention, stream);
+                }
                 const Tensor attended =
                     attention.view({dimension(config.attention.query_width()), width, batch});
                 if (fused) {
@@ -621,29 +634,54 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& f
                 Tensor attention_batch = roots.attention.view(
                     {dimension(config.attention.head_dim),
                      dimension(config.attention.num_attention_heads), width, batch_size});
+                const ops::AttentionHeadGeometry geometry{
+                    dimension(config.attention.head_dim),
+                    dimension(config.attention.num_attention_heads),
+                    dimension(config.attention.num_key_value_heads)};
+                const auto scale = static_cast<float>(1.0 / std::sqrt(double(config.attention.head_dim)));
+                auto& work = state.execution.work;
+                const auto stream = state.execution.device.stream;
                 if (config.layer_types[layer] == DraftAttentionKind::SlidingAttention) {
-                    ops::sliding_window_attention(
-                        query_batch, key_batch, value_batch, positions, valid_columns,
-                        state_destinations,
-                        {dimension(config.attention.head_dim),
-                         dimension(config.attention.num_attention_heads),
-                         dimension(config.attention.num_key_value_heads)},
-                        dimension(config.sliding_window.value_or(0)),
-                        ops::SlidingWindowMask::Symmetric,
-                        static_cast<float>(1.0 / std::sqrt(double(config.attention.head_dim))),
-                        dflash_state(state).local_layer(config.compact_layer_index(layer)),
-                        envelopes.local, state.execution.work, attention_batch,
-                        state.execution.device.stream);
+                    const auto window = dimension(config.sliding_window.value_or(0));
+                    const auto context = dflash_state(state).local_layer(config.compact_layer_index(layer));
+                    if (state.draft_readouts) {
+                        state.draft_readouts->readout(work, stream,
+                            {query_batch.data, key_batch.data, value_batch.data, positions.data,
+                             valid_columns.data, state_destinations.data, context.k.data,
+                             context.v.data, nullptr, attention_batch.data},
+                            [=](ops::ContextBucket bucket, WorkspaceArena& arena, cudaStream_t capture_stream) mutable {
+                                ops::sliding_window_attention(query_batch, key_batch, value_batch,
+                                    positions, valid_columns, state_destinations, geometry, window,
+                                    ops::SlidingWindowMask::Symmetric, scale, context,
+                                    ops::sliding_window_bucket_envelope(bucket), arena,
+                                    attention_batch, capture_stream);
+                            });
+                    } else {
+                        ops::sliding_window_attention(query_batch, key_batch, value_batch, positions,
+                            valid_columns, state_destinations, geometry, window,
+                            ops::SlidingWindowMask::Symmetric, scale, context, envelopes.local,
+                            work, attention_batch, stream);
+                    }
                 } else {
-                    ops::context_softmax_attention(
-                        query_batch, key_batch, value_batch, frontiers, valid_columns, full_rows,
-                        {dimension(config.attention.head_dim),
-                         dimension(config.attention.num_attention_heads),
-                         dimension(config.attention.num_key_value_heads)},
-                        static_cast<float>(1.0 / std::sqrt(double(config.attention.head_dim))),
-                        dflash_state(state).full_batch_layer(config.compact_layer_index(layer)),
-                        envelopes.full, state.execution.work, attention_batch,
-                        state.execution.device.stream);
+                    const auto context = dflash_state(state).full_batch_layer(config.compact_layer_index(layer));
+                    if (state.draft_readouts) {
+                        const auto limit = envelopes.full.max_context;
+                        state.draft_readouts->readout(work, stream,
+                            {query_batch.data, key_batch.data, value_batch.data, frontiers.data,
+                             valid_columns.data, full_rows.data, context.k_pages.data,
+                             context.v_pages.data, context.block_tables.data, attention_batch.data},
+                            [=](ops::ContextBucket bucket, WorkspaceArena& arena, cudaStream_t capture_stream) mutable {
+                                const ops::ContextAttentionExecutionEnvelope envelope{
+                                    0, std::min(limit, ops::context_bucket_tokens(bucket))};
+                                ops::context_softmax_attention(query_batch, key_batch, value_batch,
+                                    frontiers, valid_columns, full_rows, geometry, scale, context,
+                                    envelope, arena, attention_batch, capture_stream);
+                            });
+                    } else {
+                        ops::context_softmax_attention(query_batch, key_batch, value_batch, frontiers,
+                            valid_columns, full_rows, geometry, scale, context, envelopes.full,
+                            work, attention_batch, stream);
+                    }
                 }
                 project_add(
                     roots.attention.view({dimension(config.attention.query_width()), columns}),
@@ -896,8 +934,26 @@ void dflash_append_context(PrefillContext& state, const Tensor& features, const 
 void capture_dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,
                                  std::uint32_t k, DFlashEnvelopes envelopes,
                                  ops::CausalAttentionExecutionEnvelope target_envelope,
-                                 DecodeGraphDefinition& definition) {
+                                 DecodeGraphDefinition& definition,
+                                 detail::FlatDraftGraph* flat) {
     auto body = dflash_decode_batch_body(state, batch_size, k, envelopes, target_envelope);
+    if (flat) {
+        struct ClearRecorder {
+            DFlashBatchContext& state;
+            ~ClearRecorder() { state.draft_readouts = nullptr; }
+        } clear{state};
+        state.draft_readouts = flat;
+        try {
+            capture_graph(state, definition, body);
+            flat->prepare(state.execution.device.stream);
+            capture_graph(state, definition, body);
+            flat->finish();
+            return;
+        } catch (const std::logic_error& error) {
+            std::fprintf(stderr, "flat draft graph capture rejected: %s\n", error.what());
+        }
+    }
+    // The ordinary whole-graph definition is always available as a fallback.
     capture_graph(state, definition, body);
 }
 

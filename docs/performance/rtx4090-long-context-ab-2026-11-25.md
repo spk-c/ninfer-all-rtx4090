@@ -111,3 +111,30 @@ real-model qualification is still required.
 
 The full donor flat graph suite, remaining causal/sparse attention migration
 and live request preemption/replay remain unimplemented.
+
+## Model-integrated flat draft readouts (experimental)
+
+The single-rank neural Qwen3.5 DFlash and DFlash2 graph capture can now
+collect value-owned attention operands in a first pass, prepare independent
+kernel-slice variants against a borrowed arena with the original base and
+offset, and record the readouts inline in a second parent capture. Runtime
+selection patches the resident parent when crossing canonical buckets within
+a target graph profile. The second capture verifies operand pointer keys and
+workspace identity/offset. The parent always contains the largest safe
+envelope; a patch failure reinstantiates it and disables that profile's
+patch path. Profile switches requiring slices instantiate the exact parent.
+Startup optionally exercises each prepared bucket and reports profile/site/
+replay/fallback counts.
+
+Enable NINFER_SM89_FLAT_DRAFT_GRAPHS=1 together with
+NINFER_SM89_ATTENTION_BUCKETS=1. Both remain disabled by default.
+This path deliberately excludes copy rounds, DSpine and multi-rank execution.
+Target verification still uses its existing measured graph profiles, not the
+donor target flat suite. The dense and sliding draft readouts share this
+recorder; proposal/verify/decision/commit graph separation is still open.
+
+The draft, decode and graph preparation translation units compiled with
+MSVC/CUDA 13.4 SM89. The standalone two-site CUDA test was compiled and linked;
+GPU execution and whole-model qualification have not yet occurred because
+the earlier long-context benchmark campaign is using the RTX4090. No
+performance claim for the flat path until measured.

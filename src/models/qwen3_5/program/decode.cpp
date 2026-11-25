@@ -141,10 +141,7 @@ DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGr
                                              const char* label) {
     DecodeGraphTopology& topology   = select_graph_topology(family, profile.topology_class, label);
     const std::size_t profile_index = static_cast<std::size_t>(&profile - family.profiles.data());
-    if (topology.installed_profile != profile_index) {
-        topology.executable.update(profile.definition);
-        topology.installed_profile = profile_index;
-    }
+    install_decode_profile(topology, profile, profile_index);
     return topology.executable;
 }
 
@@ -1137,6 +1134,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 select_graph_profile(family, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch", verify_drafts);
             executable = &install_graph_profile(family, profile, "DFlash batch");
+            if (profile.flat_draft)
+                profile.flat_draft->select(*executable, profile.definition,
+                                           ops::select_context_bucket(maximum_frontier));
             envelopes =
                 dflash_envelopes(profile.min_execution_frontier, profile.max_execution_frontier, capacity);
             target_envelope = target_envelope_for(profile.max_execution_frontier);

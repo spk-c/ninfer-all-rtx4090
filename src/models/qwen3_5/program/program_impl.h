@@ -15,6 +15,7 @@
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
 #include "models/qwen3_5/program/graph_profile_index.h"
+#include "models/qwen3_5/program/flat_draft_graph.h"
 #include "models/qwen3_5/execution/expert_runtime.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/frontend/steering.h"
@@ -507,6 +508,7 @@ struct DecodeGraphProfile {
     // MTP: the drafts the round verifies; zero for the other families.
     std::uint32_t verify_window = 0;
     DecodeGraphDefinition definition;
+    std::unique_ptr<FlatDraftGraph> flat_draft;
 };
 
 struct DecodeGraphTopology {
@@ -520,6 +522,21 @@ struct DecodeGraphFamily {
     std::vector<DecodeGraphTopology> topologies;
     GraphProfileIndex index;
 };
+
+// A patch is valid only for the exact parent node handles. Switching to a
+// profile with recorded slices must instantiate that parent, not update a
+// graph executable still backed by a different definition.
+inline void install_decode_profile(DecodeGraphTopology& topology, DecodeGraphProfile& profile,
+                                   std::size_t index) {
+    if (topology.installed_profile == index && topology.executable.ready()) return;
+    if (!topology.executable.ready() || profile.flat_draft) {
+        topology.executable.instantiate(profile.definition);
+        if (profile.flat_draft) profile.flat_draft->reset_selection();
+    } else {
+        topology.executable.update(profile.definition);
+    }
+    topology.installed_profile = index;
+}
 
 // Target model continuation for one logical sequence. This state remains meaningful after the
 // request which produced it has finished, so it is deliberately separate from request lifecycle,

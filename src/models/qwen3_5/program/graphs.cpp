@@ -1,5 +1,6 @@
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
+#include "models/qwen3_5/program/draft_attention_buckets.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
 #include "models/qwen3_5/program/startup_speculative_calibration.h"
@@ -67,18 +68,45 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
         family.topologies.emplace_back();
         DecodeGraphTopology& topology = family.topologies.back();
         topology.topology_class       = profile.topology_class;
-        topology.executable.instantiate(profile.definition);
-        topology.installed_profile = i;
+        install_decode_profile(topology, profile, i);
     }
 
     const auto install_and_upload = [&](DecodeGraphTopology& topology, std::size_t profile_index) {
         DecodeGraphProfile& profile = family.profiles[profile_index];
-        if (topology.installed_profile != profile_index) {
-            topology.executable.update(profile.definition);
-            topology.installed_profile = profile_index;
-        }
+        install_decode_profile(topology, profile, profile_index);
         topology.executable.upload(device.stream);
         device.synchronize();
+    };
+
+    std::size_t flat_profiles = 0, flat_sites = 0, flat_replays = 0, flat_fallbacks = 0;
+    const auto warm_flat = [&](DecodeGraphTopology& topology, DecodeGraphProfile& profile) {
+        if (!profile.flat_draft) return;
+        auto& flat = *profile.flat_draft;
+        ++flat_profiles;
+        flat_sites += flat.sites();
+        const auto range = flat.range();
+        range.for_each([&](auto bucket) {
+            if (flat.disabled()) return;
+            const auto index = static_cast<std::size_t>(bucket);
+            const auto first = index == 0 ? 0U : ops::kContextBucketTokens[index - 1] + 1U;
+            const auto frontier = std::max(first, profile.min_execution_frontier);
+            if (frontier > profile.max_execution_frontier ||
+                frontier > ops::context_bucket_tokens(bucket))
+                throw std::logic_error("flat draft warmup frontier outside profile");
+            flat.select(topology.executable, profile.definition, bucket);
+            if (flat.disabled()) return;
+            topology.executable.upload(device.stream);
+            device.synchronize();
+            prepare(profile, frontier);
+            device.synchronize();
+            topology.executable.launch(device.stream);
+            device.synchronize();
+            ++flat_replays;
+        });
+        flat.select(topology.executable, profile.definition, range.last);
+        topology.executable.upload(device.stream);
+        device.synchronize();
+        if (flat.disabled()) ++flat_fallbacks;
     };
 
     for (DecodeGraphTopology& topology : family.topologies) {
@@ -89,13 +117,19 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
                     first_profile = i;
                     install_and_upload(topology, i);
 
-                    prepare(family.profiles[i]);
-                    device.synchronize();
-                    topology.executable.launch(device.stream);
-                    device.synchronize();
+                    auto& profile = family.profiles[i];
+                    if (profile.flat_draft) {
+                        warm_flat(topology, profile);
+                    } else {
+                        prepare(profile, profile.min_execution_frontier);
+                        device.synchronize();
+                        topology.executable.launch(device.stream);
+                        device.synchronize();
+                    }
                     continue;
                 }
                 install_and_upload(topology, i);
+                warm_flat(topology, family.profiles[i]);
             }
         }
         if (!first_profile) {
@@ -105,6 +139,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
             install_and_upload(topology, *first_profile);
         }
     }
+    if (flat_profiles)
+        std::fprintf(stderr, "SM89 flat draft graph %s: %zu profiles, %zu sites, %zu startup replays, %zu fallbacks\n",
+                     label, flat_profiles, flat_sites, flat_replays, flat_fallbacks);
 }
 
 } // namespace
@@ -560,10 +597,25 @@ void ProgramImpl::prepare_graphs() {
                                capacity,
                                static_cast<std::uint64_t>(planned.max) + family_window + 1ULL))};
 
+                    // Do not disturb measured target-attention routes. Start with
+                    // neural, single-rank proposal readouts inside a target profile.
+                    const char* flat_flag = std::getenv("NINFER_SM89_FLAT_DRAFT_GRAPHS");
+                    if (!copy && !dflash->dspine && work.rank_count() == 1 &&
+                        draft_attention_buckets_enabled() && flat_flag &&
+                        std::string_view(flat_flag) == "1" &&
+                        planned.max <= ops::kContextBucketTokens.back()) {
+                        const ops::ContextBucketRange range{
+                            ops::select_context_bucket(planned.min),
+                            ops::select_context_bucket(planned.max)};
+                        if (range.first != range.last)
+                            profile.flat_draft = std::make_unique<FlatDraftGraph>(range);
+                    }
                     execution::capture_dflash_decode_batch(
                         dflash_state, static_cast<std::int32_t>(batch_size), family_window,
                         dflash_envelopes(planned.min, planned.max, capacity), target_envelope,
-                        profile.definition);
+                        profile.definition, profile.flat_draft.get());
+                    if (profile.flat_draft && !profile.flat_draft->ready())
+                        profile.flat_draft.reset();
                 }
             }
         }
@@ -581,9 +633,8 @@ void ProgramImpl::prepare_graphs() {
         }
         family->index.build(std::move(entries), capacity - 1);
     }
-    const auto prepare_profile = [&](const DecodeGraphProfile& profile) {
-        prepare_representative(profile.min_execution_frontier, profile.batch_size,
-                               profile.verify_window);
+    const auto prepare_profile = [&](const DecodeGraphProfile& profile, std::uint32_t frontier) {
+        prepare_representative(frontier, profile.batch_size, profile.verify_window);
     };
     if (!ordinary_graphs.profiles.empty()) {
         instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_profile);
@@ -670,10 +721,10 @@ void ProgramImpl::prepare_graphs() {
                                                &DecodeGraphTopology::topology_class);
             if (topology == family.topologies.end())
                 throw std::logic_error("calibration topology unavailable");
-            if (topology->installed_profile != entry.profile) {
-                topology->executable.update(profile.definition);
-                topology->installed_profile = entry.profile;
-            }
+            install_decode_profile(*topology, profile, entry.profile);
+            if (profile.flat_draft)
+                profile.flat_draft->select(topology->executable, profile.definition,
+                                           ops::select_context_bucket(probe.frontier));
             topology->executable.upload(device.stream);
             device.synchronize();
             std::array<double, 3> samples{};
