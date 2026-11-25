@@ -10,6 +10,8 @@
 // held for a few. Round costs are measured per batch size and width as the rounds run; a width not
 // yet run is priced from a relative cost shape scaled by the widths that have.
 
+#include "ninfer/ops/context_bucket.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -617,12 +619,13 @@ private:
 
     // Keep short-context timing samples out of the long-context cost estimates.
     static constexpr std::size_t context_bucket(std::uint32_t context) noexcept {
-        return context <= 8192 ? 0 : context <= 32768 ? 1 : context <= 131072 ? 2 : 3;
+        return static_cast<std::size_t>(ops::select_context_bucket(
+            std::min(context, ops::kContextBucketTokens.back())));
     }
 
     std::uint32_t wide_ = 1, narrow_ = 1;
     bool transitioned_ = false;
-    std::array<std::array<Batch, kAdaptiveMtpMaximumBatch>, 4> batches_{};
+    std::array<std::array<Batch, kAdaptiveMtpMaximumBatch>, ops::kContextBucketCount> batches_{};
     MaskedWidthSignal pooled_;
 };
 

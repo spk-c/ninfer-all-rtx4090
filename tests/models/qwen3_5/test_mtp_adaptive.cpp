@@ -192,6 +192,25 @@ void the_masked_width_follows_survival_and_cost() {
 }
 
 
+
+void context_bucket_contract() {
+    using namespace ninfer::ops;
+    static_assert(select_context_bucket(0) == ContextBucket::K2);
+    static_assert(select_context_bucket(2048) == ContextBucket::K2);
+    static_assert(select_context_bucket(2049) == ContextBucket::K8);
+    static_assert(select_context_bucket(131073) == ContextBucket::K256);
+    for (const auto bucket : kAllContextBuckets) {
+        require(parse_context_bucket(context_bucket_name(bucket)) == bucket, "bucket name roundtrip");
+        require(select_context_bucket(context_bucket_tokens(bucket)) == bucket, "bucket boundary");
+    }
+    bool rejected = false;
+    try { (void)select_context_bucket(1048577); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "oversized context accepted");
+    unsigned count = 0;
+    ContextBucketRange::through(32768).for_each([&](ContextBucket) { ++count; });
+    require(count == 4, "context bucket range skipped a bucket");
+}
+
 void masked_calibration_isolated_by_batch_and_context() {
     MaskedWidthController controller;
     controller.reset(15, 7);
@@ -313,6 +332,7 @@ int main() {
         costs_are_measured_then_scaled();
         the_controller_widens_and_narrows();
         the_masked_width_follows_survival_and_cost();
+        context_bucket_contract();
         masked_calibration_isolated_by_batch_and_context();
         the_packed_plan_spends_rows_on_survival();
         the_gate_runs_the_faster_mode();
