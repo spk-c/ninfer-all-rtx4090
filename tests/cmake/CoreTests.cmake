@@ -121,6 +121,10 @@ if(NOT WIN32)
     ENVIRONMENT "NINFER_CUDA_SYNC=")
 endif()
 
+ninfer_add_test(ninfer_capture_backing_pool_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_capture_backing_pool.cpp"
+  LIBRARIES Threads::Threads)
+
 ninfer_add_test(ninfer_decode_graph_slice_test STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_slice.cu"
   LIBRARIES ninfer_core)

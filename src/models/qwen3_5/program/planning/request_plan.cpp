@@ -558,18 +558,34 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
                   });
         std::shared_ptr<const PreparedCaptureBacking> capture_backing;
         if (!base->capture_groups.empty() || !base->shared_candidates.empty()) {
-            auto backing = std::make_shared<PreparedCaptureBacking>();
             const std::uint32_t capture_frontier =
                 base->capture_groups.empty() ? 0U : base->capture_groups.back().frontier;
             const std::uint32_t shared_frontier =
                 base->shared_candidates.empty() ? 0U : base->shared_candidates.back().frontier;
             const std::uint32_t backing_frontier = std::max(capture_frontier, shared_frontier);
-            backing->ledger.assign(prompt.token_ids.begin(),
-                                   prompt.token_ids.begin() +
-                                       static_cast<std::ptrdiff_t>(backing_frontier));
-            backing->prefix_identity.assign(prompt);
-            backing->prefix_identity.truncate(backing_frontier);
-            capture_backing = std::move(backing);
+            const qwen3_5::PrefixShortlistKey key{
+                .digests = base->prefix_digests.at(backing_frontier),
+                .frontier = backing_frontier,
+                .identity_tag = base->prefix_identity_tag,
+            };
+            capture_backing = capture_backings_.get_or_create(
+                key,
+                [&](const PreparedCaptureBacking& backing) {
+                    return backing.ledger.size() == backing_frontier &&
+                           backing.prefix_identity.size() == backing_frontier &&
+                           qwen3_5::detail::prefix_matches(prompt, backing.ledger,
+                                                          backing.prefix_identity,
+                                                          backing_frontier);
+                },
+                [&] {
+                    auto backing = std::make_shared<PreparedCaptureBacking>();
+                    backing->ledger.assign(prompt.token_ids.begin(),
+                                           prompt.token_ids.begin() +
+                                               static_cast<std::ptrdiff_t>(backing_frontier));
+                    backing->prefix_identity.assign(prompt);
+                    backing->prefix_identity.truncate(backing_frontier);
+                    return backing;
+                });
         }
         for (CaptureGroup& group : base->capture_groups) {
             auto identity          = std::make_shared<PreparedCaptureIdentity>();

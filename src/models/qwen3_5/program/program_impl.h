@@ -26,6 +26,7 @@
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix/hybrid_cache.h"
+#include "models/qwen3_5/program/prefix/capture_backing_pool.h"
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/shared_slot_release.h"
 #include "models/qwen3_5/program/planning/output_budget.h"
@@ -1168,6 +1169,8 @@ private:
         bool device = false;
         bool host   = false;
     };
+
+    CaptureBackingPool<qwen3_5::PrefixShortlistKey, PreparedCaptureBacking> capture_backings_;
 
     mutable std::uint32_t pressure_page_scratch_generation_ = 0;
     mutable std::vector<PressurePageScratchSlot> pressure_text_page_scratch_;
