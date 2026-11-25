@@ -3,6 +3,8 @@
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/execution/linear.h"
 #include <cmath>
+#include <cstdlib>
+#include <string_view>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/execution/workspace.h"
@@ -867,6 +869,9 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
         card.set_expert_runtime(state.execution.experts);
         card.set_steering(state.execution.steering);
         card.set_rope_yarn(state.execution.rope_yarn);
+        const char* flat_target = std::getenv("NINFER_SM89_FLAT_TARGET_GRAPHS");
+        if (flat_target && std::string_view(flat_target) == "1")
+            card.set_flat_target_readouts(state.draft_readouts);
         DFlashFeatureSink sink =
             batch_feature_sink_impl(state, active_lanes, valid_columns, width, batch_size);
         {
@@ -951,6 +956,8 @@ void capture_dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_s
             return;
         } catch (const std::logic_error& error) {
             std::fprintf(stderr, "flat draft graph capture rejected: %s\n", error.what());
+        } catch (const std::bad_alloc&) {
+            std::fprintf(stderr, "flat draft graph capture rejected: workspace capacity\n");
         }
     }
     // The ordinary whole-graph definition is always available as a fallback.

@@ -19,7 +19,7 @@ namespace ninfer::models::qwen3_5::detail {
 // only those readouts as inline slices of the parent.
 class FlatDraftGraph {
 public:
-    using BindingKey = std::array<const void*, 10>;
+    using BindingKey = std::array<const void*, 16>;
     using Capture = std::function<void(ops::ContextBucket, WorkspaceArena&, cudaStream_t)>;
 
     explicit FlatDraftGraph(ops::ContextBucketRange range) : range_(range), selected_(range.last) {

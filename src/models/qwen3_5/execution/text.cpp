@@ -1638,14 +1638,47 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
         // either way, and the same bytes the standalone multiply produced. A rotated output
         // projection takes the ungated attention, gated and rotated in one pass below.
         Tensor partial = positions ? partial_of(0, T) : Tensor{};
-        ops::causal_softmax_attention(
-            q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
-            {dimension(config.attention->head_dim),
-             dimension(config.attention->num_attention_heads),
-             dimension(config.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config.attention->head_dim))),
-            batch_text_kv_->batch_layer_view(fidx, kv_rank), envelope, work_, a_batch, s,
-            rotated_output || positions ? nullptr : &gate_batch, positions ? &partial : nullptr);
+        const ops::AttentionHeadGeometry geometry{
+            dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads),
+            dimension(config.attention->num_key_value_heads)};
+        const auto scale = static_cast<float>(1.0 / std::sqrt(static_cast<double>(config.attention->head_dim)));
+        const auto cache = batch_text_kv_->batch_layer_view(fidx, kv_rank);
+        const bool apply_gate = !rotated_output && !positions;
+        // Restrict the experiment to resident, single-rank batched target
+        // verification. The captured maximum remains the fallback and any
+        // narrower variant must use the same SM89 route family. Device
+        // positions and masks continue to define the actual key set.
+        if (flat_target_readouts_ && ph == Phase::Verify && !positions && cache.page_stride == 1) {
+            const auto rows = kv_table_rows;
+            const auto batch = active_sequence_batch_;
+            const auto family = ops::causal_softmax_attention_route_family(
+                geometry, cache.storage, envelope, batch, width);
+            flat_target_readouts_->readout(work_, s,
+                {q_batch.data, k_batch.data, v_batch.data, position_batch.data, valid.data,
+                 rows.data, cache.k_pages.data, cache.v_pages.data, cache.block_tables.data,
+                 cache.k_scale_pages.data, cache.v_scale_pages.data,
+                 apply_gate ? gate_batch.data : nullptr, a_batch.data},
+                [=](ops::ContextBucket bucket, WorkspaceArena& arena, cudaStream_t stream) mutable {
+                    auto variant = envelope;
+                    // Bucket tracks committed frontier; include every physical
+                    // verification column, not just the first position.
+                    const auto maximum = std::uint64_t(ops::context_bucket_tokens(bucket)) +
+                                         static_cast<std::uint32_t>(width);
+                    variant.max_visible_keys = static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(envelope.max_visible_keys, maximum));
+                    if (variant.max_visible_keys < variant.min_visible_keys ||
+                        ops::causal_softmax_attention_route_family(
+                            geometry, cache.storage, variant, batch, width) != family)
+                        variant = envelope;
+                    ops::causal_softmax_attention(q_batch, k_batch, v_batch, position_batch, valid,
+                        rows, geometry, scale, cache, variant, arena, a_batch, stream,
+                        apply_gate ? &gate_batch : nullptr, nullptr);
+                });
+        } else {
+            ops::causal_softmax_attention(q_batch, k_batch, v_batch, position_batch, valid,
+                kv_table_rows, geometry, scale, cache, envelope, work_, a_batch, s,
+                apply_gate ? &gate_batch : nullptr, positions ? &partial : nullptr);
+        }
     } else if (!active_segments_.empty()) {
         // Each segment attends over its own sequence exactly as its prefill alone would.
         for (const SegmentBinding& segment : active_segments_) {
