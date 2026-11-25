@@ -14,6 +14,7 @@
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
+#include "models/qwen3_5/program/graph_profile_index.h"
 #include "models/qwen3_5/execution/expert_runtime.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/frontend/steering.h"
@@ -517,6 +518,7 @@ struct DecodeGraphTopology {
 struct DecodeGraphFamily {
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
+    GraphProfileIndex index;
 };
 
 // Target model continuation for one logical sequence. This state remains meaningful after the

@@ -562,6 +562,18 @@ void ProgramImpl::prepare_graphs() {
         }
     }
 
+    // Freeze the exact captured envelopes before the first decode. All four
+    // families use the same validated lookup contract.
+    for (auto* family : {&ordinary_graphs, &mtp_graphs, &dflash_graphs, &ngram_graphs}) {
+        std::vector<GraphProfileIndex::Entry> entries;
+        entries.reserve(family->profiles.size());
+        for (std::size_t i = 0; i < family->profiles.size(); ++i) {
+            const auto& p = family->profiles[i];
+            entries.push_back({p.batch_size, p.verify_window, p.min_execution_frontier,
+                               p.max_execution_frontier, p.topology_class, i});
+        }
+        family->index.build(std::move(entries), capacity - 1);
+    }
     const auto prepare_profile = [&](const DecodeGraphProfile& profile) {
         prepare_representative(profile.min_execution_frontier, profile.batch_size,
                                profile.verify_window);

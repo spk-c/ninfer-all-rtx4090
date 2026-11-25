@@ -118,16 +118,11 @@ DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGr
 DecodeGraphProfile& select_graph_profile(DecodeGraphFamily& family, std::uint32_t batch_size,
                                          std::uint32_t frontier, const char* label,
                                          std::uint32_t verify_window) {
-    const auto it = std::find_if(
-        family.profiles.begin(), family.profiles.end(), [&](const DecodeGraphProfile& profile) {
-            return profile.batch_size == batch_size && profile.verify_window == verify_window &&
-                   profile.min_execution_frontier <= frontier &&
-                   frontier <= profile.max_execution_frontier;
-        });
-    if (it == family.profiles.end()) {
+    try {
+        return family.profiles.at(family.index.select(batch_size, verify_window, frontier).profile);
+    } catch (const std::logic_error&) {
         throw std::logic_error(std::string(label) + " CUDA Graph coverage is incomplete");
     }
-    return *it;
 }
 
 DecodeGraphTopology& select_graph_topology(DecodeGraphFamily& family, std::uint32_t topology_class,
