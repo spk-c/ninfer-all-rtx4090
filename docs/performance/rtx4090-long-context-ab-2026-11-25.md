@@ -178,3 +178,27 @@ model families' sparse/MLA/target kernel migration, full physical fit and
 general recovery for multimodal/sampled/structured requests are not
 completed. The donor targets different architectures and storage layouts.
 All experimental flags remain off by default; master and stable tag unchanged.
+
+## Flat-model and live-pressure qualification
+
+543f08412 clean build: default/flat-draft/flat-target produced identical
+512-token output on the actual DFlash2 model crossing the 16384 boundary.
+Draft: 2 profiles, 10 sites, 5 startup replays, 0 fallbacks.
+Draft+target: 2 profiles, 42 sites, 5 startup replays, 0 fallbacks.
+The original pressure fixture failed (4028/4352 tokens): admission moves
+the PreparedPrompt out of RequestRecord, so the recovery guard could never
+use that prompt. The fix snapshots the eligible plain-text prompt before
+admission and releases the extra copy on replay or completion. A retest
+of the corrected working tree, with explicit zero sampling penalties,
+observed one actual replay retaining 3973 committed tokens; both requests
+returned the full 4352-token budget. The test establishes completion,
+not equivalence of every generated token with an unconstrained request.
+The host eligibility test also passed. Raw logs and token evidence:
+profiles/bench/rtx4090-flat-recovery-20261125.
+
+The new ab-sm89-flat-graphs.ps1 runner isolates four arms of the SAME
+candidate binary (default, buckets, flat draft, flat target), with two
+reverse-ordered repetitions at 32K/64K/128K/176128/196608, 512 generated
+tokens, fixed model/corpus/KV and recorded startup sites and fallbacks.
+It rejects a flat arm that silently fails to prepare or falls back.
+Performance qualification remains pending.

@@ -1,0 +1,7 @@
+device profile nvidia-geforce-rtx-4090-sm89: 130 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27; Q4_K matrix and MoE async tiles at 450 W, 2026-11-06; GGUF, NVFP4 W4A8-int and cuBLAS prefill routes at 450 W, 2026-11-19; NVFP4 matrix and MoE async tiles at 450 W, 2026-11-23; calibrated route catalog at 450 W, 2026-11-23)
+Device KV pressure replay: request 1, 3973 committed tokens retained
+Device KV lease of lane 1 extended: released 2 retained cache owner(s)
+Device KV lease of lane 0 extended: released 1 retained cache owner(s)
+pressure fixture: prompt=768 output=4352 finish=1
+pressure fixture: prompt=768 output=4352 finish=1
+live pressure replay: 1 requeues, both full budgets completed
