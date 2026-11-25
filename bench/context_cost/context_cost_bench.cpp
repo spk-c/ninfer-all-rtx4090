@@ -52,7 +52,11 @@ const char* suite_name(Suite suite) noexcept {
 
 struct Options {
     cost::MeasurementOptions measurement;
+#ifdef NINFER_CONTEXT_TRANSFER_ONLY
+    Suite suite = Suite::Transfer;
+#else
     Suite suite = Suite::All;
+#endif
     std::filesystem::path json_output;
     std::filesystem::path preset_output;
     bool help_requested = false;
@@ -91,11 +95,19 @@ std::uint32_t parse_u32(std::string_view value, const char* option) {
 std::string usage(const char* executable) {
     std::ostringstream out;
     out << "usage: " << executable << " [options]\n\n"
+#ifdef NINFER_CONTEXT_TRANSFER_ONLY
+        << "Measure machine transfer roofline without loading a model. Use --suite transfer (default).\n\n"
+#else
         << "Measure the machine transfer roofline and per-artifact prefill cost.\n\n"
+#endif
+#ifdef NINFER_CONTEXT_TRANSFER_ONLY
+        << "  --suite transfer           transfer only (default)\n"
+#else
         << "  --suite <all|transfer|prefill> (default: all)\n"
         << "  --artifact <path>          required only by all/prefill; transfer loads no model\n"
         << "  --corpus <path>            prefill token corpus (default: "
            "bench/fixtures/bench_corpus.ids)\n"
+#endif
         << "  --device <id>              CUDA device (default: 0)\n"
         << "  --max-context <tokens>     prefill measurement context (default: 8192)\n"
         << "  --prefill-chunk <tokens>   prefill measurement chunk (default: 1024)\n"
@@ -161,6 +173,10 @@ Options parse_options(int argc, char** argv) {
         }
     }
     if (options.help_requested) { return options; }
+#ifdef NINFER_CONTEXT_TRANSFER_ONLY
+    if (options.suite != Suite::Transfer)
+        throw std::invalid_argument("this executable supports only --suite transfer");
+#endif
     const bool measures_prefill = options.suite != Suite::Transfer;
     if (measures_prefill && options.measurement.artifact.empty()) {
         throw std::invalid_argument("--artifact is required by all/prefill");
@@ -357,9 +373,11 @@ int main(int argc, char** argv) {
         const std::string hardware_class = ninfer::runtime::context_cost_hardware_class(
             hardware.gpu, hardware.major, hardware.minor);
         std::optional<cost::ArtifactProfile> artifact;
+#ifndef NINFER_CONTEXT_TRANSFER_ONLY
         if (options.suite != Suite::Transfer) {
             artifact = cost::inspect_artifact(options.measurement.artifact);
         }
+#endif
 
         std::optional<cost::TransferSuiteResult> transfer_samples;
         std::optional<cost::PrefillSuiteResult> prefill_samples;
@@ -369,10 +387,12 @@ int main(int argc, char** argv) {
             transfer_samples = cost::measure_context_transfers(options.measurement);
             transfer_fits    = fit_transfers(*transfer_samples);
         }
+#ifndef NINFER_CONTEXT_TRANSFER_ONLY
         if (options.suite != Suite::Transfer) {
             prefill_samples = cost::measure_prefill(*artifact, options.measurement);
             prefill_fit     = fit_prefill(*prefill_samples);
         }
+#endif
 
         bool accepted = !transfer_fits || std::all_of(transfer_fits->begin(), transfer_fits->end(),
                                                       [](const auto& fit) { return fit.accepted; });

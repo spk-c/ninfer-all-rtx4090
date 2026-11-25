@@ -27,10 +27,15 @@ endwhile()
 configure_file(engine/device_profiles_builtin.cpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/engine/device_profiles_builtin.cpp @ONLY)
 
+# The machine cost model is host-only and is also used by standalone calibration.
+add_library(ninfer_context_cost STATIC
+  engine/context_cache/context_cost.cpp
+  engine/context_cache/context_cost_defaults.cpp)
+ninfer_internal_includes(ninfer_context_cost)
+target_link_libraries(ninfer_context_cost PRIVATE ninfer::json)
+
 add_library(ninfer_runtime_support STATIC
   engine/admission_policy.cpp
-  engine/context_cache/context_cost.cpp
-  engine/context_cache/context_cost_defaults.cpp
   engine/device_profile.cpp
   engine/device_profile_build_id.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/engine/device_profiles_builtin.cpp
@@ -42,7 +47,7 @@ add_library(ninfer_runtime_support STATIC
   prefix_cache/tap_planner.cpp
 )
 ninfer_internal_includes(ninfer_runtime_support)
-target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core ninfer_ops PRIVATE ninfer::json)
+target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core ninfer_ops ninfer_context_cost PRIVATE ninfer::json)
 # Calibrated device profiles record the build id (engine/device_profile_build_id.cpp).
 ninfer_stamp_build_id(ninfer_runtime_support)
 

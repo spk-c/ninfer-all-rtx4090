@@ -162,6 +162,7 @@ ninfer_add_test(ninfer_gdn_replay_records_test
 set_tests_properties(
   ninfer_device_test
   ninfer_decode_graph_test
+  ninfer_decode_graph_slice_test
   ninfer_arena_test
   ninfer_kv_cache_test
   ninfer_state_store_test
