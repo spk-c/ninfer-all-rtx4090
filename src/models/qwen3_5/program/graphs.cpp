@@ -648,7 +648,7 @@ void ProgramImpl::prepare_graphs() {
                 masked_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
             ++measured;
         }
-        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (synthetic short-context latency priors)\\n",
+        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (synthetic short-context latency priors)\n",
                      measured, schedule.size());
     }
 

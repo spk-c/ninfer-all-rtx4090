@@ -848,6 +848,21 @@ void PrefixCacheIndex::abort_tail_device_fill(SnapshotRef ref) {
 
 // ---- snapshots ---------------------------------------------------------------------------------
 
+std::optional<std::uint32_t> PrefixCacheIndex::acquire_replacement_slot(
+    double claim, SnapshotRef resume, SnapshotRef tap) {
+    ScopedRecoveryPins pins(*this, resume, tap);
+    return acquire_device_slot(claim);
+}
+
+std::uint32_t PrefixCacheIndex::supersession_hits(SnapshotRef ref, Supersession cause) const {
+    if (!valid(ref)) return 0;
+    const auto& entry = require(ref);
+    if (entry.superseded || entry.branch_point ||
+        (entry.kind == SnapshotKind::Boundary && shared_below(entry)) ||
+        (cause == Supersession::Endpoint && entry.kind != SnapshotKind::Endpoint)) return 0;
+    return counted_hits(entry);
+}
+
 std::optional<std::uint32_t> PrefixCacheIndex::acquire_device_slot(double claim) {
     for (std::uint32_t slot = 0; slot < slot_state_.size(); ++slot) {
         if (slot_state_[slot] == SlotState::Free) {
