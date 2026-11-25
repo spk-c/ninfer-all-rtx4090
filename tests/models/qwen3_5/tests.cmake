@@ -263,3 +263,10 @@ ninfer_add_test(ninfer_qwen3_5_pressure_replay_real_test STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_pressure_replay_real.cpp"
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_5_pressure_replay_real_test PROPERTIES SKIP_RETURN_CODE 77)
+
+
+ninfer_add_test(ninfer_qwen3_5_flat_model_real_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_flat_model_real.cpp"
+  LIBRARIES ninfer_engine
+  TEST_ARGS "${CMAKE_CURRENT_BINARY_DIR}/flat-model-tokens.txt")
+set_tests_properties(ninfer_qwen3_5_flat_model_real_test PROPERTIES SKIP_RETURN_CODE 77)

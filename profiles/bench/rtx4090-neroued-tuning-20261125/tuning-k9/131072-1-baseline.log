@@ -1,0 +1,5 @@
+ninfer_bench: CUDA 13 backend
+[ninfer_bench] loading C:\ninfer-all\models\Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer (max_context=131072, kv_cache=rk4v4)
+[engine] device profile nvidia-geforce-rtx-4090-sm89: 68 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27; Q4_K matrix and MoE async tiles at 450 W, 2026-11-06)
+[ninfer_bench] test 1/1 pp130048+tg512: warmup=0 reps=1
+wrote C:\ProgramData\SentinelX\ninfer-backports-proof-20261125\campaign-2d37ef0a\tuning-k9\131072-1-baseline.json

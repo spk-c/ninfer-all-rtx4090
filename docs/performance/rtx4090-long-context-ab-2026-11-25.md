@@ -138,3 +138,43 @@ MSVC/CUDA 13.4 SM89. The standalone two-site CUDA test was compiled and linked;
 GPU execution and whole-model qualification have not yet occurred because
 the earlier long-context benchmark campaign is using the RTX4090. No
 performance claim for the flat path until measured.
+
+## Completed 2d37ef0a campaign
+
+All 54 runs across ten configurations succeeded. Full evidence:
+profiles/bench/rtx4090-neroued-tuning-20261125. At 176128 and 196608
+tokens the two-pair default candidate decode gains were +1.89% and +3.07%.
+Physical startup completed 8/8 probes at 32K and 6/6 at 128K, no resource
+skips; these are synthetic-token latency probes on distinct physical pages,
+not a fitted donor physical model. Single-pair draft tuning favors K7 at
+32/64/128K (294.10, 284.61, 241.52 tok/s), while K9 gains most relative to
+its own old binary. The 2048-token prefill setting improves prefill over
+1024, with nearly the same prefill rate as 4096. One-factor single-pair
+results and repeated corpus are not a universal preset; no default change.
+
+The 1de2e5c6 flat draft two-site GPU test subsequently passed six actual
+replays, borrowed-scratch identity, changed operand rejection and fallback
+reinstantiation. c01528e3 adds optional causal target verification slices
+for resident single-rank Qwen3.5 masked neural rounds; the smaller resource
+promise includes the physical verification width and falls back to the
+original envelope if the route family changes. NINFER_SM89_FLAT_TARGET_GRAPHS=1
+also needs the two flat draft flags. Target/execution/decode/graphs compiled.
+Whole-model exact generated-token comparison and benchmark remain required.
+
+0e52018e adds one-shot, opt-in hybrid context pressure replay at a safe
+decode boundary after retained-cache reclaim failed. The prompt is rebuilt
+from the original prompt plus all committed tokens before releasing the
+active owner; the request retains its existing output session and original
+budget, and is queued behind other pending work. This is limited to
+ordinary greedy text, no media, grammar, reasoning/control, penalties,
+logprobs, ngram archive or previous replay, and requires growing KV leases
+and another live lane. NINFER_SM89_LIVE_CONTEXT_REPLAY=1 enables it. The
+host eligibility test and engine translation unit compiled/passed. A
+two-live-request real-model pressure fixture was added; actual pressure
+replay qualification is pending.
+
+The donor's full split proposal/target/decision/commit suite, all other
+model families' sparse/MLA/target kernel migration, full physical fit and
+general recovery for multimodal/sampled/structured requests are not
+completed. The donor targets different architectures and storage layouts.
+All experimental flags remain off by default; master and stable tag unchanged.
