@@ -51,74 +51,74 @@ const T* cast_stmt(const statement_ptr& ptr) {
 using visitor_pair = std::pair<std::string, std::vector<statement*>>;
 using visitor_fn   = std::function<void(bool, statement*, std::vector<visitor_pair>)>;
 
+// A lexical frame owns only its local variables; ancestors remain live through the
+// parent link. Captured frames are retained at most once for the duration of a render.
+struct lexical_frame {
+    value_object env = mk_val<value_object>();
+    std::shared_ptr<lexical_frame> parent;
+    bool captured = false;
+
+    explicit lexical_frame(std::shared_ptr<lexical_frame> outer = {})
+        : parent(std::move(outer)) { env->has_builtins = false; }
+};
+
 struct context {
-    std::shared_ptr<std::string>
-        src;                  // for debugging; use shared_ptr to avoid copying on scope creation
-    std::time_t current_time; // for functions that need current time
-
+    std::shared_ptr<std::string> src;
+    std::time_t current_time;
     std::function<void()> checkpoint;
-
     visitor_fn visitor;
 
-    // src is optional, used for error reporting
-    context(std::string src = "") : src(std::make_shared<std::string>(std::move(src))) {
-        env               = mk_val<value_object>();
-        env->has_builtins = false; // context object has no builtins
-        env->insert("true", mk_val<value_bool>(true));
-        env->insert("True", mk_val<value_bool>(true));
-        env->insert("false", mk_val<value_bool>(false));
-        env->insert("False", mk_val<value_bool>(false));
-        env->insert("none", mk_val<value_none>());
-        env->insert("None", mk_val<value_none>());
-        current_time = std::time(nullptr);
+    context(std::string source = "")
+        : src(std::make_shared<std::string>(std::move(source))),
+          current_time(std::time(nullptr)), frame(std::make_shared<lexical_frame>()) {
+        set_val("true", mk_val<value_bool>(true));
+        set_val("True", mk_val<value_bool>(true));
+        set_val("false", mk_val<value_bool>(false));
+        set_val("False", mk_val<value_bool>(false));
+        set_val("none", mk_val<value_none>());
+        set_val("None", mk_val<value_none>());
     }
 
-    ~context() = default;
-
-    // Keep macro definition scopes alive for this render. Callables refer back weakly,
-    // so an environment containing its own macro does not form an ownership cycle.
-    std::weak_ptr<value_object_t> capture_scope() {
-        captured_scopes->push_back(env);
-        return env;
+    std::weak_ptr<lexical_frame> capture_scope() {
+        if (!frame->captured) {
+            captured_scopes->push_back(frame);
+            frame->captured = true;
+        }
+        return frame;
     }
 
-    std::weak_ptr<value_object_t> current_scope() const { return env; }
-
-    context(const context& caller, const std::weak_ptr<value_object_t>& lexical_scope) : context() {
-        const auto scope = lexical_scope.lock();
-        if (!scope) throw std::runtime_error("macro definition scope has expired");
-        for (const auto& pair : scope->as_ordered_object()) set_val(pair.first, pair.second);
-        current_time    = caller.current_time;
-        checkpoint      = caller.checkpoint;
-        src             = caller.src;
-        captured_scopes = caller.captured_scopes;
+    context(const context& caller, const std::weak_ptr<lexical_frame>& lexical_scope)
+        : src(caller.src), current_time(caller.current_time), checkpoint(caller.checkpoint),
+          frame(std::make_shared<lexical_frame>(lexical_scope.lock())),
+          captured_scopes(caller.captured_scopes) {
+        if (!frame->parent) throw std::runtime_error("macro definition scope has expired");
     }
 
-    context(const context& parent) : context() {
-        // inherit variables (for example, when entering a new scope)
-        auto& pvar = parent.env->as_ordered_object();
-        for (const auto& pair : pvar) { set_val(pair.first, pair.second); }
-        current_time    = parent.current_time;
-        checkpoint      = parent.checkpoint;
-        src             = parent.src;
-        captured_scopes = parent.captured_scopes;
-    }
+    context(const context& parent)
+        : src(parent.src), current_time(parent.current_time), checkpoint(parent.checkpoint),
+          frame(std::make_shared<lexical_frame>(parent.frame)),
+          captured_scopes(parent.captured_scopes) {}
 
     value get_val(const std::string& name) {
-        value default_val = mk_val<value_undefined>(name);
-        return env->at(name, default_val);
+        value missing;
+        const auto key = mk_val<value_string>(name);
+        for (auto current = frame.get(); current; current = current->parent.get()) {
+            const auto& found = current->env->at(key, missing);
+            if (found) return found;
+        }
+        return mk_val<value_undefined>(name);
     }
 
-    void set_val(const std::string& name, const value& val) { env->insert(name, val); }
-
-    void set_val(const value& name, const value& val) { env->insert(name, val); }
-
-    void print_vars() const { printf("Context Variables:\n%s\n", value_to_json(env, 2).c_str()); }
+    void set_val(const std::string& name, const value& val) { frame->env->insert(name, val); }
+    void set_val(const value& name, const value& val) { frame->env->insert(name, val); }
+    void print_vars() const {
+        printf("Context Variables:\\n%s\\n", value_to_json(frame->env, 2).c_str());
+    }
 
 private:
-    value_object env;
-    std::shared_ptr<std::vector<value_object>> captured_scopes =
-        std::make_shared<std::vector<value_object>>();
+    std::shared_ptr<lexical_frame> frame;
+    std::shared_ptr<std::vector<std::shared_ptr<lexical_frame>>> captured_scopes =
+        std::make_shared<std::vector<std::shared_ptr<lexical_frame>>>();
 };
 
 // utils for visiting AST nodes

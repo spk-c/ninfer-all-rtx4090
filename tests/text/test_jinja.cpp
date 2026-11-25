@@ -29,6 +29,15 @@ int language_semantics() {
     };
 
     const Example cases[]{
+        {"{% set ns=namespace(f=none) %}{% macro save() %}{% set ns.f=caller %}{% endmacro %}"
+         "{% for x in ['A'] %}{% call save() %}{{ x }}{% endcall %}{% endfor %}{{ ns.f() }}",
+         Json::object(), "A"},
+        {"{% set ns=namespace(f=none) %}{% for x in ['A','B'] %}{% macro f() %}{{ x }}{% endmacro %}"
+         "{% if x=='A' %}{% set ns.f=f %}{% endif %}{% endfor %}{{ ns.f() }}", Json::object(), "A"},
+        {"{% set x='old' %}{% set ns=namespace(f=none) %}{% for i in [1] %}{% macro f() %}{{ x }}"
+         "{% endmacro %}{% set ns.f=f %}{% endfor %}{% set x='new' %}{{ ns.f() }}", Json::object(), "new"},
+        {"{% for i in [1] %}{% break %}{% else %}wrong{% endfor %}", Json::object(), ""},
+        {"{% for i in [1] %}{% continue %}{% else %}wrong{% endfor %}", Json::object(), ""},
         {"{{ n is divisibleby(-1) }}|{{ n is divisibleby(2) }}",
          {{"n", std::numeric_limits<int64_t>::min()}}, "True|True"},
         {"{{ missing is undefined }}|{{ value is none }}|{{ value|default('fallback') }}|{{ "
@@ -106,7 +115,7 @@ int language_semantics() {
         }
     }
     for (const char* source : {"{{ none + 'x' }}", "{{ 'abc'[::0] }}", "{{ missing|tojson }}",
-                               "{{ value|unknown_filter }}"}) {
+                               "{{ value|unknown_filter }}", "{{ 1 is divisibleby(0) }}", "{% for loop in [1] %}{% endfor %}"}) {
         try {
             (void)JinjaTemplate(source, "error-test").render(Json::object());
             ++failures;

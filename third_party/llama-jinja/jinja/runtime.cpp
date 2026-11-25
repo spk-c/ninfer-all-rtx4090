@@ -522,6 +522,8 @@ value for_statement::execute_impl(context& ctx) {
 
     bool noIteration = true;
     for (size_t i = 0; i < filtered_items.size(); i++) {
+        context iteration(scope);
+        noIteration = false;
         if (body_uses_loop) {
             value_object loop_obj  = mk_val<value_object>();
             loop_obj->has_builtins = false; // loop object has no builtins
@@ -537,18 +539,17 @@ value for_statement::execute_impl(context& ctx) {
             loop_obj->insert("nextitem", i < filtered_items.size() - 1
                                              ? filtered_items[i + 1]
                                              : mk_val<value_undefined>("nextitem"));
-            scope.set_val("loop", loop_obj);
+            iteration.set_val("loop", loop_obj);
         }
-        bind(scope, filtered_indices[i]);
+        bind(iteration, filtered_indices[i]);
         try {
             for (auto& stmt : body) {
-                value val = stmt->execute(scope);
+                value val = stmt->execute(iteration);
                 result->push_back(val);
             }
         } catch (const continue_statement::signal&) {
             continue;
         } catch (const break_statement::signal&) { break; }
-        noIteration = false;
     }
 
     if (noIteration) {
@@ -685,7 +686,7 @@ value call_statement::execute_impl(context& ctx) {
     }
     auto* callee_func = cast_val<value_func>(callee_val);
 
-    const func_handler func = [this, scope = ctx.current_scope()](const func_args& args) -> value {
+    const func_handler func = [this, scope = ctx.capture_scope()](const func_args& args) -> value {
         context block_ctx(args.ctx, scope);
 
         bind_parameters("caller", this->caller_args, args, block_ctx);
