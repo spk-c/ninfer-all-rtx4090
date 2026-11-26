@@ -1,4 +1,0 @@
-device profile nvidia-geforce-rtx-4090-sm89: 130 routed keys (built in: RTX 4090 at 450 W, 2026-09-25; unified routes and two-stage GDN at 300 to 450 W, 2026-09-27; Q4_K matrix and MoE async tiles at 450 W, 2026-11-06; GGUF, NVFP4 W4A8-int and cuBLAS prefill routes at 450 W, 2026-11-19; NVFP4 matrix and MoE async tiles at 450 W, 2026-11-23; calibrated route catalog at 450 W, 2026-11-23)
-Device KV lease of lane 0 cannot grow after releasing 0 retained cache owner(s); still short 1 main / 0 backend pages for its smallest step, so the answer ends early with finish_reason length
-pressure fixture: prompt=768 output=4028 finish=1
-request did not retain its original prompt and full output budget

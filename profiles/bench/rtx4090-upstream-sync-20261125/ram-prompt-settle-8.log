@@ -1,3 +1,0 @@
-START expert-delivery case ram-prompt-settle-8
-host prompt settle top_k=8 bad=0 pairs=8192 slots=27 settled 5, first reply admitted 0, next reply hits=2 misses=0 PASS
-PASS expert-delivery case ram-prompt-settle-8 (exit 0)

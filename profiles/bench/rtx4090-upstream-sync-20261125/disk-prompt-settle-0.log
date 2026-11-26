@@ -1,3 +1,0 @@
-START expert-delivery case disk-prompt-settle-0
-disk prompt settle top_k=0 bad=0 pairs=8192 slots=27 settled 0, first reply admitted 0, next reply hits=0 misses=2 PASS
-PASS expert-delivery case disk-prompt-settle-0 (exit 0)
