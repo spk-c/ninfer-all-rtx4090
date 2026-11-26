@@ -1,0 +1,36 @@
+name: RTX 4090 benchmark evidence
+
+on:
+  pull_request:
+    paths:
+      - 'profiles/bench/rtx4090-v014-*/**'
+      - 'scripts/benchmark-v014-*.py'
+      - 'scripts/check-v014-benchmark.py'
+      - 'bench/fixtures/bench_corpus.ids'
+      - '.github/workflows/rtx4090-benchmark-evidence.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'profiles/bench/rtx4090-v014-*/**'
+      - 'scripts/benchmark-v014-*.py'
+      - 'scripts/check-v014-benchmark.py'
+      - 'bench/fixtures/bench_corpus.ids'
+      - '.github/workflows/rtx4090-benchmark-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m py_compile scripts/benchmark-v014-tuning.py scripts/benchmark-v014-long-coding.py scripts/check-v014-benchmark.py
+      - run: python scripts/benchmark-v014-tuning.py --help
+      - run: python scripts/benchmark-v014-long-coding.py --help
+      - run: python scripts/check-v014-benchmark.py
+      - run: python scripts/check-v014-benchmark.py --candidate profiles/bench/rtx4090-v014-long-coding-20261126 --tolerance 0

@@ -1,0 +1,13 @@
+{
+  "status": "finished",
+  "finished": "2026-11-26T16:05:09+0100",
+  "engine_runs": 48,
+  "server_requests": 33,
+  "errors": [],
+  "screen_candidate": {
+    "draft_tokens": 15,
+    "adaptive": false,
+    "native_prefill_chunk": 4096
+  },
+  "note": "Screen candidate only; compare long context and serving results, variance, quality, concurrency and cache before changing production. cuBLAS and graph experiments are not automatically enabled."
+}

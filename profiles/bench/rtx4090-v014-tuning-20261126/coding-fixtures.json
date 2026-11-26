@@ -1,0 +1,14 @@
+[
+  {
+    "path": "src/artifact/views.cpp",
+    "sha256": "86d1cdc315fba72e0647add0e3598533758f77487bf015093dac91196858c56c"
+  },
+  {
+    "path": "src/core/expert_mirror.cpp",
+    "sha256": "a2f1b0f9988fa470a9499250988e551fdc0c444e3fbf23476b9ff8f19312402c"
+  },
+  {
+    "path": "src/core/expert_split.cpp",
+    "sha256": "24cd550d31da14ea6d87b2422dc6c5d716dc33979d415beaf70907e792c3b941"
+  }
+]

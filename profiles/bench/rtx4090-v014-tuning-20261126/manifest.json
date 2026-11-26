@@ -1,0 +1,11 @@
+{
+  "started": "2026-11-26T15:37:06+0100",
+  "version": "ninfer-serve rtx4090-v0.1.4+a6b1138",
+  "server_sha256": "1fcb3f20934997a81d980843e5ee3a0767de1ff82ee58153c543ea843004ff97",
+  "bench_sha256": "19eacce958b5f9b0f093853646707d8f16ad009e94f387c0e57ad9946783d5b1",
+  "runtime_sha256": "3ef9f3e315d1d1ea21242fb54269f7326cc91e2c9ed07c1147b0657cc555ee80",
+  "model_sha256": "a410396311ccb27048008a7ccb8a38f91099f6f6a8e10d10bd8baed7248c046a",
+  "corpus_sha256": "8caa3ab4182f2704c0333a0bb03875a31871db9a3f67216903b0c96fa37f2b8f",
+  "corpus_tokens": 176128,
+  "notes": "Synthetic repeated fixed token corpus for controlled engine tests; separate real repository file-copy workload for serving. Two single-run reverse-order screens; no speedup or general quality claims from synthetic tokens. No production changes."
+}
