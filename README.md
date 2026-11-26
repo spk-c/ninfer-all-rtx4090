@@ -80,10 +80,14 @@ A subsequent development candidate (`2d37ef0a`) recorded +1.89% at 176,128 and +
 
 [Full long-context report](docs/performance/rtx4090-long-context-ab-2026-11-25.md) · [Raw five-arm results](profiles/bench/rtx4090-neroued-factorial-20261125) · [Tuning results](profiles/bench/rtx4090-neroued-tuning-20261125) · [Huihui qualification](docs/performance/rtx4090-huihui-iq3s-dflash2.md)
 
+### v0.1.4 short Engine measurements (November 26)
+
+The exact published binary completed Bonsai 2.5 MTP3 and a Huihui no-copy DFlash2/MTP draft-width sweep, with 2,048 input and 128 timed decode tokens. Short fixed-corpus results are not serving throughput or general speed claims. [Report and machine-readable data](docs/performance/rtx4090-v014-bonsai-and-draft-2026-11-26.md).
+
 ## Release and development status
 
 - **v0.1.3:** published portable Windows archive verified on a real RTX 4090 with two successful real-model smoke requests. [Verification evidence](docs/releases/rtx4090-v0.1.3-gpu-verification.md).
-- **v0.1.4:** [published Windows prerelease (GPU-unverified)](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
+- **v0.1.4:** [latest stable Windows release (real GPU smoke verified)](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. [Exact release verification](docs/releases/rtx4090-v0.1.4-gpu-verification.md). See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
 - Experimental graph, recovery and arithmetic paths remain opt-in. A successful hosted build is not real-GPU validation; a prerelease requires independent hardware qualification before stable promotion.
 
 ## Build from source (Windows)
