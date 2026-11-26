@@ -1,0 +1,65 @@
+name: RTX 4090 v0.1.4 verified stable promotion
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/releases/rtx4090-v0.1.4-gpu-verification.md'
+      - '.github/workflows/rtx4090-promote-verified-v0.1.4.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  promote:
+    if: github.repository == 'spk-c/ninfer-all-rtx4090'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate immutable tag, archive digest and recorded real GPU evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='rtx4090-v0.1.4'
+          test "$(git rev-list -n 1 "$tag")" = 'a6b1138b528b476286bc6b11f19ba30df196b6ed'
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45742540558" > release-workflow.json
+          python3 - <<'PY'
+          import json, pathlib
+          rel=json.loads(pathlib.Path("release.json").read_text())
+          run=json.loads(pathlib.Path("release-workflow.json").read_text())
+          proof=pathlib.Path("docs/releases/rtx4090-v0.1.4-gpu-verification.md").read_text()
+          sha="a6b1138b528b476286bc6b11f19ba30df196b6ed"
+          digest="c4dbfc317f817d84c8032621413e25800635a69522e95626fc6a6274dbbe8914"
+          assert rel["tag_name"]=="rtx4090-v0.1.4" and not rel["draft"]
+          assert any(a["name"]=="ninfer-windows-x64-cuda13.4-sm89-a6b1138b528b.7z.001" and a["digest"]=="sha256:"+digest and a["state"]=="uploaded" for a in rel["assets"])
+          assert any(a["name"].startswith("SHA256SUMS-") and a["state"]=="uploaded" for a in rel["assets"])
+          assert run["head_sha"]==sha and run["status"]=="completed" and run["conclusion"]=="success"
+          assert "**Validation: PASS (SM89 real-model inference smoke test)**" in proof
+          assert sha in proof and digest in proof and "ninfer-serve rtx4090-v0.1.4+a6b1138" in proof
+          assert "→ **4** (pass)" in proof and "→ **Berlin** (pass)" in proof
+          assert "max-context 32768" in proof and "DFlash2 K=5" in proof
+          PY
+      - name: Promote exact tested release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'EOF'
+          # NInfer RTX 4090 v0.1.4 — CUDA 13.4 SM89 (GPU verified)
+
+          **Stable release**, source `a6b1138b528b476286bc6b11f19ba30df196b6ed`.
+
+          - Hosted four-shard CUDA build, CPU CTest, archive and SHA-256 verification: passed.
+          - Exact published archive downloaded, digest and manifest matched; 7-Zip integrity passed. Extracted server identifies as `rtx4090-v0.1.4+a6b1138`.
+          - Real RTX 4090 GPU inference passed with Huihui Qwen3.8 27B IQ3_S, DFlash2 K=5, rk4v4, 32K context; two correct short requests, both normal stop.
+          - Includes upstream sync, native SM89 backports and opt-in flat graph / context recovery work. Experimental paths are not certified by the smoke test.
+
+          [Exact release verification](https://github.com/spk-c/ninfer-all-rtx4090/blob/master/docs/releases/rtx4090-v0.1.4-gpu-verification.md)
+
+          Scope: real-model smoke-qualified Windows x64 RTX 4090 binary. Not a comprehensive long-context or multi-model regression certificate or performance claim.
+          EOF
+          gh release edit rtx4090-v0.1.4 --prerelease=false --latest --title "NInfer RTX 4090 v0.1.4 - CUDA 13.4 SM89 (GPU verified)" --notes-file notes.md
+          test "$(gh release view rtx4090-v0.1.4 --json isPrerelease --jq '.isPrerelease')" = false
