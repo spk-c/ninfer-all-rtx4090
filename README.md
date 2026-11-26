@@ -49,6 +49,8 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/models
 
 Use a model ID returned by this endpoint in your OpenAI-compatible client. The launcher can reduce its context when memory is insufficient. Keep the server bound to localhost unless you configure appropriate authentication and network access controls.
 
+Optional: [checksum-verified installer and GUI launcher](docs/rtx4090-windows-setup.md).
+
 See the [Windows archive guide](docs/release-archive-windows.md), [CLI options](docs/cli.md) and [launch recipes](docs/recipes.md).
 
 ## RTX 4090 benchmarks
@@ -82,7 +84,7 @@ A subsequent development candidate (`2d37ef0a`) recorded +1.89% at 176,128 and +
 
 ### v0.1.4 short Engine measurements (November 26)
 
-The exact published binary completed Bonsai 2.5 MTP3 and a Huihui no-copy DFlash2/MTP draft-width sweep, with 2,048 input and 128 timed decode tokens. Short fixed-corpus results are not serving throughput or general speed claims. [Report and machine-readable data](docs/performance/rtx4090-v014-bonsai-and-draft-2026-11-26.md).
+The exact published binary completed Bonsai 2.5 MTP3 and a Huihui no-copy DFlash2/MTP draft-width sweep, with 2,048 input and 128 timed decode tokens. Short fixed-corpus results are not serving throughput or general speed claims. [Report and machine-readable data](docs/performance/rtx4090-v014-bonsai-and-draft-2026-11-26.md). [Limited llama.cpp HTTP pilot (different outputs and cache formats)](docs/performance/rtx4090-v014-llama-cpp-pilot-2026-11-26.md).
 
 ## Release and development status
 
