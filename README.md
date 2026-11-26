@@ -1,6 +1,6 @@
 # NInfer-all RTX 4090 — Native CUDA LLM Inference
 
-**Run local large language models on NVIDIA GeForce RTX 4090 (24 GB) with native Ada Lovelace SM89 CUDA kernels, a portable Windows build, and OpenAI-compatible serving.** A C++/CUDA development fork of [NInfer-all](https://github.com/iamwavecut/ninfer-all), focused on reproducible inference performance, numerical correctness and long-context stability.
+**Run local large language models on NVIDIA GeForce RTX 4090 (24 GB) with native Ada Lovelace SM89 CUDA kernels, a portable Windows build, and OpenAI-compatible serving.** An independently maintained C++/CUDA inference project derived from [NInfer-all](https://github.com/iamwavecut/ninfer-all), focused on reproducible inference performance, numerical correctness and long-context stability.
 
 [![Latest stable release](https://img.shields.io/github/v/release/spk-c/ninfer-all-rtx4090?label=stable%20release)](https://github.com/spk-c/ninfer-all-rtx4090/releases/latest)
 [![Windows release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml/badge.svg)](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml)
@@ -10,7 +10,7 @@
 
 **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [Upstream documentation](docs/README.md)
 
-## Why this fork?
+## Why NInfer-all RTX 4090?
 
 | Area | RTX 4090 focus |
 | --- | --- |
@@ -21,7 +21,7 @@
 | Quantization and memory | GGUF conversion, IQ3_S/IQ4_XS, quantized KV cache, hybrid prefix caching and model-dependent host/disk expert residency |
 | Engineering | Device calibration, CUDA Graph experiments, regression tests, raw benchmark evidence and reproducible builds |
 
-Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated on this fork. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
+Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated by this project. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
 
 ## Get started on Windows
 
@@ -58,7 +58,7 @@ See the [Windows archive guide](docs/release-archive-windows.md), [CLI options](
 | P90 decode throughput | 215.5 tok/s |
 | Median long-prefill throughput (316 requests) | 2,345 tok/s |
 
-[Serving-log methodology and limitations](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer/blob/main/BENCHMARK-RTX4090.md). These are observed per-request rates, not a controlled fork-versus-upstream comparison or guaranteed throughput.
+[Serving-log methodology and limitations](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer/blob/main/BENCHMARK-RTX4090.md). These are observed per-request rates, not a controlled project-versus-upstream comparison or guaranteed throughput.
 
 ### Controlled long-context development tests (November 2026)
 
@@ -104,7 +104,7 @@ For source-to-source comparisons, use matching weights, toolkit, driver, context
 
 ## Upstream and contributions
 
-This fork retains NInfer-all's multi-GPU engine, model support and documentation. Credit goes to [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all), [Neroued/ninfer](https://github.com/Neroued/ninfer), [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) and all [contributors](CONTRIBUTORS.md). Licensed under [Apache-2.0](LICENSE); redistributed CUDA libraries have separate NVIDIA terms.
+NInfer-all RTX 4090 is an independent repository with its own development, validation and release process. It retains the original NInfer-all Git history, multi-GPU engine, model support and documentation. Upstream changes can continue to be integrated through Git and validated against the RTX 4090 target. Credit goes to [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all), [Neroued/ninfer](https://github.com/Neroued/ninfer), [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) and all [contributors](CONTRIBUTORS.md). Licensed under [Apache-2.0](LICENSE); redistributed CUDA libraries have separate NVIDIA terms.
 
 Report reproducible RTX 4090 issues with your commit/version, driver, model artifact, launch flags and relevant logs in [GitHub Issues](https://github.com/spk-c/ninfer-all-rtx4090/issues). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
