@@ -121,9 +121,31 @@ int launch_configuration_tests() {
         if (entry.path().extension() != ".ini") { continue; }
         ++shipped;
         try {
-            const auto options = parse({"ninfer-serve", "--config", entry.path().string()});
-            failures += check(!options.artifact_path.empty(),
-                              "a shipped configuration names no model");
+            const auto config = entry.path().string();
+            if (entry.path().filename() == "rtx4090-huihui-dflash2-k7.ini") {
+                // This opt-in profile deliberately requires the exact model as a positional argument.
+                bool missing_model_rejected = false;
+                try {
+                    (void)parse({"ninfer-serve", "--config", config});
+                } catch (const std::invalid_argument& error) {
+                    missing_model_rejected =
+                        std::string_view(error.what()).find("artifact path is required") !=
+                        std::string_view::npos;
+                }
+                failures += check(missing_model_rejected,
+                                  "the K7 profile must require an explicit model");
+                const auto options = parse({"ninfer-serve", "explicit-model.ninfer", "--config", config});
+                failures += check(options.artifact_path == "explicit-model.ninfer" &&
+                                      options.max_context == 176128 &&
+                                      options.kv_cache == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value &&
+                                      options.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
+                                      options.speculative.draft_tokens == 7,
+                                  "the K7 profile lost its explicit model or measured settings");
+            } else {
+                const auto options = parse({"ninfer-serve", "--config", config});
+                failures += check(!options.artifact_path.empty(),
+                                  "a shipped configuration names no model");
+            }
         } catch (const std::exception& error) {
             std::cerr << entry.path().string() << ": " << error.what() << '\n';
             ++failures;
