@@ -1,0 +1,35 @@
+[
+  {
+    "path": "src/serve/request_validation.cpp",
+    "old": "optional_number",
+    "new": "optional_finite_number",
+    "occurrences": 2,
+    "target_bytes": 9848,
+    "prompt_bytes": 93131,
+    "target_sha256": "02c2f76b7d738c177d5543bb809398d4110dd82f2da31cbcd0c515ad4f754e54",
+    "expected_sha256": "8ed0b90e9903489722accbb1189e8bcc0bc2ac26e27f69acec0d71527c078863",
+    "prompt_sha256": "94f7028c0ae6a9d5132c3e6860ee5a9f9dd377d3976ee3d3fb8f4e305b47467f"
+  },
+  {
+    "path": "src/serve/http_transport.cpp",
+    "old": "set_ngram_generation_header",
+    "new": "publish_ngram_generation_header",
+    "occurrences": 1,
+    "target_bytes": 10249,
+    "prompt_bytes": 93152,
+    "target_sha256": "e00da6dc34b587ee8342010c5824a97c1cdc5ada3e680cf38db9d44b630071b5",
+    "expected_sha256": "dd9815b3e9e30def0ba2a15df59feffd53badde8c321c110a9490b6234670aec",
+    "prompt_sha256": "52d51df17ff6b6618c0e61fd033cf614c6890b51ce0b4d1c4af8bf02040e25ce"
+  },
+  {
+    "path": "src/serve/structured_output.cpp",
+    "old": "parse_structured_output",
+    "new": "parse_response_format_options",
+    "occurrences": 1,
+    "target_bytes": 11398,
+    "prompt_bytes": 93146,
+    "target_sha256": "60bab2492414ee01fd62ab253d5f918cf3a852b4207749de8edf6e5585739e1d",
+    "expected_sha256": "a6da52d9c1a184d6f5459848560ac0b81597e0ccc533ed2057c8be45c9a04035",
+    "prompt_sha256": "322c07dbde8ed004e72f23dc979a97ca8559d080dec24eb3602637380f6b7a7c"
+  }
+]

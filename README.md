@@ -120,6 +120,31 @@ A subsequent development candidate (`2d37ef0a`) recorded +1.89% at 176,128 and +
 
 The exact published binary completed Bonsai 2.5 MTP3 and a Huihui no-copy DFlash2/MTP draft-width sweep, with 2,048 input and 128 timed decode tokens. Short fixed-corpus results are not serving throughput or general speed claims. [Report and machine-readable data](docs/performance/rtx4090-v014-bonsai-and-draft-2026-11-26.md). [Limited llama.cpp HTTP pilot (different outputs and cache formats)](docs/performance/rtx4090-v014-llama-cpp-pilot-2026-11-26.md).
 
+### Published v0.1.4 long-context and coding qualification (November 26)
+
+Exact release binary, one RTX 4090, Huihui IQ3_S DFlash2; fixed K7, prefill 4096,
+RK4V4, no N-gram during the controlled Engine sweep (two repeats per cell):
+
+| Context | K5 decode | K7 decode |
+|---:|---:|---:|
+| 64K | 242.75 tok/s | 272.74 tok/s |
+| 128K | 206.39 tok/s | 240.60 tok/s |
+| 176128 | 214.87 tok/s | 263.93 tok/s |
+
+![RTX 4090 long-context draft-width sweep](docs/images/benchmarks/rtx4090-v014-long-context.svg)
+
+Separate exact-rename tests with ~21.4K-token source prompts reached 568.1 tok/s
+mean decode with N-gram 15 vs 256.7 without (4/6 exact outputs in both arms).
+Concurrent prefill reduced short-request TTFT from 21.28 to 1.16 s
+while a long prompt was prefilling; overall pair time was unchanged.
+143 measurements, zero reported infrastructure errors. Workload-specific results,
+not general serving rates or cross-engine comparisons. Experimental graphs and cuBLAS remain opt-in.
+
+[Controlled report](docs/performance/rtx4090-v014-long-context-2026-11-26.md) ·
+[Coding and concurrency](docs/performance/rtx4090-v014-coding-2026-11-26.md) ·
+[Measured K7 preset](configs/rtx4090-huihui-dflash2-k7.ini) ·
+[Raw numerical results](profiles/bench/rtx4090-v014-long-coding-20261126/)
+
 ## Release and development status
 
 - **v0.1.3:** published portable Windows archive verified on a real RTX 4090 with two successful real-model smoke requests. [Verification evidence](docs/releases/rtx4090-v0.1.3-gpu-verification.md).

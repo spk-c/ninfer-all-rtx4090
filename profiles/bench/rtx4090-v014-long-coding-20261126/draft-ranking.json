@@ -1,0 +1,187 @@
+{
+  "results": [
+    {
+      "ctx": 65536,
+      "k": 5,
+      "decode": 242.7519488,
+      "prefill": 3184.5247445,
+      "seconds": 22.36960295,
+      "acceptance": 0.8797468354,
+      "decode_min": 238.4885379,
+      "decode_max": 247.0153597
+    },
+    {
+      "ctx": 65536,
+      "k": 7,
+      "decode": 272.73625325,
+      "prefill": 3127.8478115,
+      "seconds": 22.5156931,
+      "acceptance": 0.8176691729,
+      "decode_min": 264.6655881,
+      "decode_max": 280.8069184
+    },
+    {
+      "ctx": 65536,
+      "k": 9,
+      "decode": 247.57107925000003,
+      "prefill": 3158.0183319999996,
+      "seconds": 22.500960499999998,
+      "acceptance": 0.7416666667,
+      "decode_min": 245.5894038,
+      "decode_max": 249.5527547
+    },
+    {
+      "ctx": 65536,
+      "k": 11,
+      "decode": 258.7041429,
+      "prefill": 3176.797861,
+      "seconds": 22.2890762,
+      "acceptance": 0.6516690856,
+      "decode_min": 255.7079687,
+      "decode_max": 261.7003171
+    },
+    {
+      "ctx": 65536,
+      "k": 15,
+      "decode": 242.20072955,
+      "prefill": 3110.331008,
+      "seconds": 22.8591527,
+      "acceptance": 0.4791889007,
+      "decode_min": 239.8621018,
+      "decode_max": 244.5393573
+    },
+    {
+      "ctx": 131072,
+      "k": 5,
+      "decode": 206.39349225,
+      "prefill": 2651.6680795,
+      "seconds": 51.528323900000004,
+      "acceptance": 0.8154761905,
+      "decode_min": 204.3128446,
+      "decode_max": 208.4741399
+    },
+    {
+      "ctx": 131072,
+      "k": 7,
+      "decode": 240.60133044999998,
+      "prefill": 2685.931685,
+      "seconds": 50.548484,
+      "acceptance": 0.758377425,
+      "decode_min": 240.0283796,
+      "decode_max": 241.1742813
+    },
+    {
+      "ctx": 131072,
+      "k": 9,
+      "decode": 202.8647098,
+      "prefill": 2692.3736495000003,
+      "seconds": 50.830369149999996,
+      "acceptance": 0.6712538226,
+      "decode_min": 201.3577173,
+      "decode_max": 204.3717023
+    },
+    {
+      "ctx": 131072,
+      "k": 11,
+      "decode": 215.0336046,
+      "prefill": 2669.2306885,
+      "seconds": 51.11563165,
+      "acceptance": 0.5983827493,
+      "decode_min": 213.2791871,
+      "decode_max": 216.7880221
+    },
+    {
+      "ctx": 131072,
+      "k": 15,
+      "decode": 189.57872205,
+      "prefill": 2676.3486515,
+      "seconds": 51.302386999999996,
+      "acceptance": 0.3974591652,
+      "decode_min": 189.3164441,
+      "decode_max": 189.841
+    },
+    {
+      "ctx": 176128,
+      "k": 5,
+      "decode": 214.87198255,
+      "prefill": 2420.429096,
+      "seconds": 74.7541557,
+      "acceptance": 0.9724770642,
+      "decode_min": 200.1120471,
+      "decode_max": 229.631918
+    },
+    {
+      "ctx": 176128,
+      "k": 7,
+      "decode": 263.93348165,
+      "prefill": 2357.445569,
+      "seconds": 76.2273668,
+      "acceptance": 0.9406779661,
+      "decode_min": 259.2312528,
+      "decode_max": 268.6357105
+    },
+    {
+      "ctx": 176128,
+      "k": 9,
+      "decode": 241.2538204,
+      "prefill": 2382.6334914999998,
+      "seconds": 75.6237932,
+      "acceptance": 0.8815533981,
+      "decode_min": 240.7748549,
+      "decode_max": 241.7327859
+    },
+    {
+      "ctx": 176128,
+      "k": 11,
+      "decode": 228.05596355,
+      "prefill": 2329.5330940000003,
+      "seconds": 77.4351599,
+      "acceptance": 0.7591362126,
+      "decode_min": 222.8034937,
+      "decode_max": 233.3084334
+    },
+    {
+      "ctx": 176128,
+      "k": 15,
+      "decode": 229.12948565,
+      "prefill": 2366.7835665000002,
+      "seconds": 76.23077105,
+      "acceptance": 0.5586797066,
+      "decode_min": 226.636108,
+      "decode_max": 231.6228633
+    }
+  ],
+  "scores": [
+    {
+      "k": 7,
+      "weighted_decode_score": 1.0,
+      "worst_relative_decode": 1.0
+    },
+    {
+      "k": 11,
+      "weighted_decode_score": 0.8955710016669673,
+      "worst_relative_decode": 0.8640660598431508
+    },
+    {
+      "k": 9,
+      "weighted_decode_score": 0.8876658699746401,
+      "worst_relative_decode": 0.8431570574467704
+    },
+    {
+      "k": 5,
+      "weighted_decode_score": 0.8483992028715808,
+      "worst_relative_decode": 0.8141141518185252
+    },
+    {
+      "k": 15,
+      "weighted_decode_score": 0.8450414033326793,
+      "worst_relative_decode": 0.7879371310849708
+    }
+  ],
+  "weights": {
+    "65536": 0.25,
+    "131072": 0.35,
+    "176128": 0.4
+  },
+  "rule": "Median of two reverse-order measurements per cell, relative to fastest width at same context; weights prioritize long-context workloads. Synthetic corpus, N-gram off."
+}

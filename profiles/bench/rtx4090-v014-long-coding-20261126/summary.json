@@ -1,0 +1,39 @@
+{
+  "status": "finished",
+  "finished": "2026-11-26T16:51:58+0100",
+  "engine_runs": 30,
+  "server_nonstream_requests": 16,
+  "overlap_pairs": 8,
+  "stream_requests": 16,
+  "bucket_runs": 4,
+  "errors": [],
+  "draft_candidate": 7,
+  "ranking": [
+    {
+      "k": 7,
+      "weighted_decode_score": 1.0,
+      "worst_relative_decode": 1.0
+    },
+    {
+      "k": 11,
+      "weighted_decode_score": 0.8955710016669673,
+      "worst_relative_decode": 0.8640660598431508
+    },
+    {
+      "k": 9,
+      "weighted_decode_score": 0.8876658699746401,
+      "worst_relative_decode": 0.8431570574467704
+    },
+    {
+      "k": 5,
+      "weighted_decode_score": 0.8483992028715808,
+      "worst_relative_decode": 0.8141141518185252
+    },
+    {
+      "k": 15,
+      "weighted_decode_score": 0.8450414033326793,
+      "worst_relative_decode": 0.7879371310849708
+    }
+  ],
+  "note": "Synthetic K screen; use long coding output correctness, bucket equivalence, observed overlap and latency results before changing production. No automatic changes."
+}

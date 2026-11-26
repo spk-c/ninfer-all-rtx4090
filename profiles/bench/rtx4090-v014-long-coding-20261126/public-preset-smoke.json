@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "model": "qwen3.8-27b",
+  "response": "READY",
+  "finish_reason": "stop",
+  "draft_tokens": 7,
+  "port": 8099
+}
