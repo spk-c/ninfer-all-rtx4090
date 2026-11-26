@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/spk-c/ninfer-all-rtx4090?style=flat)](https://github.com/spk-c/ninfer-all-rtx4090/stargazers)
 [![Release downloads](https://img.shields.io/github/downloads/spk-c/ninfer-all-rtx4090/total?label=release%20downloads)](https://github.com/spk-c/ninfer-all-rtx4090/releases)
 
-**[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
+**[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
 
 **Start with a portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
 
@@ -83,7 +83,7 @@ A subsequent development candidate (`2d37ef0a`) recorded +1.89% at 176,128 and +
 ## Release and development status
 
 - **v0.1.3:** published portable Windows archive verified on a real RTX 4090 with two successful real-model smoke requests. [Verification evidence](docs/releases/rtx4090-v0.1.3-gpu-verification.md).
-- **v0.1.4:** [tagged development snapshot](https://github.com/spk-c/ninfer-all-rtx4090/tree/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
+- **v0.1.4:** [published Windows prerelease (GPU-unverified)](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
 - Experimental graph, recovery and arithmetic paths remain opt-in. A successful hosted build is not real-GPU validation; a prerelease requires independent hardware qualification before stable promotion.
 
 ## Build from source (Windows)
