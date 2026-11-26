@@ -4,6 +4,7 @@ on:
     branches: [master]
     paths:
       - 'docs/releases/rtx4090-v0.1.4-gpu-verification.md'
+      - 'docs/releases/rtx4090-v0.1.4-performance-notes.md'
       - '.github/workflows/rtx4090-promote-verified-v0.1.4.yml'
   workflow_dispatch:
 permissions:
@@ -61,5 +62,43 @@ jobs:
 
           Scope: real-model smoke-qualified Windows x64 RTX 4090 binary. Not a comprehensive long-context or multi-model regression certificate or performance claim.
           EOF
-          gh release edit rtx4090-v0.1.4 --prerelease=false --latest --title "NInfer RTX 4090 v0.1.4 - CUDA 13.4 SM89 (GPU verified)" --notes-file notes.md
-          test "$(gh release view rtx4090-v0.1.4 --json isPrerelease --jq '.isPrerelease')" = false
+          # For an already-stable release preserve the existing description and
+          # never change its latest status. A genuine promotion still uses the
+          # verified smoke notes above.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/rtx4090-v0.1.4" > release-current.json
+          python3 - <<'PY'
+          import json, pathlib
+          original = json.loads(pathlib.Path("release.json").read_text())
+          current = json.loads(pathlib.Path("release-current.json").read_text())
+          assert current["id"] == original["id"] and current["tag_name"] == original["tag_name"]
+          def asset_identity(release):
+              return sorted((a["id"], a["name"], a["size"], a["digest"], a["state"]) for a in release["assets"])
+          assert asset_identity(current) == asset_identity(original) and not current["draft"]
+          marker = "## Controlled RTX 4090 performance qualification (2026-11-26)"
+          addendum = pathlib.Path("docs/releases/rtx4090-v0.1.4-performance-notes.md").read_text().strip()
+          assert addendum.startswith(marker)
+          notes = pathlib.Path("notes.md")
+          body = notes.read_text() if current["prerelease"] else (current["body"] or "")
+          if marker not in body:
+              body = body.rstrip() + "\n\n" + addendum + "\n"
+          else:
+              assert addendum in body, "Existing performance section differs; review manually"
+          notes.write_text(body)
+          PY
+          if test "$(jq -r '.prerelease' release-current.json)" = true; then
+            gh release edit rtx4090-v0.1.4 --prerelease=false --latest --title "NInfer RTX 4090 v0.1.4 - CUDA 13.4 SM89 (GPU verified)" --notes-file notes.md
+          else
+            gh release edit rtx4090-v0.1.4 --notes-file notes.md
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/rtx4090-v0.1.4" > release-after.json
+          python3 - <<'PY'
+          import json, pathlib
+          before = json.loads(pathlib.Path("release-current.json").read_text())
+          after = json.loads(pathlib.Path("release-after.json").read_text())
+          assert after["id"] == before["id"] and after["tag_name"] == before["tag_name"]
+          def asset_identity(release):
+              return sorted((a["id"], a["name"], a["size"], a["digest"], a["state"]) for a in release["assets"])
+          assert asset_identity(after) == asset_identity(before) and not after["prerelease"] and not after["draft"]
+          assert after["body"].strip() == pathlib.Path("notes.md").read_text().strip()
+          print("Release description verified; assets and tag unchanged.")
+          PY
