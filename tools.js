@@ -8,17 +8,17 @@
  const form=$("config-form");
  if(form){
  const model=$("model"), spec=$("spec"), draft=$("draft");
- function updateModes(){const m=models.find(x=>x.id===model.value);const previous=spec.value;spec.replaceChildren(...m.modes.map(v=>new Option(v==="none"?tr("None","Keine"):v.toUpperCase(),v)));spec.value=m.modes.includes(previous)?previous:m.modes.includes("mtp")?"mtp":"none";if(previous!==spec.value)draft.value=spec.value==="mtp"?3:5;const vision=true;$("vision").disabled=!vision;if(!vision)$("vision").checked=false;}
+ function updateModes(){const m=models.find(x=>x.id===model.value);const previous=spec.value;spec.replaceChildren(...m.modes.map(v=>new Option(v==="none"?tr("None","Keine"):v.toUpperCase(),v)));spec.value=m.modes.includes(previous)?previous:m.modes.includes("mtp")?"mtp":"none";if(previous!==spec.value)draft.value=spec.value==="mtp"?3:5;$("vision").disabled=false;}
  function render(){const m=models.find(x=>x.id===model.value),ctx=Number($("context").value),con=Number($("concurrency").value),port=Number($("port").value),k=$("kv").value,mode=spec.value,d=Number(draft.value);
  draft.disabled=mode==="none";draft.max="15";const invalid=!form.checkValidity()||![ctx,con,port].every(Number.isInteger)||(mode!=="none"&&!Number.isInteger(d))||ctx>262144&&!$("yarn").checked;
  $("config-error").textContent=invalid?tr("Check inputs. Context over 262,144 requires explicit YaRN in this planner.","Eingaben prüfen. Mehr als 262.144 Token erfordern in diesem Planer explizit YaRN."):"";
  const start=$("start-command"),download=$("download-command");start.textContent="";download.textContent="";
  if(invalid){$("kv-estimate").textContent="";$("memory-estimate").textContent="";$("context-evidence").textContent="";return}
- const tokens=ctx*con, bytes=kvBytes[k]*tokens, gib=bytes/1073741824, other=$("other");
- $("kv-estimate").textContent=tr("Main KV estimate: ","Geschätzter Haupt-KV: ")+fmt(gib)+" GiB ("+fmt(tokens)+" tokens)";
+ const tokens=ctx*con, rounded=Math.ceil(ctx/64)*64*con, bytes=kvBytes[k]*rounded, gib=bytes/1073741824, other=$("other");
+ $("kv-estimate").textContent=tr("Main KV estimate: ","Geschätzter Haupt-KV: ")+fmt(gib)+" GiB ("+fmt(rounded)+tr(" rounded tokens)"," gerundete Token)");
  const measured=other.value!==""&&other.checkValidity(),sum=gib+Number(other.value);
- $("memory-estimate").textContent=measured?tr("Planning sum: ","Planungssumme: ")+fmt(sum)+" / 24 GiB — "+(sum>24?tr("over budget","über Budget"):tr("within entered budget, not a fit guarantee","im angegebenen Budget, keine Passgarantie")):tr("Total VRAM unknown until you enter a measured non-KV reservation.","Gesamt-VRAM unbekannt, bis der gemessene übrige Speicher eingetragen ist.");
- const cap=m.cap[k]?.[modeOrder.indexOf(mode)], exact=con===1&&!$("vision").checked&&(mode==="none"||(mode==="mtp"&&d===3)||(mode==="dflash2"&&d===5));
+ $("memory-estimate").textContent=measured?tr("Planning sum: ","Planungssumme: ")+fmt(sum)+" / 24 GiB — "+(sum>24?tr("over budget","über Budget"):tr("within entered budget, not a fit guarantee","im angegebenen Budget, keine Passgarantie")):other.value!==""?tr("Enter a valid non-KV reservation between 0 and 24 GiB.","Gültigen übrigen Speicherbedarf zwischen 0 und 24 GiB eingeben."):tr("Total VRAM unknown until you enter a measured non-KV reservation.","Gesamt-VRAM unbekannt, bis der gemessene übrige Speicher eingetragen ist.");
+ const cap=m.cap[k]?.[modeOrder.indexOf(mode)], exact=con===1&&!$("vision").checked&&(ctx<=262144||$("yarn").checked)&&(mode==="none"||(mode==="mtp"&&d===3)||(mode==="dflash2"&&d===5));
  $("context-evidence").textContent=cap&&exact?tr("Upstream measured startup ceiling (single request): ","Gemessene Upstream-Startgrenze (eine Anfrage): ")+fmt(cap)+" tokens — "+(ctx>cap?tr("requested context exceeds reference","Kontext überschreitet Referenz"):tr("within reference, not a guarantee","innerhalb Referenz, keine Garantie")):tr("No matched RTX 4090 startup ceiling for this selection.","Keine passende RTX-4090-Startgrenze für diese Auswahl.");
  $("model-link").href=m.repo?"https://huggingface.co/"+m.repo:"https://github.com/spk-c/ninfer-all-rtx4090#supported-models";
  download.textContent=m.repo?"hf download "+m.repo+" "+m.file+" --local-dir .\\models":tr("# Download the exact artifact from the upstream model list into .\\models","# Exaktes Artefakt aus der Upstream-Modellliste nach .\\models laden")+"\n# "+m.file;
