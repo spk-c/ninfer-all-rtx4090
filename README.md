@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/spk-c/ninfer-all-rtx4090?style=flat)](https://github.com/spk-c/ninfer-all-rtx4090/stargazers)
 [![Release downloads](https://img.shields.io/github/downloads/spk-c/ninfer-all-rtx4090/total?label=release%20downloads)](https://github.com/spk-c/ninfer-all-rtx4090/releases)
 
-**[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Built-in Monitor](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
+**[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Built-in Monitor](#built-in-live-monitoring-dashboard) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
 
 **Start with a portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
 
@@ -25,9 +25,37 @@ If you use NInfer-all RTX 4090 or want to follow its development, consider starr
 | Model families | Qwen3.5/3.6/3.8, Flash-Next, Ternary Bonsai 2/2.5, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 via upstream |
 | Speculative decoding | DFlash2, MTP and other model-dependent draft backends; measured draft-width and prefill tuning |
 | Quantization and memory | GGUF conversion, IQ3_S/IQ4_XS, quantized KV cache, hybrid prefix caching and model-dependent host/disk expert residency |
+| Built-in monitoring | Read-only browser dashboard, live token rates, NVIDIA GPU sensors, DFlash2 acceptance, KV occupancy and request metadata |
 | Engineering | Device calibration, CUDA Graph experiments, regression tests, raw benchmark evidence and reproducible builds |
 
 Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated by this project. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
+
+## Built-in Live Monitoring Dashboard
+
+**Monitor local inference directly in your browser.** NInfer Monitor is compiled into `ninfer-serve`, including the portable Windows release. No separate Python process, external assets or cloud service is required.
+
+[![NInfer Monitor desktop dashboard: GPU telemetry, token throughput, DFlash2 acceptance, KV occupancy and recent request events; synthetic demonstration data](docs/images/monitor/monitor-desktop.png)](docs/images/monitor/monitor-desktop.png)
+
+*Screenshot of the actual v0.1.4 dashboard rendered with synthetic demonstration data. Values are illustrative, not live readings or benchmark results. [Full-size screenshot](docs/images/monitor/monitor-desktop.png) · [Mobile screenshot](docs/images/monitor/monitor-mobile.png).*
+
+| Monitoring area | Available metrics |
+| --- | --- |
+| Inference | Decode and computed prefill rates, live throughput charts |
+| NVIDIA GPU | Utilization, VRAM, temperature and power via optional NVML |
+| DFlash2 | Accepted/drafted model tokens from matching events in the last 50 requests |
+| Memory and queue | Device KV occupancy, context limit, running/waiting requests |
+| Server activity | Completed/rejected/failed requests, uptime and reused prompt tokens |
+| Request history | Last 50 request events with status, token counts, decode speed and duration; no prompt or response text in this feed |
+
+Start `ninfer-serve` normally and open the dashboard in your browser:
+
+```text
+http://127.0.0.1:8080/monitor
+```
+
+Replace `8080` with your configured `--port` (for example `8099`). If API-key authentication is enabled, enter the key in the dashboard password field. The dashboard is read-only and refreshes every three seconds. Keep the server bound to localhost unless remote access is deliberately secured. Rates are interval-based server counters, not standardized benchmark measurements; unavailable NVML sensors are displayed as a dash.
+
+[Technical documentation](docs/monitor-dashboard.md) · [English feature page](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) · [Deutsche Funktionsseite](https://spk-c.github.io/ninfer-all-rtx4090/monitor-de.html) · [Optional Python monitor](tools/monitor/README.md)
 
 ## Get started on Windows
 

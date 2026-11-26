@@ -4,6 +4,16 @@ The native read-only dashboard is compiled into every ninfer-serve build, includ
 Windows builds without NINFER_WEBUI_DIR. No separate Python process, downloaded
 assets, CDN or external web service is needed.
 
+## Dashboard preview
+
+[![NInfer Monitor desktop dashboard with synthetic demonstration data](images/monitor/monitor-desktop.png)](images/monitor/monitor-desktop.png)
+
+The screenshot uses the actual v0.1.4 dashboard with synthetic demonstration data,
+not production telemetry or benchmark measurements.
+[Mobile view (390 px)](images/monitor/monitor-mobile.png) ·
+[English overview](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) ·
+[Deutsche Übersicht](https://spk-c.github.io/ninfer-all-rtx4090/monitor-de.html).
+
 ## Open
 
 With the default HTTP port, open **http://127.0.0.1:8080/monitor**.

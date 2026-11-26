@@ -86,9 +86,14 @@ try {
     assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,"monitor mobile overflow");
     for(const src of ["monitor-desktop.png","monitor-mobile.png"]){
       const shot=p.locator('main img[src="'+src+'"]');
+      // Wait for lazy images to actually load before decoding (Chromium can
+      // reject decode() when the lazy request has not been initiated yet).
       await shot.scrollIntoViewIfNeeded();
-      await shot.evaluate(img=>img.decode());
-      assert.ok(await shot.evaluate(img=>img.naturalWidth>0));
+      await p.waitForFunction(src=>{
+        const img=document.querySelector('main img[src="'+src+'"]');
+        return img?.complete && img.naturalWidth>0;
+      },src);
+      assert.ok(await shot.evaluate(async img=>{await img.decode();return img.naturalWidth>0}),src);
     }
     assert.ok(await p.locator('main a[href="#open-monitor"]').count());
     assert.match(await p.locator("#open-monitor").textContent(),/127\.0\.0\.1:8099\/monitor/);
