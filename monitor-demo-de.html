@@ -166,11 +166,11 @@ function draw(){graph('rates','decodeRate','prefillRate',0);graph('gpuChart','gp
 function requestRows(events){
  const body=$('recentRequests');body.replaceChildren();
  if(!Array.isArray(events)||!events.length){
-  const tr=document.createElement('tr'),td=document.createElement('td');
-  td.colSpan=8;td.textContent=tr('No requests recorded');tr.appendChild(td);body.appendChild(tr);return;
+  const rowEl=document.createElement('tr'),td=document.createElement('td');
+  td.colSpan=8;td.textContent=tr('No requests recorded');rowEl.appendChild(td);body.appendChild(rowEl);return;
  }
  for(const event of events){
-  const tr=document.createElement('tr');
+  const rowEl=document.createElement('tr');
   const decodeRate=n(event.decode_seconds)>0&&n(event.output_tokens)>1?
    (event.output_tokens-1)/event.decode_seconds:null;
   const cells=[new Date(event.time_unix_ms).toLocaleTimeString(),event.status,
@@ -178,17 +178,17 @@ function requestRows(events){
    n(event.ttft_seconds)!==null&&n(event.ttft_seconds)>0&&n(event.output_tokens)>0?format(event.ttft_seconds*1000):'–',
    n(event.total_seconds)!==null?format(event.total_seconds)+' s':'–'];
   for(const v of cells){const td=document.createElement('td');
-   td.textContent=typeof v==='string'?tr(v):format(v);tr.appendChild(td)}
-  body.appendChild(tr);
+   td.textContent=typeof v==='string'?tr(v):format(v);rowEl.appendChild(td)}
+  body.appendChild(rowEl);
  }
 }
 function activity(){
  const body=$('activity');body.replaceChildren();
  for(const row of samples.slice(-15).reverse()){
-  const tr=document.createElement('tr');
+  const rowEl=document.createElement('tr');
   const cells=[new Date(row.time).toLocaleTimeString(),row.completeDelta,row.decodeDelta,row.prefillDelta,row.running,row.waiting];
-  for(const v of cells){const td=document.createElement('td');td.textContent=typeof v==='string'?v:format(v);tr.appendChild(td)}
-  body.appendChild(tr);
+  for(const v of cells){const td=document.createElement('td');td.textContent=typeof v==='string'?v:format(v);rowEl.appendChild(td)}
+  body.appendChild(rowEl);
  }
 }
 async function refresh(){
