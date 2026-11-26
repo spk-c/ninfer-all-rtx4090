@@ -106,6 +106,41 @@ try {
     console.log("axe",path||"/",JSON.stringify(result.violations.map(v=>({id:v.id,impact:v.impact,targets:v.nodes.map(n=>n.target)}))));
     assert.deepEqual(serious.map(v=>v.id),[],`accessibility: ${path}`);
   }
+  for(const path of ["sm89-native.html","sm89-native-de.html","sm89-speculation.html","sm89-speculation-de.html"]){
+    await p.goto(base+path);
+    assert.ok((await p.locator("main h1").textContent()).includes("SM89"));
+    assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,path+" overflow");
+  }
+  for(const [path,lang] of [["monitor-demo.html","en"],["monitor-demo-de.html","de"]]){
+    const requests=[];
+    const capture=req=>requests.push(req.url());
+    p.on("request",capture);
+    await p.goto(base+path);
+    await p.waitForFunction(()=>document.querySelector("#state").textContent==="Online");
+    assert.equal(await p.locator("html").getAttribute("lang"),lang);
+    assert.equal(await p.locator("#key").isDisabled(),true);
+    assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,path+" overflow");
+    assert.match(await p.locator("#ttftN").textContent(),/8/);
+    await p.locator("#demoModel").selectOption("mtp");
+    await p.waitForFunction(()=>document.querySelector("#mtp").textContent.includes("%"));
+    assert.equal(await p.locator("#draft").textContent(),"–");
+    await p.locator("#lang").selectOption(lang==="en"?"de":"en");
+    assert.equal(await p.locator("html").getAttribute("lang"),lang==="en"?"de":"en");
+    await p.locator("#persist").check();
+    await p.waitForFunction(()=>JSON.parse(localStorage.getItem("ninfer-monitor-public-demo-history-v1")||"{}").samples?.length>0);
+    const persisted=await p.evaluate(()=>JSON.parse(localStorage.getItem("ninfer-monitor-public-demo-history-v1")));
+    assert.ok(persisted.samples.every(s=>Object.values(s).every(v=>v===null||typeof v==="number")));
+    const dl= p.waitForEvent("download");await p.locator("#jsonExport").click();assert.match((await dl).suggestedFilename(),/\.json$/);
+    const csv=p.waitForEvent("download");await p.locator("#csvExport").click();assert.match((await csv).suggestedFilename(),/\.csv$/);
+    await p.locator("#chatInput").fill("demo-test-only");
+    await p.locator("#chatSend").click();
+    await p.waitForFunction(()=>document.querySelector("#chatLog").textContent.includes("demo-test-only"));
+    assert.match(await p.locator("#chatLog").textContent(),/simulat|Simulat/i);
+    await p.locator("#chatReset").click();assert.equal(await p.locator("#chatLog").textContent(),"");
+    await p.locator("#clearHistory").click();assert.equal(await p.evaluate(()=>localStorage.getItem("ninfer-monitor-public-demo-history-v1")),null);
+    p.off("request",capture);
+    assert.ok(requests.every(url=>url===base+path),JSON.stringify(requests));
+  }
   assert.deepEqual(errors,[]);
   console.log("PASS: configurator, incompatible backend, invalid input, memory, clipboard, theme, German locale, model filter, full-text search, stars, releases and mobile width");
 } finally {

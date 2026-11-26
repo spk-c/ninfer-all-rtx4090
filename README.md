@@ -81,6 +81,12 @@ Optional: [checksum-verified installer and GUI launcher](docs/rtx4090-windows-se
 
 See the [Windows archive guide](docs/release-archive-windows.md), [CLI options](docs/cli.md) and [launch recipes](docs/recipes.md).
 
+## SM89 technical articles
+
+- [Native SM89 CUDA: routing, calibration and qualification](docs/articles/sm89-native.md)
+- [DFlash2 and MTP on SM89: draft width and memory](docs/articles/sm89-speculation.md)
+- [Interactive Monitor development preview](https://spk-c.github.io/ninfer-all-rtx4090/monitor-demo.html) — synthetic metrics and simulated chat, no live server access; not the stable release.
+
 ## RTX 4090 benchmarks
 
 ### Real-world serving
