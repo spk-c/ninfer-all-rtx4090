@@ -13,6 +13,42 @@ void require(bool value, const char* what) {
 
 int main() {
     try {
+
+        // Token-level free text may begin after a literal inside the same token.
+        {
+            StructuredCompiler edge_compiler({"\n\n", "\n\n\n", "\n\n\n\n", "<", "<hi",
+                                               "<end>", "<tool>", "x", "hi", ""}, {9});
+            struct Case { const char* grammar; std::vector<TokenId> prefix; TokenId token; bool allowed; };
+            const Case cases[] = {
+                {"root ::= \"\\n\\n\" ExcludeToken(5)* Token(5)", {}, 1, true},
+                {"root ::= prefix ExcludeToken(5)*\nprefix ::= \"\\n\\n\" | \"x\"", {}, 1, true},
+                {"root ::= \"<\" ExcludeToken(5)*", {}, 5, false},
+                {"root ::= \"<\" ExcludeToken(5)*", {}, 4, true},
+                {"root ::= \"\\n\\n\" ExcludeToken(1)* Token(5)", {}, 2, true},
+                {"root ::= \"<\" Token(4)", {}, 4, false},
+                {"root ::= Token(6) prefix ExcludeToken(5)\nprefix ::= \"<\"", {6}, 4, true},
+            };
+            for (const auto& c : cases) {
+                auto g = edge_compiler.compile({.kind = StructuredOutputKind::Grammar, .grammar = c.grammar});
+                g->accept(c.prefix);
+                std::vector<std::uint32_t> before(1), after(1), speculative(2);
+                g->fill_masks(before, {});
+                require(bool(before[0] & (1U << c.token)) == c.allowed, "mid-token exclusion mask");
+                const std::vector<TokenId> draft{c.token};
+                g->fill_masks(speculative, draft);
+                g->fill_masks(after, {});
+                require(before == after, "lookahead mutated grammar");
+                auto trial = g->fork();
+                bool accepted = true;
+                try { trial->accept(draft); } catch (const std::logic_error&) { accepted = false; }
+                require(accepted == c.allowed, "mid-token matcher disagrees with mask");
+                if (accepted) {
+                    trial->fill_masks(after, {});
+                    require(after[0] == speculative[1], "mid-token lookahead differs from commit");
+                }
+            }
+        }
+
         std::vector<std::string> vocab(257);
         for (int i = 0; i < 256; ++i) { vocab[i] = std::string(1, static_cast<char>(i)); }
         StructuredCompiler compiler(vocab, {256});

@@ -366,15 +366,30 @@ RenderedChat CompiledChatTemplate::render_as(const std::vector<ChatMessage>& mes
         }
         if (!message.tool_calls.empty()) {
             value["tool_calls"] = Json::array();
-            for (const auto& call : message.tool_calls) {
+            for (std::size_t j = 0; j < message.tool_calls.size(); ++j) {
+                const auto& call = message.tool_calls[j];
+                const auto invalid = [&](std::string_view reason) {
+                    return std::invalid_argument(
+                        "messages[" + std::to_string(i) + "].tool_calls[" + std::to_string(j) +
+                        "] ('" + call.name + "'): arguments " + std::string(reason));
+                };
+                Json arguments = Json::object();
+                if (!call.arguments_json.empty()) {
+                    try {
+                        arguments = Json::parse(call.arguments_json);
+                    } catch (const Json::parse_error& error) {
+                        throw invalid("contain invalid JSON at byte " + std::to_string(error.byte));
+                    } catch (const Json::exception& error) {
+                        throw invalid("cannot be represented as JSON: " + std::string(error.what()));
+                    }
+                }
+                if (!arguments.is_object()) throw invalid("must contain a JSON object");
                 value["tool_calls"].push_back(
                     {{"id", call.id},
                      {"type", "function"},
                      {"function",
                       {{"name", call.name},
-                       {"arguments",
-                        (call.arguments_json.empty() ? Json::object()
-                                                     : Json::parse(call.arguments_json))}}}});
+                       {"arguments", std::move(arguments)}}}});
             }
         }
         if (!message.tool_call_id.empty()) value["tool_call_id"] = message.tool_call_id;

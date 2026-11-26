@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <span>
 #include <stdexcept>
 
@@ -55,7 +56,14 @@ void costs_are_measured_then_scaled() {
     require(std::abs(costs.cost(1, 3) - 0.030F) < 1e-6F, "a measured width reports its seconds");
     require(std::abs(costs.cost(1, 1) - 0.030F * shape_one / shape_three) < 1e-6F,
             "an unmeasured width scales from the measured one");
-    require(costs.cost(2, 3) == shape_three, "batch sizes are measured separately");
+    require(std::abs(costs.cost(2, 3) - 0.0375F) < 1e-6F,
+            "unmeasured batch must use the measured unit scale");
+    for (int n = 0; n < 8; ++n) costs.observe(2, 3, 0.043);
+    require(std::abs(costs.cost(2, 3) - 0.043F) < 1e-6F, "batch costs are measured separately");
+    require(costs.cost(1, 3, 65536) == shape_three, "short-context cost leaked to long context");
+    for (int n = 0; n < 8; ++n) costs.observe(1, 3, 0.095, 65536);
+    require(std::abs(costs.cost(1, 3, 65536) - 0.095F) < 1e-6F, "long context not measured");
+    require(std::abs(costs.cost(1, 3, 1024) - 0.030F) < 1e-6F, "long context changed short cost");
 }
 
 struct Simulation {
@@ -190,6 +198,46 @@ void the_masked_width_follows_survival_and_cost() {
             "eight rows of full survival left the wide round");
 }
 
+
+
+void context_bucket_contract() {
+    using namespace ninfer::ops;
+    static_assert(select_context_bucket(0) == ContextBucket::K2);
+    static_assert(select_context_bucket(2048) == ContextBucket::K2);
+    static_assert(select_context_bucket(2049) == ContextBucket::K8);
+    static_assert(select_context_bucket(131073) == ContextBucket::K256);
+    for (const auto bucket : kAllContextBuckets) {
+        require(parse_context_bucket(context_bucket_name(bucket)) == bucket, "bucket name roundtrip");
+        require(select_context_bucket(context_bucket_tokens(bucket)) == bucket, "bucket boundary");
+    }
+    bool rejected = false;
+    try { (void)select_context_bucket(1048577); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "oversized context accepted");
+    unsigned count = 0;
+    ContextBucketRange::through(32768).for_each([&](ContextBucket) { ++count; });
+    require(count == 4, "context bucket range skipped a bucket");
+}
+
+void masked_calibration_isolated_by_batch_and_context() {
+    MaskedWidthController controller;
+    controller.reset(15, 7);
+    auto signal = controller.pooled();
+    const std::array<const MaskedWidthSignal*, 1> one{&signal};
+    const std::array<const MaskedWidthSignal*, 2> two{&signal, &signal};
+    const std::array<std::uint32_t, 1> room{4096};
+    const std::array<std::uint32_t, 2> room2{4096, 4096};
+    for (int n = 0; n < 4; ++n)
+        controller.observe_execution(1, 15, 0.020, 1024);
+    require(controller.select(one, room, 1024) == 7, "calibration never probes narrow");
+    require(controller.select(two, room2, 1024) == 15, "probe leaked into another batch");
+    require(controller.select(one, room, 65536) == 15, "probe leaked into another context bucket");
+    require(controller.select(one, std::array<std::uint32_t, 1>{8}, 65536) == 7,
+            "near context/output boundary needlessly chose a wide round");
+    for (int n = 0; n < 8; ++n)
+        controller.observe_execution(1, 15, std::numeric_limits<double>::infinity(), 65536);
+    require(controller.select(one, room, 65536) == 15, "nonfinite timings triggered a probe");
+}
+
 void the_packed_plan_spends_rows_on_survival() {
     MtpAdaptiveSignal accepting;
     MtpAdaptiveSignal rejecting;
@@ -291,6 +339,8 @@ int main() {
         costs_are_measured_then_scaled();
         the_controller_widens_and_narrows();
         the_masked_width_follows_survival_and_cost();
+        context_bucket_contract();
+        masked_calibration_isolated_by_batch_and_context();
         the_packed_plan_spends_rows_on_survival();
         the_gate_runs_the_faster_mode();
     } catch (const std::exception& error) {

@@ -121,6 +121,35 @@ if(NOT WIN32)
     ENVIRONMENT "NINFER_CUDA_SYNC=")
 endif()
 
+ninfer_add_test(ninfer_sliding_bucket_graph_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_sliding_bucket_graph.cpp"
+  LIBRARIES ninfer_ops ninfer_core)
+set_tests_properties(ninfer_sliding_bucket_graph_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_dense_context_bucket_graph_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_dense_context_bucket_graph.cpp"
+  LIBRARIES ninfer_ops ninfer_core)
+set_tests_properties(ninfer_dense_context_bucket_graph_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_flat_draft_graph_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_flat_draft_graph.cu"
+  LIBRARIES ninfer_core)
+set_tests_properties(ninfer_flat_draft_graph_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_startup_speculative_calibration_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_startup_speculative_calibration.cpp")
+
+ninfer_add_test(ninfer_graph_profile_index_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_graph_profile_index.cpp")
+
+ninfer_add_test(ninfer_capture_backing_pool_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_capture_backing_pool.cpp"
+  LIBRARIES Threads::Threads)
+
+ninfer_add_test(ninfer_decode_graph_slice_test STANDALONE
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_slice.cu"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph.cpp"
   LIBRARIES ninfer_core)
 
@@ -151,6 +180,7 @@ ninfer_add_test(ninfer_gdn_replay_records_test
 set_tests_properties(
   ninfer_device_test
   ninfer_decode_graph_test
+  ninfer_decode_graph_slice_test
   ninfer_arena_test
   ninfer_kv_cache_test
   ninfer_state_store_test

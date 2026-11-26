@@ -1796,6 +1796,7 @@ struct Gemma4Core::Impl {
         result.finish_reason                   = reason;
         result.matched_stop_string             = r.output.matched_stop_string();
         result.thinking                        = r.output.thinking_stats();
+        result.bad_words                       = r.output.bad_words_stats();
         result.thinking.post_thinking_sampling = r.post_thinking;
         result.reused_prompt_tokens            = r.reused;
         result.prefix_reuse_path               = r.reuse_path;
@@ -2518,6 +2519,11 @@ struct Gemma4Core::Impl {
             sequences.push_back(request->slot);
             anchors.push_back(request->feed.front());
         }
+        std::uint32_t adaptive_context = 0;
+        for (const auto& request : batch) {
+            adaptive_context = std::max(adaptive_context, static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(request->position, ops::kContextBucketTokens.back())));
+        }
         const auto round_start = Clock::now();
         const std::uint32_t limit = std::min(drafts, max_steps);
         std::uint32_t steps = limit;
@@ -2539,7 +2545,7 @@ struct Gemma4Core::Impl {
                          1099511628211ULL;
             }
             steps = std::clamp<std::uint32_t>(
-                mtp_controller->select(signals, available, room, cohort), 1, limit);
+                mtp_controller->select(signals, available, room, cohort, adaptive_context), 1, limit);
         }
         std::vector<TokenId> all_drafts(b * drafts);
         std::vector<std::uint32_t> draft_extents(b, steps);
@@ -2889,7 +2895,7 @@ struct Gemma4Core::Impl {
             const double round_seconds = seconds(round_start, Clock::now());
             if (lookups == 0) {
                 mtp_controller->observe_execution(static_cast<std::uint32_t>(b), steps,
-                                                  round_seconds);
+                                                  round_seconds, adaptive_context);
             }
             packed_planner.observe(static_cast<std::uint32_t>(verified_columns), round_seconds);
         }

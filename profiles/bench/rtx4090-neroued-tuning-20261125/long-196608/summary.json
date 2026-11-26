@@ -1,0 +1,10 @@
+{
+  "context": 196608,
+  "pairs": 2,
+  "baseline_decode": 198.7058791,
+  "candidate_decode": 204.8028676,
+  "decode_change_pct": 3.068348318436853,
+  "baseline_prefill": 2371.796833,
+  "candidate_prefill": 2368.6026845,
+  "prefill_change_pct": -0.1346720956684755
+}

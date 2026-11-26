@@ -1,0 +1,32 @@
+[
+  {
+    "context": 32768,
+    "pairs": 1,
+    "baseline_decode": 263.5380581,
+    "candidate_decode": 264.6338788,
+    "decode_change_pct": 0.41581117653382016,
+    "baseline_prefill": 3630.688897,
+    "candidate_prefill": 3633.95134,
+    "prefill_change_pct": 0.08985740977960344
+  },
+  {
+    "context": 65536,
+    "pairs": 1,
+    "baseline_decode": 243.8146787,
+    "candidate_decode": 249.9413102,
+    "decode_change_pct": 2.512823072288639,
+    "baseline_prefill": 3310.411943,
+    "candidate_prefill": 3312.164904,
+    "prefill_change_pct": 0.05295295661638111
+  },
+  {
+    "context": 131072,
+    "pairs": 1,
+    "baseline_decode": 210.9237231,
+    "candidate_decode": 227.2798197,
+    "decode_change_pct": 7.754507819040102,
+    "baseline_prefill": 2811.050043,
+    "candidate_prefill": 2809.684881,
+    "prefill_change_pct": -0.04856413009791671
+  }
+]

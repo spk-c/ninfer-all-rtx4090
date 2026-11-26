@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ninfer::runtime::prefix_cache {
@@ -316,6 +317,12 @@ public:
     // keeps its Host copy).
     [[nodiscard]] std::optional<std::uint32_t>
     acquire_device_slot(double claim = std::numeric_limits<double>::infinity());
+
+    // Reserve replacement storage without evicting the checkpoints that make
+    // the current input recoverable. The caller supersedes only after publish.
+    [[nodiscard]] std::optional<std::uint32_t>
+    acquire_replacement_slot(double claim, SnapshotRef resume, SnapshotRef tap);
+    [[nodiscard]] std::uint32_t supersession_hits(SnapshotRef snapshot, Supersession cause) const;
     // GDSF priority of a new snapshot at `frontier` whose nearest retained snapshot on its path
     // is at `base_frontier` and which alone keeps the blocks between them, carrying `hits` of its
     // lineage (§9.3).
@@ -584,5 +591,31 @@ struct HostRestorePlan {
                                                 std::span<const SavedSnapshotShape> snapshots,
                                                 std::uint64_t host_slabs,
                                                 const PrefixIndexConfig& config);
+
+// Protect a recovery source during an optional replacement transaction.
+class ScopedRecoveryPins {
+public:
+    ScopedRecoveryPins(PrefixCacheIndex& index, SnapshotRef resume, SnapshotRef tap)
+        : index_(index), resume_(index.valid(resume) ? resume : SnapshotRef{}),
+          tap_(tap != resume && index.valid(tap) ? tap : SnapshotRef{}) {
+        if (resume_.valid()) index_.pin_snapshot(resume_);
+        try {
+            if (tap_.valid()) index_.pin_snapshot(tap_);
+        } catch (...) {
+            if (resume_.valid()) index_.unpin_snapshot(resume_);
+            throw;
+        }
+    }
+    ScopedRecoveryPins(const ScopedRecoveryPins&) = delete;
+    ScopedRecoveryPins& operator=(const ScopedRecoveryPins&) = delete;
+    ~ScopedRecoveryPins() { release(); }
+    void release() {
+        if (tap_.valid()) index_.unpin_snapshot(std::exchange(tap_, {}));
+        if (resume_.valid()) index_.unpin_snapshot(std::exchange(resume_, {}));
+    }
+private:
+    PrefixCacheIndex& index_;
+    SnapshotRef resume_, tap_;
+};
 
 } // namespace ninfer::runtime::prefix_cache

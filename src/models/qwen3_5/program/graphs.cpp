@@ -1,7 +1,9 @@
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
+#include "models/qwen3_5/program/draft_attention_buckets.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
+#include "models/qwen3_5/program/startup_speculative_calibration.h"
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "runtime/contract/draft_sampling.h"
@@ -9,6 +11,10 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <chrono>
+#include <cstdlib>
+#include <cstdio>
+#include <string_view>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -62,18 +68,45 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
         family.topologies.emplace_back();
         DecodeGraphTopology& topology = family.topologies.back();
         topology.topology_class       = profile.topology_class;
-        topology.executable.instantiate(profile.definition);
-        topology.installed_profile = i;
+        install_decode_profile(topology, profile, i);
     }
 
     const auto install_and_upload = [&](DecodeGraphTopology& topology, std::size_t profile_index) {
         DecodeGraphProfile& profile = family.profiles[profile_index];
-        if (topology.installed_profile != profile_index) {
-            topology.executable.update(profile.definition);
-            topology.installed_profile = profile_index;
-        }
+        install_decode_profile(topology, profile, profile_index);
         topology.executable.upload(device.stream);
         device.synchronize();
+    };
+
+    std::size_t flat_profiles = 0, flat_sites = 0, flat_replays = 0, flat_fallbacks = 0;
+    const auto warm_flat = [&](DecodeGraphTopology& topology, DecodeGraphProfile& profile) {
+        if (!profile.flat_draft) return;
+        auto& flat = *profile.flat_draft;
+        ++flat_profiles;
+        flat_sites += flat.sites();
+        const auto range = flat.range();
+        range.for_each([&](auto bucket) {
+            if (flat.disabled()) return;
+            const auto index = static_cast<std::size_t>(bucket);
+            const auto first = index == 0 ? 0U : ops::kContextBucketTokens[index - 1] + 1U;
+            const auto frontier = std::max(first, profile.min_execution_frontier);
+            if (frontier > profile.max_execution_frontier ||
+                frontier > ops::context_bucket_tokens(bucket))
+                throw std::logic_error("flat draft warmup frontier outside profile");
+            flat.select(topology.executable, profile.definition, bucket);
+            if (flat.disabled()) return;
+            topology.executable.upload(device.stream);
+            device.synchronize();
+            prepare(profile, frontier);
+            device.synchronize();
+            topology.executable.launch(device.stream);
+            device.synchronize();
+            ++flat_replays;
+        });
+        flat.select(topology.executable, profile.definition, range.last);
+        topology.executable.upload(device.stream);
+        device.synchronize();
+        if (flat.disabled()) ++flat_fallbacks;
     };
 
     for (DecodeGraphTopology& topology : family.topologies) {
@@ -84,13 +117,19 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
                     first_profile = i;
                     install_and_upload(topology, i);
 
-                    prepare(family.profiles[i]);
-                    device.synchronize();
-                    topology.executable.launch(device.stream);
-                    device.synchronize();
+                    auto& profile = family.profiles[i];
+                    if (profile.flat_draft) {
+                        warm_flat(topology, profile);
+                    } else {
+                        prepare(profile, profile.min_execution_frontier);
+                        device.synchronize();
+                        topology.executable.launch(device.stream);
+                        device.synchronize();
+                    }
                     continue;
                 }
                 install_and_upload(topology, i);
+                warm_flat(topology, family.profiles[i]);
             }
         }
         if (!first_profile) {
@@ -100,6 +139,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
             install_and_upload(topology, *first_profile);
         }
     }
+    if (flat_profiles)
+        std::fprintf(stderr, "SM89 flat draft graph %s: %zu profiles, %zu sites, %zu startup replays, %zu fallbacks\n",
+                     label, flat_profiles, flat_sites, flat_replays, flat_fallbacks);
 }
 
 } // namespace
@@ -188,7 +230,9 @@ void ProgramImpl::prepare_graphs() {
             std::vector<DeviceKVPageHandle> pages;
             pages.reserve(batch_size);
             for (std::uint32_t row = 0; row < batch_size; ++row) {
-                pages.push_back(addresses.physical_page(allocations[row], 0));
+                const auto allocation = allocations.at(row);
+                for (std::uint32_t page = 0; page < addresses.mapped_pages(allocation); ++page)
+                    pages.push_back(addresses.physical_page(allocation, page));
             }
             cache.page_pool().zero_pages(pages, compute_streams);
         };
@@ -521,7 +565,7 @@ void ProgramImpl::prepare_graphs() {
             prepare_representative(code_warm.min, 1, family_window);
             device.synchronize();
             execution::dflash_decode_batch(dflash_state, 1, family_window,
-                                           dflash_envelopes(code_warm.min, code_warm.max),
+                                           dflash_envelopes(code_warm.min, code_warm.max, capacity),
                                            code_warm_target, nullptr);
             device.synchronize();
 
@@ -553,18 +597,44 @@ void ProgramImpl::prepare_graphs() {
                                capacity,
                                static_cast<std::uint64_t>(planned.max) + family_window + 1ULL))};
 
+                    // Do not disturb measured target-attention routes. Start with
+                    // neural, single-rank proposal readouts inside a target profile.
+                    const char* flat_flag = std::getenv("NINFER_SM89_FLAT_DRAFT_GRAPHS");
+                    if (!copy && !dflash->dspine && work.rank_count() == 1 &&
+                        draft_attention_buckets_enabled() && flat_flag &&
+                        std::string_view(flat_flag) == "1" &&
+                        planned.max <= ops::kContextBucketTokens.back()) {
+                        const ops::ContextBucketRange range{
+                            ops::select_context_bucket(planned.min),
+                            ops::select_context_bucket(planned.max)};
+                        if (range.first != range.last)
+                            profile.flat_draft = std::make_unique<FlatDraftGraph>(range);
+                    }
                     execution::capture_dflash_decode_batch(
                         dflash_state, static_cast<std::int32_t>(batch_size), family_window,
-                        dflash_envelopes(planned.min, planned.max), target_envelope,
-                        profile.definition);
+                        dflash_envelopes(planned.min, planned.max, capacity), target_envelope,
+                        profile.definition, profile.flat_draft.get());
+                    if (profile.flat_draft && !profile.flat_draft->ready())
+                        profile.flat_draft.reset();
                 }
             }
         }
     }
 
-    const auto prepare_profile = [&](const DecodeGraphProfile& profile) {
-        prepare_representative(profile.min_execution_frontier, profile.batch_size,
-                               profile.verify_window);
+    // Freeze the exact captured envelopes before the first decode. All four
+    // families use the same validated lookup contract.
+    for (auto* family : {&ordinary_graphs, &mtp_graphs, &dflash_graphs, &ngram_graphs}) {
+        std::vector<GraphProfileIndex::Entry> entries;
+        entries.reserve(family->profiles.size());
+        for (std::size_t i = 0; i < family->profiles.size(); ++i) {
+            const auto& p = family->profiles[i];
+            entries.push_back({p.batch_size, p.verify_window, p.min_execution_frontier,
+                               p.max_execution_frontier, p.topology_class, i});
+        }
+        family->index.build(std::move(entries), capacity - 1);
+    }
+    const auto prepare_profile = [&](const DecodeGraphProfile& profile, std::uint32_t frontier) {
+        prepare_representative(frontier, profile.batch_size, profile.verify_window);
     };
     if (!ordinary_graphs.profiles.empty()) {
         instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_profile);
@@ -577,6 +647,113 @@ void ProgramImpl::prepare_graphs() {
     }
     if (!ngram_graphs.profiles.empty()) {
         instantiate_graph_family(ngram_graphs, "ngram", device, prepare_profile);
+    }
+
+    // Opt-in until qualified on real-model workloads. By default these are
+    // short-context repeated-page priors. A second, independent opt-in uses
+    // distinct preallocated pages for bounded physical latency probes.
+    // Neither path infers acceptance from synthetic tokens.
+    const char* calibration = std::getenv("NINFER_SM89_STARTUP_CALIBRATION");
+    if ((mtp_controller || masked_controller) && calibration &&
+        std::string_view(calibration) == "1") {
+        auto& family = mtp_controller ? mtp_graphs : dflash_graphs;
+        std::vector<GraphProfileIndex::Entry> entries;
+        for (std::size_t i = 0; i < family.profiles.size(); ++i) {
+            const auto& p = family.profiles[i];
+            entries.push_back({p.batch_size, p.verify_window, p.min_execution_frontier,
+                               p.max_execution_frontier, p.topology_class, i});
+        }
+        const char* physical_flag = std::getenv("NINFER_SM89_PHYSICAL_STARTUP_CALIBRATION");
+        const bool physical = physical_flag && std::string_view(physical_flag) == "1";
+        const auto schedule = startup_speculative_probes(entries, capacity, max_concurrency, physical);
+        const auto can_back = [&](qwen3_5::PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                                  const std::vector<KVAddressSpaceHandle>& allocations,
+                                  const SpeculativeProbe& probe, std::uint32_t pages) {
+            std::vector<std::uint32_t> mapped;
+            for (auto allocation : allocations) mapped.push_back(addresses.mapped_pages(allocation));
+            if (!startup_physical_backing_fits(mapped, probe.batch, pages,
+                                               cache.page_pool().unpromised_free_pages(),
+                                               addresses.page_capacity()))
+                return false;
+            for (std::uint32_t row = 0; row < probe.batch; ++row)
+                if (mapped[row] < pages &&
+                    !addresses.can_resize_entitlement(allocations[row], pages)) return false;
+            return true;
+        };
+        const auto back = [&](KVAddressSpaceStore& addresses,
+                              const std::vector<KVAddressSpaceHandle>& allocations,
+                              const SpeculativeProbe& probe, std::uint32_t tokens,
+                              std::uint32_t pages) {
+            for (std::uint32_t row = 0; row < probe.batch; ++row) {
+                const auto allocation = allocations.at(row);
+                if (addresses.mapped_pages(allocation) >= pages) continue;
+                addresses.resize_entitlement(allocation, pages);
+                addresses.ensure_mapped_to_tokens(allocation, tokens, compute_streams);
+            }
+        };
+        const auto started = std::chrono::steady_clock::now();
+        std::size_t measured = 0, resource_skipped = 0;
+        for (const auto& probe : schedule) {
+            if (std::chrono::steady_clock::now() - started >
+                std::chrono::seconds(physical ? 5 : 3)) break;
+            if (physical) {
+                const auto tokens = probe.frontier + probe.window + 1U;
+                const auto page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+                const auto pages = (tokens + page_size - 1U) / page_size;
+                auto* backend = decoder->mtp_cache() != nullptr ? decoder->mtp_cache()
+                               : (dflash && dflash->full ? &*dflash->full : nullptr);
+                const auto& backend_allocations = decoder->mtp_cache() != nullptr
+                                               ? mtp_capture_allocations : dflash_capture_allocations;
+                if (!can_back(decoder->text_kv, *text_kv_addresses, text_capture_allocations,
+                              probe, pages) ||
+                    (backend && !can_back(*backend, *backend_kv_addresses, backend_allocations,
+                                          probe, pages))) {
+                    ++resource_skipped;
+                    continue;
+                }
+                back(*text_kv_addresses, text_capture_allocations, probe, tokens, pages);
+                if (backend) back(*backend_kv_addresses, backend_allocations, probe, tokens, pages);
+                device.synchronize();
+            }
+            const auto& entry = family.index.select(probe.batch, probe.window, probe.frontier);
+            auto& profile = family.profiles.at(entry.profile);
+            auto topology = std::ranges::find(family.topologies, entry.topology,
+                                               &DecodeGraphTopology::topology_class);
+            if (topology == family.topologies.end())
+                throw std::logic_error("calibration topology unavailable");
+            install_decode_profile(*topology, profile, entry.profile);
+            if (profile.flat_draft)
+                profile.flat_draft->select(topology->executable, profile.definition,
+                                           ops::select_context_bucket(probe.frontier));
+            topology->executable.upload(device.stream);
+            device.synchronize();
+            std::array<double, 3> samples{};
+            for (unsigned rep = 0; rep <= samples.size(); ++rep) {
+                prepare_representative(probe.frontier, probe.batch, probe.window);
+                // Unlike copy graph warmup, these probes represent neural rounds.
+                if (io.dflash_decode) {
+                    for (std::uint32_t row = 0; row < probe.batch; ++row)
+                        dflash_host_ingress->copy_rows[row] = 0;
+                }
+                device.synchronize();
+                const auto begin = std::chrono::steady_clock::now();
+                topology->executable.launch(device.stream);
+                device.synchronize();
+                if (rep) samples[rep-1] = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - begin).count();
+            }
+            std::ranges::sort(samples);
+            if (mtp_controller)
+                mtp_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
+            else
+                masked_controller->seed_cost(probe.batch, probe.window, samples[1], probe.frontier);
+            ++measured;
+        }
+        std::fprintf(stderr, "SM89 startup speculative calibration: %zu/%zu probes (%s; %zu resource skips)\n",
+                     measured, schedule.size(),
+                     physical ? "distinct physical KV pages, synthetic token latency priors"
+                              : "synthetic short-context latency priors",
+                     resource_skipped);
     }
 
     clear_stable_controls();

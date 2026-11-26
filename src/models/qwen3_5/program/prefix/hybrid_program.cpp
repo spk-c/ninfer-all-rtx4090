@@ -1282,6 +1282,7 @@ void ProgramImpl::hybrid_publish_pending(SequenceState& sequence, bool finishing
             continue;
         }
         lane.pending.erase(lane.pending.begin());
+        pc::ScopedRecoveryPins recovery_pins(index, lane.resume_snapshot, lane.tap_snapshot);
         std::optional<std::uint32_t> tail_id;
         if (tail != 0) {
             try {
@@ -1299,18 +1300,24 @@ void ProgramImpl::hybrid_publish_pending(SequenceState& sequence, bool finishing
         const std::span<const TokenId> tail_tokens(
             sequence.ledger.data() + static_cast<std::size_t>(full) * kBlock, tail);
         // publish_snapshot consumes the staging slot and the tail id on every outcome.
+        const auto inherited_hits = !lane.disposable && tap.frontier > lane.resume_frontier
+            ? std::max(lane.lineage_hits, index.supersession_hits(
+                  lane.resume_snapshot, tap.endpoint ? pc::Supersession::Endpoint
+                                                    : pc::Supersession::Resumed))
+            : lane.lineage_hits;
         const pc::PublishResult published = index.publish_snapshot(
             anchor, tap.frontier, tail_tokens, tail_id, tap.slot,
             tap.endpoint   ? pc::SnapshotKind::Endpoint
             : tap.boundary ? pc::SnapshotKind::Boundary
                            : pc::SnapshotKind::Tap,
-            lane.lineage_hits);
+            inherited_hits);
         if (!published.created) {
             (void)state_store->release(tap.image);
             ++counters.taps_skipped;
             continue;
         }
         hybrid_->attach_image(published.snapshot, tap.image);
+        recovery_pins.release();
         lane.deepest_snapshot = std::max(lane.deepest_snapshot, tap.frontier);
         ++(tap.endpoint ? counters.endpoints_created : counters.taps_created);
         lane.published.push_back(published.snapshot);
@@ -1318,7 +1325,10 @@ void ProgramImpl::hybrid_publish_pending(SequenceState& sequence, bool finishing
             // As the endpoint it stands for: it supersedes an endpoint the lane resumed from, and
             // leaves the prompt's own taps to a next turn that renders the reply again.
             hybrid_supersede_resume(lane, tap.frontier, pc::Supersession::Endpoint);
-        } else if (!tap.boundary) {
+        } else {
+            hybrid_supersede_resume(lane, tap.frontier, pc::Supersession::Resumed);
+        }
+        if (!tap.endpoint && !tap.boundary) {
             // A previous tap still pending when this one was captured is superseded here, before
             // the Host write below can take its slabs.
             hybrid_supersede_tap(lane, tap.frontier);
@@ -1339,10 +1349,9 @@ void ProgramImpl::hybrid_capture_tap(SequenceState& sequence, std::uint32_t fron
         ++counters.taps_skipped;
         return;
     }
-    hybrid_supersede_resume(lane, frontier, pc::Supersession::Resumed);
-    hybrid_supersede_tap(lane, frontier);
-    const std::optional<std::uint32_t> slot = index.acquire_device_slot(index.estimate_priority(
-        lane.last_capture, frontier, frontier % kBlock != 0, lane.lineage_hits));
+    const std::optional<std::uint32_t> slot = index.acquire_replacement_slot(index.estimate_priority(
+        lane.last_capture, frontier, frontier % kBlock != 0, lane.lineage_hits),
+        lane.resume_snapshot, lane.tap_snapshot);
     if (!slot) {
         ++counters.taps_skipped;
         return;
@@ -1382,8 +1391,9 @@ std::optional<HybridPendingTap> ProgramImpl::hybrid_hold_reserve(SequenceState& 
         return std::nullopt;
     }
     pc::PrefixCacheIndex& index             = hybrid_->index();
-    const std::optional<std::uint32_t> slot = index.acquire_device_slot(index.estimate_priority(
-        lane.deepest_snapshot, frontier, frontier % kBlock != 0, lane.lineage_hits));
+    const std::optional<std::uint32_t> slot = index.acquire_replacement_slot(index.estimate_priority(
+        lane.deepest_snapshot, frontier, frontier % kBlock != 0, lane.lineage_hits),
+        lane.resume_snapshot, lane.tap_snapshot);
     if (!slot) { return std::nullopt; }
     const std::optional<StateImageHandle> image = state_store->reserve_destination();
     if (!image) {
@@ -1561,8 +1571,9 @@ std::optional<HybridPendingTap> ProgramImpl::hybrid_in_pass_reserve(SequenceStat
         pc::inside_exclusion(frontier, lane.exclusions) || frontier <= lane.last_capture) {
         return std::nullopt;
     }
-    const std::optional<std::uint32_t> slot = index.acquire_device_slot(index.estimate_priority(
-        lane.last_capture, frontier, frontier % kBlock != 0, lane.lineage_hits));
+    const std::optional<std::uint32_t> slot = index.acquire_replacement_slot(index.estimate_priority(
+        lane.last_capture, frontier, frontier % kBlock != 0, lane.lineage_hits),
+        lane.resume_snapshot, lane.tap_snapshot);
     if (!slot) { return std::nullopt; }
     const std::optional<StateImageHandle> image = state_store->reserve_destination();
     if (!image) {
@@ -1575,8 +1586,6 @@ std::optional<HybridPendingTap> ProgramImpl::hybrid_in_pass_reserve(SequenceStat
 
 void ProgramImpl::hybrid_in_pass_keep(SequenceState& sequence, const HybridPendingTap& tap) {
     HybridLaneState& lane = hybrid_lanes_[sequence.lane];
-    hybrid_supersede_resume(lane, tap.frontier, pc::Supersession::Resumed);
-    hybrid_supersede_tap(lane, tap.frontier);
     state_store->publish_copied_checkpoint(tap.image);
     lane.pending.push_back(tap);
     lane.last_capture = tap.frontier;
@@ -1693,12 +1702,13 @@ bool ProgramImpl::hybrid_finish_lane(SequenceState& sequence, RequestControl& re
                 !sequence.state.fork_pending && sequence.state.read == sequence.state.write &&
                 state_store->role(sequence.state.write) == StateImageRole::ActiveMutable) {
                 pc::PrefixCacheIndex& index = hybrid_->index();
-                // An echoing client's lineage moves past the endpoint it resumed from here, so a
-                // slot it needs comes from its own lineage before another conversation's snapshot.
-                hybrid_supersede_resume(lane_state, frontier, pc::Supersession::Endpoint);
-                const std::optional<std::uint32_t> slot = index.acquire_device_slot(
+                // Keep the last usable recovery points until the replacement is published.
+                pc::ScopedRecoveryPins recovery_pins(index, lane_state.resume_snapshot,
+                                                       lane_state.tap_snapshot);
+                const std::optional<std::uint32_t> slot = index.acquire_replacement_slot(
                     index.estimate_priority(lane_state.deepest_snapshot, frontier,
-                                            frontier % kBlock != 0, lane_state.lineage_hits));
+                                            frontier % kBlock != 0, lane_state.lineage_hits),
+                    lane_state.resume_snapshot, lane_state.tap_snapshot);
                 if (slot) {
                     const std::uint32_t tail = frontier % kBlock;
                     std::optional<std::uint32_t> tail_id;
@@ -1728,15 +1738,21 @@ bool ProgramImpl::hybrid_finish_lane(SequenceState& sequence, RequestControl& re
                         tail);
                     const pc::NodeRef anchor =
                         anchor_blocks == 0 ? pc::NodeRef{} : lane_state.path[anchor_blocks - 1U];
+                    const auto inherited_hits = !lane_state.disposable &&
+                            frontier > lane_state.resume_frontier
+                        ? std::max(lane_state.lineage_hits, index.supersession_hits(
+                              lane_state.resume_snapshot, pc::Supersession::Endpoint))
+                        : lane_state.lineage_hits;
                     const pc::PublishResult published =
                         index.publish_snapshot(anchor, frontier, tail_tokens, tail_id, *slot,
-                                               pc::SnapshotKind::Endpoint, lane_state.lineage_hits);
+                                               pc::SnapshotKind::Endpoint, inherited_hits);
                     if (published.snapshot.valid()) {
                         lane_state.deepest_snapshot =
                             std::max(lane_state.deepest_snapshot, frontier);
                     }
                     if (published.created) {
                         hybrid_->attach_image(published.snapshot, image);
+                        recovery_pins.release();
                         image_moved    = true;
                         sequence.state = {};
                         ++hybrid_->counters().endpoints_created;

@@ -13,6 +13,8 @@ or against each other as a benchmark. [Send a report](#send-a-report) to add a c
 | RTX 4090, 24 GB | Windows | Swift Qwen3.8 GSQ-RCO IQ3_S | agent traffic with MTP 3, four lanes and the hybrid prefix cache | [RTX 4090: MTP 3](#rtx-4090-agent-traffic-with-mtp-3-and-the-hybrid-prefix-cache) |
 | RTX 4080 and RTX 4090 | Windows 11 | Qwen3.8-27B GSQ-RCO IQ3_S | Hermes Desktop | [RTX 4080 and 4090](#rtx-4080-and-rtx-4090-windows-11) |
 | RTX 5060 Ti, 16 GB, two and four | Linux | Qwen3.8-27B NVFP4 | `--tensor-parallel` prompts to 28.8K tokens, KV capacity | [RTX 5060 Ti](#rtx-5060-ti-two-and-four-cards) |
+| Tesla T10, 16 GB, two | Linux | Inkling 2 Mini UD-IQ4_XS | `--tensor-parallel` without peer access, retrieval prompts to 261,760 tokens, against llama.cpp | [Tesla T10](#tesla-t10-two-cards) |
+| RTX 3070 Ti, 8 GB | Windows 11 | Inkling 2 Mini UD-IQ4_XS | experts in host memory, the largest context with `rk4v4`, a 168K-token retrieval prompt | [RTX 3070 Ti](#rtx-3070-ti-windows-11) |
 
 ## RTX 5070 Ti, Windows 11
 
@@ -344,6 +346,83 @@ at 6,441 tok/s; engine and artifact differ, so the reporter does not read it as 
 3,165,475,648 bytes plus 1 GiB of automatic headroom against 4,204,920,832 bytes left after the
 weights. Four cards hold 262,144 tokens with `--kv-capacity auto`, with 7.16, 4.04, 4.33 and
 4.33 GiB of weights; the startup report lists 5.25 GiB free.
+
+## Tesla T10, two cards
+
+Reported by @uos1231234 in
+[iamwavecut/ninfer-all#436](https://github.com/iamwavecut/ninfer-all/issues/436), 23 November 2026.
+
+- Two Tesla T10 16 GB (`sm_75`) on PCIe Gen3 x16 under one host bridge, one NUMA node, without peer
+  access (`cudaDeviceCanAccessPeer` returns 0 both ways). Driver 615.71.09.
+- Ubuntu 22.04, Xeon E5-2686 v4 (36 threads), 31,924 MiB of RAM.
+- Release 2026-11-23.5 (`64dec86e`), the Linux x64 CUDA 13.4 package.
+- [WaveCut/Inkling-2-Mini-UD-IQ4_XS-NInfer-v3](https://huggingface.co/WaveCut/Inkling-2-Mini-UD-IQ4_XS-NInfer-v3/tree/50d6ad60cfcd170633ead778e3a09958fc1e7887),
+  `Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer` (16,494,910,976 bytes).
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1 \
+  ninfer-serve Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer --cuda-backend 13 \
+    --model-id inkling-2-mini --max-context 262144 --max-concurrency 1 --structured-output \
+    --devices 1,0 --tensor-parallel --tensor-split 1,3 \
+    --kv-dtype mxfp8 --prefill-chunk 2048 --default-max-tokens 32768 \
+    --spec dspark --draft-tokens 3 --adaptive-mtp --draft-min-p 0.5
+```
+
+`--tensor-parallel` divides the routed experts: the startup log gives the first device of `--devices`
+experts 0-31 and the second 32-127. The rows without drafts replace the last line with `--spec none`.
+
+Each row is one request to a loaded server through the native `/completion` stream: a filler corpus
+with one ledger ID at its start and one at its end, a grammar for the two IDs, greedy sampling, a
+256-token output budget and `cache_prompt: false`. First content is the time from the request to
+the first non-empty `content` event. Prefill and decode are the engine's `timings`; decode counts
+the model's thinking tokens (136 of 151 at 32K, 86 of 101 at the longer prompts). Every run
+evaluated the whole prompt with no cached tokens, stopped at EOS and returned both IDs. The runner
+script is in the issue.
+
+| Prompt tokens | Drafts | First content (s) | Prefill (tok/s) | Decode (tok/s) | Drafts accepted |
+|---:|---|---:|---:|---:|---:|
+| 32,768 | none | 35.60 | 1,017 | 44.1 | |
+| 32,768 | DSpark, adaptive | 34.52 | 1,013 | 71.6 | 100 / 138 |
+| 131,072 | none | 166.77 | 799 | 36.7 | |
+| 261,760 | none | 426.57 | 618 | 29.5 | |
+
+On the same host with the same 32,768 token IDs, llama.cpp with Unsloth's UD-Q4_K_M split by
+layers and an F16 KV cache reached first content in 98.21 s (prefill 334 tok/s), and a banded
+tensor-parallel llama.cpp configuration with IQ4_NL and an F16 KV cache in 111.87 s (293 tok/s).
+Their weights and KV formats differ from NInfer's. Visible-text throughput, latency percentiles and
+DSpark at 131K and 261K tokens were not measured.
+
+## RTX 3070 Ti, Windows 11
+
+Reported by @cedrik-fuoco in
+[iamwavecut/ninfer-all#451](https://github.com/iamwavecut/ninfer-all/issues/451) and
+[#467](https://github.com/iamwavecut/ninfer-all/pull/467), 24 November 2026.
+
+- RTX 3070 Ti 8 GB (`sm_86`), Windows 11 with the WDDM driver.
+- The change of #467 (`83e37de`), an `86` build with CUDA 12.9 and Visual Studio 2022 Build Tools
+  17.14 (MSVC 14.44.35207): `cmake -G Ninja -DCMAKE_CUDA_ARCHITECTURES=86` in vcpkg manifest mode.
+- `Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer`.
+
+```bat
+ninfer-serve Inkling-2-Mini-UD-IQ4_XS-ninfer-v3.ninfer --model-id inkling-2-mini ^
+  --host 127.0.0.1 --port 8094 --max-context 243200 --kv-dtype rk4v4 --expert-residency host
+```
+
+Under WDDM Inkling 2 runs its passes with host experts eagerly, without CUDA Graphs
+([Windows build](../build-windows.md#build)). The build measured here kept no memory free beside
+them; the merged change keeps 64 MiB free for kernels CUDA loads at their first launch, about 7,500
+tokens of `rk4v4` context (8.75 KiB a token) below the ceiling measured here.
+
+- **Largest context.** On the 128-token grid the largest `--max-context` that started was 243,200
+  tokens; 243,712 was refused. At 243,200 the server took 6.99 GiB and left 81 MiB of the card free.
+- **Decode.** 52.4 tok/s on a 512-token answer.
+- **Long prompt.** A 168,201-token prompt with a needle at half its depth: the answer named the
+  needle; prefill ran at 409 tok/s and decode at 20 to 33 tok/s.
+- **Same text.** A fixed prompt at temperature 0 (seed 1234, 512 tokens) gave the same text at
+  212,992 and 243,200 tokens of context, and the same text as a build without #467.
+
+The CPU, host memory, driver version and power limit are not in the report. Prefill and decode at
+other prompt lengths and the other KV formats were not measured.
 
 ## Send a report
 

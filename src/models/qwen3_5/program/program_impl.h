@@ -14,6 +14,8 @@
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
+#include "models/qwen3_5/program/graph_profile_index.h"
+#include "models/qwen3_5/program/flat_draft_graph.h"
 #include "models/qwen3_5/execution/expert_runtime.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/frontend/steering.h"
@@ -26,6 +28,7 @@
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix/hybrid_cache.h"
+#include "models/qwen3_5/program/prefix/capture_backing_pool.h"
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/shared_slot_release.h"
 #include "models/qwen3_5/program/planning/output_budget.h"
@@ -505,6 +508,7 @@ struct DecodeGraphProfile {
     // MTP: the drafts the round verifies; zero for the other families.
     std::uint32_t verify_window = 0;
     DecodeGraphDefinition definition;
+    std::unique_ptr<FlatDraftGraph> flat_draft;
 };
 
 struct DecodeGraphTopology {
@@ -516,7 +520,23 @@ struct DecodeGraphTopology {
 struct DecodeGraphFamily {
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
+    GraphProfileIndex index;
 };
+
+// A patch is valid only for the exact parent node handles. Switching to a
+// profile with recorded slices must instantiate that parent, not update a
+// graph executable still backed by a different definition.
+inline void install_decode_profile(DecodeGraphTopology& topology, DecodeGraphProfile& profile,
+                                   std::size_t index) {
+    if (topology.installed_profile == index && topology.executable.ready()) return;
+    if (!topology.executable.ready() || profile.flat_draft) {
+        topology.executable.instantiate(profile.definition);
+        if (profile.flat_draft) profile.flat_draft->reset_selection();
+    } else {
+        topology.executable.update(profile.definition);
+    }
+    topology.installed_profile = index;
+}
 
 // Target model continuation for one logical sequence. This state remains meaningful after the
 // request which produced it has finished, so it is deliberately separate from request lifecycle,
@@ -1168,6 +1188,8 @@ private:
         bool device = false;
         bool host   = false;
     };
+
+    CaptureBackingPool<qwen3_5::PrefixShortlistKey, PreparedCaptureBacking> capture_backings_;
 
     mutable std::uint32_t pressure_page_scratch_generation_ = 0;
     mutable std::vector<PressurePageScratchSlot> pressure_text_page_scratch_;

@@ -596,6 +596,39 @@ void test_tail_device_fill() {
     index.check_invariants();
 }
 
+void test_replacement_reserves_before_supersession() {
+    RecordingBackend backend;
+    PrefixCacheIndex index(small_config(0, 1), backend);
+    const auto tokens = make_tokens(128, 2);
+    const auto path = insert_sequence(index, backend, tokens);
+    const auto previous = publish_at(index, backend, path, tokens, 64, SnapshotKind::Tap);
+    require(!index.acquire_replacement_slot(std::numeric_limits<double>::infinity(),
+                                            previous, previous),
+            "replacement must not evict the only recovery point");
+    require(index.valid(previous) && !index.snapshot(previous).superseded &&
+            index.snapshot(previous).pins == 0,
+            "failed reservation changed the old checkpoint or leaked a pin");
+    index.check_invariants();
+
+    RecordingBackend backend2;
+    PrefixCacheIndex two(small_config(0, 2), backend2);
+    const auto path2 = insert_sequence(two, backend2, tokens);
+    const auto source = publish_at(two, backend2, path2, tokens, 64, SnapshotKind::Tap);
+    const auto slot = two.acquire_replacement_slot(0.0, source, {});
+    require(slot.has_value() && two.valid(source), "free replacement slot not reserved");
+    ScopedRecoveryPins pins(two, source, source);
+    require(two.snapshot(source).pins == 1, "duplicate recovery ref pinned twice");
+    const auto newer = two.publish_snapshot(path2[1], 128, {}, std::nullopt, *slot, SnapshotKind::Tap);
+    pins.release();
+    require(two.snapshot(source).pins == 0, "replacement publication leaked pin");
+    require(newer.created && !two.snapshot(source).superseded,
+            "publication must precede retirement");
+    two.supersede(source, Supersession::Resumed);
+    require(two.snapshot(source).superseded && two.valid(newer.snapshot),
+            "replacement did not retain the newer recovery point");
+    two.check_invariants();
+}
+
 void test_device_slots() {
     RecordingBackend backend;
     PrefixCacheIndex index(small_config(64, 1), backend);
@@ -1765,6 +1798,7 @@ int main() {
         test_backed_before_unbacked();
         test_host_dead_and_gdsf();
         test_device_slots();
+        test_replacement_reserves_before_supersession();
         test_supersession();
         test_lineage_under_pressure();
         test_questions_about_one_document();

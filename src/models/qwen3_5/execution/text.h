@@ -1,5 +1,6 @@
 #pragma once
 #include "models/qwen3_5/program/internal.h"
+#include "models/qwen3_5/program/flat_draft_graph.h"
 
 
 #include "core/arena.h"
@@ -140,6 +141,9 @@ public:
     ~TextContext();
 
     void set_expert_runtime(NativeExpertRuntime* experts) noexcept { experts_ = experts; }
+    void set_flat_target_readouts(detail::FlatDraftGraph* recorder) noexcept {
+        flat_target_readouts_ = recorder;
+    }
 
     TextContext(const TextContext&)            = delete;
     TextContext& operator=(const TextContext&) = delete;
@@ -448,6 +452,7 @@ private:
     NativeExpertRuntime* experts_ = nullptr;
     const TextConfig& config_;
     WorkspaceArena& work_;
+    detail::FlatDraftGraph* flat_target_readouts_ = nullptr;
     qwen3_5::PagedKVCacheView kv_;
     qwen3_5::PagedKVCacheView mtp_kv_;
     const qwen3_5::PagedKVCache* batch_text_kv_ = nullptr;

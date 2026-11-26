@@ -1,0 +1,32 @@
+[
+  {
+    "context": 32768,
+    "pairs": 1,
+    "baseline_decode": 259.1723866,
+    "candidate_decode": 279.7668973,
+    "decode_change_pct": 7.946259619002172,
+    "baseline_prefill": 3551.528421,
+    "candidate_prefill": 3559.408232,
+    "prefill_change_pct": 0.22187098245947112
+  },
+  {
+    "context": 65536,
+    "pairs": 1,
+    "baseline_decode": 239.4085673,
+    "candidate_decode": 253.5030583,
+    "decode_change_pct": 5.8872124581650365,
+    "baseline_prefill": 3230.953011,
+    "candidate_prefill": 3230.121217,
+    "prefill_change_pct": -0.02574454030028761
+  },
+  {
+    "context": 131072,
+    "pairs": 1,
+    "baseline_decode": 207.5674301,
+    "candidate_decode": 215.2859319,
+    "decode_change_pct": 3.718551506988099,
+    "baseline_prefill": 2731.070383,
+    "candidate_prefill": 2732.751568,
+    "prefill_change_pct": 0.06155773247238372
+  }
+]

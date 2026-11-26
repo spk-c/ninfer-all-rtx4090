@@ -5,7 +5,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${NINFER_DEVICE_P
 file(READ ${NINFER_DEVICE_PROFILES_FILE} _ninfer_profiles_rest)
 # MSVC rejects a string literal over 16,380 bytes (C2026) and adjacent literals that join to over
 # 65,535 (C1091), so the JSON goes in as an array of raw literals of at most 8 KiB, each ending on a
-# line boundary, which the generated function joins once.
+# line boundary, which the generated function joins once. Each part is an `sv` literal, whose
+# length the compiler already knows: with libstdc++, Clang measures a plain literal's characters one
+# step at a time and exceeds its constexpr step budget over the whole array.
 set(NINFER_DEVICE_PROFILES_PARTS "")
 string(LENGTH "${_ninfer_profiles_rest}" _ninfer_profiles_length)
 while(_ninfer_profiles_length GREATER 0)
@@ -21,16 +23,21 @@ while(_ninfer_profiles_length GREATER 0)
   string(SUBSTRING "${_ninfer_profiles_rest}" 0 ${_ninfer_profiles_cut} _ninfer_profiles_part)
   string(SUBSTRING "${_ninfer_profiles_rest}" ${_ninfer_profiles_cut} -1 _ninfer_profiles_rest)
   string(APPEND NINFER_DEVICE_PROFILES_PARTS
-         "            R\"ninfer_json(${_ninfer_profiles_part})ninfer_json\",\n")
+         "            R\"ninfer_json(${_ninfer_profiles_part})ninfer_json\"sv,\n")
   string(LENGTH "${_ninfer_profiles_rest}" _ninfer_profiles_length)
 endwhile()
 configure_file(engine/device_profiles_builtin.cpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/engine/device_profiles_builtin.cpp @ONLY)
 
+# The machine cost model is host-only and is also used by standalone calibration.
+add_library(ninfer_context_cost STATIC
+  engine/context_cache/context_cost.cpp
+  engine/context_cache/context_cost_defaults.cpp)
+ninfer_internal_includes(ninfer_context_cost)
+target_link_libraries(ninfer_context_cost PRIVATE ninfer::json)
+
 add_library(ninfer_runtime_support STATIC
   engine/admission_policy.cpp
-  engine/context_cache/context_cost.cpp
-  engine/context_cache/context_cost_defaults.cpp
   engine/device_profile.cpp
   engine/device_profile_build_id.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/engine/device_profiles_builtin.cpp
@@ -42,7 +49,7 @@ add_library(ninfer_runtime_support STATIC
   prefix_cache/tap_planner.cpp
 )
 ninfer_internal_includes(ninfer_runtime_support)
-target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core ninfer_ops PRIVATE ninfer::json)
+target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core ninfer_ops ninfer_context_cost PRIVATE ninfer::json)
 # Calibrated device profiles record the build id (engine/device_profile_build_id.cpp).
 ninfer_stamp_build_id(ninfer_runtime_support)
 
