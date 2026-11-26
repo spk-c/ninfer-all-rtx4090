@@ -1,0 +1,1 @@
+"use strict";(()=>{const filter=document.getElementById("bench-filter");if(!filter)return;const rows=[...document.querySelectorAll("#bench-rows tr")];filter.addEventListener("change",()=>{for(const r of rows)r.hidden=!!filter.value&&r.dataset.backend!==filter.value})})();
