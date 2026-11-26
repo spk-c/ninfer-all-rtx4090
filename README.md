@@ -1,4 +1,4 @@
-# NInfer-all RTX 4090 — Native CUDA LLM Inference
+# NInfer-all RTX 4090 — Local LLM Inference Engine for Windows & CUDA
 
 **Run local large language models on NVIDIA GeForce RTX 4090 (24 GB) with native Ada Lovelace SM89 CUDA kernels, a portable Windows build, and OpenAI-compatible serving.** An independently maintained C++/CUDA inference project derived from [NInfer-all](https://github.com/iamwavecut/ninfer-all), focused on reproducible inference performance, numerical correctness and long-context stability.
 
@@ -7,8 +7,14 @@
 [![CUDA 13.4](https://img.shields.io/badge/CUDA-13.4-76B900)](docs/rtx4090.md)
 [![Ada SM89](https://img.shields.io/badge/RTX%204090-SM89-76B900)](docs/rtx4090.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/spk-c/ninfer-all-rtx4090?style=flat)](https://github.com/spk-c/ninfer-all-rtx4090/stargazers)
+[![Release downloads](https://img.shields.io/github/downloads/spk-c/ninfer-all-rtx4090/total?label=release%20downloads)](https://github.com/spk-c/ninfer-all-rtx4090/releases)
 
-**[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [Upstream documentation](docs/README.md)
+**[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
+
+**Start with a portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
+
+If you use NInfer-all RTX 4090 or want to follow its development, consider starring the repository and sharing your own reproducible results. [Watch releases](https://github.com/spk-c/ninfer-all-rtx4090/releases) · [Report an issue or benchmark](https://github.com/spk-c/ninfer-all-rtx4090/issues/new/choose).
 
 ## Why NInfer-all RTX 4090?
 
@@ -102,11 +108,23 @@ The wrapper uses a separate `build-rtx4090` directory. Follow the [RTX 4090 guid
 
 For source-to-source comparisons, use matching weights, toolkit, driver, context, KV format, prompt and GPU conditions. See the [paired A/B workflow](docs/rtx4090.md#compare-current-upstream-against-this-rtx-4090-fork).
 
+## RTX 4090 local LLM FAQ
+
+**Can I run a 27B LLM locally on a 24 GB RTX 4090?** Yes, with a compatible quantized artifact and suitable memory settings. The published v0.1.3 package has a real-model smoke test on the Huihui Qwen3.8-27B IQ3_S DFlash2 artifact. Context size, vision, concurrent sequences and draft weights also consume VRAM. See the [verified setup](docs/releases/rtx4090-v0.1.3-gpu-verification.md).
+
+**Does NInfer support GGUF, DFlash2 and MTP?** NInfer uses converted `.ninfer` artifacts, including supported GGUF-derived quantizations. DFlash2 and MTP require compatible model and draft components. See [GGUF formats](docs/gguf.md), [speculative decoding options](docs/cli.md#speculative-decoding) and [model downloads](#supported-models).
+
+**Can I use a local OpenAI-compatible API for coding agents and chat clients?** Yes. Use the local base URL `http://127.0.0.1:8080/v1` and the served model ID. API features vary with the model and client; consult the [serving reference](docs/serving.md) for tool calls, structured output and supported endpoints.
+
+**How do I choose the context window, KV cache and draft count?** Start with the documented launcher defaults. Compare `rk4v4` and `rk8v4`, prefill chunk size and speculative draft width on your specific model before changing settings. [RTX 4090 tuning guide](docs/rtx4090.md) and [long-context evidence](docs/performance/rtx4090-long-context-ab-2026-11-25.md) explain the tradeoffs.
+
+**Is NInfer faster than llama.cpp, Ollama or vLLM?** No universal ranking is established by the published RTX 4090 evidence. NInfer is a separate native C++/CUDA engine, not a frontend for those runtimes. A fair comparison needs the same hardware, model, quantization, context, sampling settings and workload, and must report quality and memory as well as throughput.
+
 ## Upstream and contributions
 
 NInfer-all RTX 4090 is an independent repository with its own development, validation and release process. It retains the original NInfer-all Git history, multi-GPU engine, model support and documentation. Upstream changes can continue to be integrated through Git and validated against the RTX 4090 target. Credit goes to [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all), [Neroued/ninfer](https://github.com/Neroued/ninfer), [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) and all [contributors](CONTRIBUTORS.md). Licensed under [Apache-2.0](LICENSE); redistributed CUDA libraries have separate NVIDIA terms.
 
-Report reproducible RTX 4090 issues with your commit/version, driver, model artifact, launch flags and relevant logs in [GitHub Issues](https://github.com/spk-c/ninfer-all-rtx4090/issues). See [CONTRIBUTING.md](CONTRIBUTING.md).
+Report reproducible RTX 4090 issues with your commit/version, driver, model artifact, launch flags and relevant logs using the [issue templates](https://github.com/spk-c/ninfer-all-rtx4090/issues/new/choose). Independent performance results, including negative results, are welcome. Start an issue before proposing an implementation; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
