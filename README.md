@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/spk-c/ninfer-all-rtx4090?style=flat)](https://github.com/spk-c/ninfer-all-rtx4090/stargazers)
 [![Release downloads](https://img.shields.io/github/downloads/spk-c/ninfer-all-rtx4090/total?label=release%20downloads)](https://github.com/spk-c/ninfer-all-rtx4090/releases)
 
-**[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
+**[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Built-in Monitor](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
 
 **Start with a portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
 
@@ -814,7 +814,7 @@ docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -w / \
   vectors and the rank-one LoRA adapters that abliteration tools write, such as AtomicChat's for
   Ternary Bonsai 2 27B; a request sets adapter scales through llama.cpp's `lora` field
   ([LoRA adapters and control vectors](docs/serving.md#lora-adapters-and-control-vectors)).
-- `GET /stats` and a [monitoring dashboard](tools/monitor/README.md), request logs with rotation,
+- Built-in read-only [NInfer Monitor](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) at `/monitor` (GPU sensors, live token rates, KV occupancy, DFlash2 acceptance and request metadata), [monitoring documentation](docs/monitor-dashboard.md), optional [Python sidecar](tools/monitor/README.md), request logs with rotation,
   and llama.cpp's WebUI, built into the Linux packages and the Docker images.
 
 </details>

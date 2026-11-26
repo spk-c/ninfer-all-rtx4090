@@ -80,7 +80,20 @@ try {
   assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,"mobile horizontal overflow");
   await p.goto(base+"changelog.html");
   await p.waitForFunction(()=>document.querySelector("#release-list").textContent.includes("rtx4090-v9.0.0"));
-  for(const path of ["","configurator.html","configurator-de.html","models.html","search.html","benchmarks.html"]){
+  for(const path of ["monitor.html","monitor-de.html"]){
+    await p.goto(base+path);
+    assert.equal(await p.locator("main h1").textContent(),"NInfer Monitor");
+    assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,"monitor mobile overflow");
+    for(const src of ["monitor-desktop.png","monitor-mobile.png"]){
+      const shot=p.locator('main img[src="'+src+'"]');
+      await shot.scrollIntoViewIfNeeded();
+      await shot.evaluate(img=>img.decode());
+      assert.ok(await shot.evaluate(img=>img.naturalWidth>0));
+    }
+    assert.ok(await p.locator('main a[href="#open-monitor"]').count());
+    assert.match(await p.locator("#open-monitor").textContent(),/127\.0\.0\.1:8099\/monitor/);
+  }
+  for(const path of ["","configurator.html","configurator-de.html","models.html","search.html","benchmarks.html","monitor.html","monitor-de.html"]){
     await p.goto(base+path);
     await p.addScriptTag({path:axe});
     const result=await p.evaluate(async()=>await window.axe.run({runOnly:{type:"tag",values:["wcag2a","wcag2aa","wcag21a","wcag21aa"]}}));

@@ -55,7 +55,8 @@ for path in sorted(ROOT.glob("*.html")):
     check(parser.canonical == [expected], f"{path.name}: canonical mismatch")
     check(bool(parser.meta.get("description")), f"{path.name}: missing description")
     check("noindex" not in parser.meta.get("robots",""), f"{path.name}: blocked")
-    check(parser.meta.get("og:image") == BASE+"social-preview.png", f"{path.name}: missing social image")
+    expected_image = "monitor-desktop.png" if path.name in ("monitor.html","monitor-de.html") else "social-preview.png"
+    check(parser.meta.get("og:image") == BASE+expected_image, f"{path.name}: missing social image")
     check(parser.meta.get("twitter:card") == "summary_large_image", f"{path.name}: incorrect social card")
 
 for name,p in pages.items():
@@ -93,6 +94,13 @@ check(set(locs)==expected and len(locs)==len(expected), "sitemap mismatch")
 check(bool(pages["index.html"].meta.get("google-site-verification")), "Google verification missing")
 png=(ROOT/"social-preview.png").read_bytes()
 check(png[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(png[16:20],"big")==1200 and int.from_bytes(png[20:24],"big")==630,"social image format/dimensions")
+if "monitor.html" in pages or "monitor-de.html" in pages:
+    for name,w,h in [("monitor-desktop.png",1440,1200),("monitor-mobile.png",390,1600)]:
+        path=ROOT/name
+        check(path.is_file(), f"{name}: screenshot missing")
+        if path.is_file():
+            png=path.read_bytes()
+            check(png[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(png[16:20],"big")==w and int.from_bytes(png[20:24],"big")==h,f"{name}: screenshot format/dimensions")
 if errors:
     raise SystemExit("\n".join(errors))
 print(f"PASS: {len(expected)} indexable pages, local links, anchors, canonical URLs, sitemap, Google verification reciprocal hreflang and 1200x630 preview")
