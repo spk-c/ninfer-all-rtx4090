@@ -1,0 +1,26 @@
+name: Website SEO regression
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * *'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/website-seo.yml'
+      - 'scripts/check-website-seo.py'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+          persist-credentials: false
+      - name: Static SEO and local link checks
+        run: python3 scripts/check-website-seo.py site
+      - name: JavaScript syntax
+        run: node --check site/site.js
