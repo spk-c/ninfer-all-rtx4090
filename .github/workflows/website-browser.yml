@@ -8,12 +8,13 @@ on:
     paths:
       - '.github/workflows/website-browser.yml'
       - 'scripts/check-website-browser.mjs'
+      - 'scripts/check-website-lighthouse.mjs'
 permissions:
   contents: read
 jobs:
   browser:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -24,12 +25,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install --no-save --package-lock=false playwright@1.56.1
+      - run: npm install --no-save --package-lock=false playwright@1.56.1 axe-core@4.10.3 lighthouse@12.8.2
       - run: npx playwright install --with-deps chromium
       - name: Static SEO and syntax
         run: |
           python3 scripts/check-website-seo.py site
           node --check site/site.js
           node --check site/tools.js
-      - name: Browser interactions
+      - name: Browser interactions and accessibility
         run: node scripts/check-website-browser.mjs
+      - name: Lighthouse lab audit
+        run: node scripts/check-website-lighthouse.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: website-lighthouse
+          path: lighthouse-results/
+          if-no-files-found: ignore

@@ -1,7 +1,11 @@
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const axe = require.resolve("axe-core/axe.min.js");
+const count = [...readFileSync("site/sitemap.xml","utf8").matchAll(/<loc>/g)].length;
 
 const server = spawn("python3", ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "site"], {stdio:"ignore"});
 const base = "http://127.0.0.1:8765/";
@@ -29,6 +33,13 @@ try {
   assert.match(await p.locator("#start-command").textContent(),/--spec dflash2 --draft-tokens 5/);
   assert.match(await p.locator("#download-command").textContent(),/hf download SPK1337/);
   assert.match(await p.locator("#kv-estimate").textContent(),/0\.55 GiB/);
+  await p.locator("#context").fill("32769");
+  assert.match(await p.locator("#kv-estimate").textContent(),/32,832 rounded tokens/);
+  await p.locator("#context").fill("32768");
+  await p.locator("#concurrency").fill("2");
+  assert.match(await p.locator("#kv-estimate").textContent(),/1\.09 GiB/);
+  assert.match(await p.locator("#start-command").textContent(),/--kv-capacity 65536/);
+  await p.locator("#concurrency").fill("1");
   await p.locator("#model").selectOption("ptq");
   assert.equal(await p.locator("#spec").inputValue(),"mtp");
   assert.equal(await p.locator('#spec option[value="dflash2"]').count(),0);
@@ -60,7 +71,7 @@ try {
   await p.locator("#site-query").fill("DFlash2");
   await p.locator("#search-submit").click();
   await p.waitForFunction(()=>document.querySelectorAll("#search-results article").length>0);
-  assert.match(await p.locator("#search-status").textContent(),/24 loaded pages/);
+  assert.match(await p.locator("#search-status").textContent(),new RegExp(count+" loaded pages"));
   await p.locator("#site-query").fill("zzzz-nonexistent-9999");
   await p.locator("#search-submit").click();
   await p.waitForFunction(()=>document.querySelector("#search-status").textContent.startsWith("0 matches"));
@@ -69,6 +80,14 @@ try {
   assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,"mobile horizontal overflow");
   await p.goto(base+"changelog.html");
   await p.waitForFunction(()=>document.querySelector("#release-list").textContent.includes("rtx4090-v9.0.0"));
+  for(const path of ["","configurator.html","configurator-de.html","models.html","search.html","benchmarks.html"]){
+    await p.goto(base+path);
+    await p.addScriptTag({path:axe});
+    const result=await p.evaluate(async()=>await window.axe.run({runOnly:{type:"tag",values:["wcag2a","wcag2aa","wcag21a","wcag21aa"]}}));
+    const serious=result.violations.filter(v=>["critical","serious"].includes(v.impact));
+    console.log("axe",path||"/",JSON.stringify(result.violations.map(v=>({id:v.id,impact:v.impact,targets:v.nodes.map(n=>n.target)}))));
+    assert.deepEqual(serious.map(v=>v.id),[],`accessibility: ${path}`);
+  }
   assert.deepEqual(errors,[]);
   console.log("PASS: configurator, incompatible backend, invalid input, memory, clipboard, theme, German locale, model filter, full-text search, stars, releases and mobile width");
 } finally {
