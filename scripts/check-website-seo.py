@@ -14,11 +14,16 @@ class Page(HTMLParser):
         self.h1 = 0
         self.meta = {}
         self.canonical = []
+        self.alternates = {}
+        self.language = None
         self.links = []
         self.ids = []
         self.title_count = 0
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+        if tag == "html": self.language = a.get("lang")
+        if tag == "link" and a.get("rel") == "alternate" and a.get("hreflang"):
+            self.alternates[a["hreflang"]] = a.get("href")
         if tag == "h1": self.h1 += 1
         if tag == "title": self.title_count += 1
         if tag == "meta":
@@ -67,6 +72,20 @@ for name,p in pages.items():
         if u.fragment and dest in pages:
             check(unquote(u.fragment) in pages[dest].ids, f"{name}: missing fragment {raw}")
 
+url_to_page = {BASE + ("" if name == "index.html" else name): p for name,p in pages.items() if name != "404.html"}
+for name,p in pages.items():
+    if name == "404.html": continue
+    check(p.language in ("en", "de"), f"{name}: missing or invalid lang")
+    if p.language == "de":
+        check(bool(p.alternates), f"{name}: missing language alternatives")
+    if p.alternates:
+        check(set(p.alternates) == {"en", "de", "x-default"}, f"{name}: unexpected hreflang set")
+        check(p.alternates.get(p.language) in p.canonical, f"{name}: missing self-referencing hreflang")
+        check(p.alternates.get("x-default") == p.alternates.get("en"), f"{name}: invalid x-default")
+        for lang in ("en", "de"):
+            target = url_to_page.get(p.alternates.get(lang))
+            check(target is not None and target.language == lang and target.alternates == p.alternates, f"{name}: nonreciprocal or invalid {lang} hreflang")
+
 ns = {"s":"http://www.sitemaps.org/schemas/sitemap/0.9"}
 locs = [x.text for x in ET.parse(ROOT/"sitemap.xml").findall("s:url/s:loc", ns)]
 expected = {BASE + ("" if p=="index.html" else p) for p in pages if p!="404.html"}
@@ -76,4 +95,4 @@ png=(ROOT/"social-preview.png").read_bytes()
 check(png[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(png[16:20],"big")==1200 and int.from_bytes(png[20:24],"big")==630,"social image format/dimensions")
 if errors:
     raise SystemExit("\n".join(errors))
-print(f"PASS: {len(expected)} indexable pages, local links, anchors, canonical URLs, sitemap, Google verification and 1200x630 preview")
+print(f"PASS: {len(expected)} indexable pages, local links, anchors, canonical URLs, sitemap, Google verification reciprocal hreflang and 1200x630 preview")
