@@ -1,21 +1,88 @@
-# NInfer-all — RTX 4090 / Ada SM89 Focused Fork
+# NInfer-all RTX 4090 — Native CUDA LLM Inference
 
-> **SPK-C's RTX 4090-focused development fork** of [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all), retaining the upstream multi-GPU, multi-model inference engine while adding **native Ada `sm_89` build workflows, CUDA 13.4 tooling, GPU profiling, reproducible benchmarks, and opt-in kernel experiments**.
+**Run local large language models on NVIDIA GeForce RTX 4090 (24 GB) with native Ada Lovelace SM89 CUDA kernels, a portable Windows build, and OpenAI-compatible serving.** A C++/CUDA development fork of [NInfer-all](https://github.com/iamwavecut/ninfer-all), focused on reproducible inference performance, numerical correctness and long-context stability.
 
-[**RTX 4090 guide**](docs/rtx4090.md) · [**Build for SM89**](scripts/build-rtx4090.ps1) · [**Benchmark workflow**](scripts/benchmark-rtx4090.ps1) · [**Huihui IQ3_S / DFlash2 qualification**](docs/performance/rtx4090-huihui-iq3s-dflash2.md) · [**Official upstream**](https://github.com/iamwavecut/ninfer-all)
+[![Latest stable release](https://img.shields.io/github/v/release/spk-c/ninfer-all-rtx4090?label=stable%20release)](https://github.com/spk-c/ninfer-all-rtx4090/releases/latest)
+[![Windows release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml/badge.svg)](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml)
+[![CUDA 13.4](https://img.shields.io/badge/CUDA-13.4-76B900)](docs/rtx4090.md)
+[![Ada SM89](https://img.shields.io/badge/RTX%204090-SM89-76B900)](docs/rtx4090.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-## RTX 4090 development focus
+**[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [Upstream documentation](docs/README.md)
 
-| Area | What this fork provides |
+## Why this fork?
+
+| Area | RTX 4090 focus |
 | --- | --- |
-| **Target GPU** | GeForce RTX 4090, **24 GB**, Ada Lovelace, compute capability **8.9 / SM89** |
-| **CUDA build** | Dedicated Windows `sm_89` wrapper, defaulting to **CUDA 13.4**, without changing upstream's default target |
-| **Device calibration** | Per-GPU route calibration and repeatable device-profile workflows |
-| **Inference experiments** | GGUF IQ3_S / IQ4_XS profiling, DFlash2 / MTP tuning, KV-cache and prefill investigations |
-| **Verification** | Public-Engine A/B benchmarks, regression tests, numerical audits and retained performance evidence |
-| **Experimental kernels** | Optional SFU, BF16x8 SiLU and GGUF IQ3_S candidates, **disabled by default** pending stable whole-Engine gains |
+| Native GPU target | Ada Lovelace, compute capability 8.9, native `sm_89` Windows x64 builds with CUDA 13.4 |
+| Local LLM serving | OpenAI- and Anthropic-compatible APIs, CLI and model-specific launch profiles |
+| Model families | Qwen3.5/3.6/3.8, Flash-Next, Ternary Bonsai 2/2.5, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 via upstream |
+| Speculative decoding | DFlash2, MTP and other model-dependent draft backends; measured draft-width and prefill tuning |
+| Quantization and memory | GGUF conversion, IQ3_S/IQ4_XS, quantized KV cache, hybrid prefix caching and model-dependent host/disk expert residency |
+| Engineering | Device calibration, CUDA Graph experiments, regression tests, raw benchmark evidence and reproducible builds |
 
-**Start here on Windows (PowerShell):**
+Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated on this fork. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
+
+## Get started on Windows
+
+1. Download the **[latest stable Windows release](https://github.com/spk-c/ninfer-all-rtx4090/releases/latest)** (CUDA 13.4 / SM89). Prereleases are listed separately on the [releases page](https://github.com/spk-c/ninfer-all-rtx4090/releases).
+2. Download every `.7z.*` volume and its SHA-256 manifest. Verify the checksums, then extract `.7z.001` using 7-Zip. Keep the backend directories intact.
+3. Install a compatible NVIDIA driver and Microsoft Visual C++ 2022 runtime. The portable package does not require the CUDA Toolkit.
+4. In the extracted directory, download and run a supported model:
+
+```powershell
+.\download-model.bat qwen38-27b
+.\run.bat qwen38-27b
+```
+
+The launcher serves a local API at `http://127.0.0.1:8080/v1`. Model weights are downloaded separately; the archive does not contain them.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/v1/models
+```
+
+Use a model ID returned by this endpoint in your OpenAI-compatible client. The launcher can reduce its context when memory is insufficient. Keep the server bound to localhost unless you configure appropriate authentication and network access controls.
+
+See the [Windows archive guide](docs/release-archive-windows.md), [CLI options](docs/cli.md) and [launch recipes](docs/recipes.md).
+
+## RTX 4090 benchmarks
+
+### Real-world serving
+
+[Huihui Qwen3.8-27B GSQ-RCO IQ3_S Vision + DFlash2 + MTP](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer), RTX 4090, CUDA 13.4, DFlash2 K=5:
+
+| Metric | Observed |
+| --- | ---: |
+| Completed requests | 1,831 |
+| Median decode throughput | 146.6 tok/s |
+| P90 decode throughput | 215.5 tok/s |
+| Median long-prefill throughput (316 requests) | 2,345 tok/s |
+
+[Serving-log methodology and limitations](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer/blob/main/BENCHMARK-RTX4090.md). These are observed per-request rates, not a controlled fork-versus-upstream comparison or guaranteed throughput.
+
+### Controlled long-context development tests (November 2026)
+
+Five-arm follow-up, candidate `859d76b7` with **default settings**, versus v0.1.3; same Huihui model and repeated corpus, 512 decode tokens, two repetitions per arm:
+
+| Context | v0.1.3 decode | Candidate decode | Delta |
+| ---: | ---: | ---: | ---: |
+| 32K | 262.78 tok/s | 260.46 tok/s | -0.88% |
+| 64K | 245.67 tok/s | 250.22 tok/s | +1.85% |
+| 128K | 214.29 tok/s | 220.86 tok/s | +3.07% |
+
+A subsequent development candidate (`2d37ef0a`) recorded +1.89% at 176,128 and +3.07% at 196,608 context in two-pair tests. The earlier 128-token decode campaign showed regressions; neither result establishes a general speedup or qualifies the v0.1.4 release binary.
+
+[Full long-context report](docs/performance/rtx4090-long-context-ab-2026-11-25.md) · [Raw five-arm results](profiles/bench/rtx4090-neroued-factorial-20261125) · [Tuning results](profiles/bench/rtx4090-neroued-tuning-20261125) · [Huihui qualification](docs/performance/rtx4090-huihui-iq3s-dflash2.md)
+
+## Release and development status
+
+- **v0.1.3:** published portable Windows archive verified on a real RTX 4090 with two successful real-model smoke requests. [Verification evidence](docs/releases/rtx4090-v0.1.3-gpu-verification.md).
+- **v0.1.4:** [tagged development snapshot](https://github.com/spk-c/ninfer-all-rtx4090/tree/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
+- Experimental graph, recovery and arithmetic paths remain opt-in. A successful hosted build is not real-GPU validation; a prerelease requires independent hardware qualification before stable promotion.
+
+## Build from source (Windows)
+
+Requirements: Visual Studio 2022 C++ Build Tools, CMake, Ninja, CUDA 13.4, a compatible NVIDIA driver and the documented project dependencies.
 
 ```powershell
 git clone https://github.com/spk-c/ninfer-all-rtx4090.git
@@ -24,15 +91,22 @@ cd ninfer-all-rtx4090
 .\build-rtx4090\apps\ninfer-calibrate.exe --device 0 --detail
 ```
 
-Build requirements and calibration/benchmark instructions: [docs/rtx4090.md](docs/rtx4090.md). The build script uses a separate `build-rtx4090` directory. You still need a compatible `.ninfer` model artifact to run inference.
+The wrapper uses a separate `build-rtx4090` directory. Follow the [RTX 4090 guide](docs/rtx4090.md) for dependency setup and alternate toolkit versions.
 
-### Benchmarked model: Huihui Qwen3.8 27B
+### Reproduce benchmarks
 
-An RTX 4090 / CUDA 13.4 deployment of the [Huihui Qwen3.8 27B GSQ-RCO IQ3_S, Vision + DFlash2 + MTP NInfer artifact](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer) recorded **1,831 completed requests**, a **146.6 tokens/s median decode rate** and **215.5 tokens/s P90** using **DFlash2 (five draft tokens)**. See the [measurement methodology](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Uncensored-GSQ-RCO-IQ3S-Vision-DFlash2-MTP-NInfer/blob/main/BENCHMARK-RTX4090.md).
+```powershell
+.\scripts\benchmark-rtx4090.ps1 -Model 'C:\models\model.ninfer' -Preset smoke
+.\scripts\benchmark-rtx4090.ps1 -Model 'C:\models\model.ninfer' -Preset core
+```
 
-**Interpretation:** Those numbers are from a real-world model-serving log, **not** an upstream-vs-fork A/B benchmark, an end-to-end throughput claim, or a guaranteed speedup. The [RTX 4090 investigation](docs/rtx4090.md) explicitly records experiments that **did not** establish a stable production gain; experimental CUDA paths remain opt-in. This fork focuses on **measurable, reproducible tuning**, not unverified speedup claims.
+For source-to-source comparisons, use matching weights, toolkit, driver, context, KV format, prompt and GPU conditions. See the [paired A/B workflow](docs/rtx4090.md#compare-current-upstream-against-this-rtx-4090-fork).
 
-**Upstream attribution:** NInfer-all is maintained by [iamwavecut](https://github.com/iamwavecut/ninfer-all) and builds on [NInfer](https://github.com/Neroued/ninfer) and many contributors. The original project overview, multi-GPU support, build instructions, examples and credits are preserved below. See [CONTRIBUTORS.md](CONTRIBUTORS.md) and [LICENSE](LICENSE).
+## Upstream and contributions
+
+This fork retains NInfer-all's multi-GPU engine, model support and documentation. Credit goes to [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all), [Neroued/ninfer](https://github.com/Neroued/ninfer), [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) and all [contributors](CONTRIBUTORS.md). Licensed under [Apache-2.0](LICENSE); redistributed CUDA libraries have separate NVIDIA terms.
+
+Report reproducible RTX 4090 issues with your commit/version, driver, model artifact, launch flags and relevant logs in [GitHub Issues](https://github.com/spk-c/ninfer-all-rtx4090/issues). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
