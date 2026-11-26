@@ -13,7 +13,7 @@ inline std::string_view monitor_dashboard_html() noexcept {
 header,.row,.controls{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 h1{font-size:27px;margin:0}h2{font-size:15px;margin:0 0 13px}.muted,small{color:#94a8b4}
 .controls{justify-content:flex-start;margin:18px 0 10px}label{font-size:12px;color:#a8b9c0;display:flex;gap:8px;align-items:center}
-input{background:#111c23;border:1px solid #3a515e;color:#ecf3f6;border-radius:8px;padding:8px;font:inherit;max-width:160px}
+input,select,textarea{background:#111c23;border:1px solid #3a515e;color:#ecf3f6;border-radius:8px;padding:8px;font:inherit;max-width:160px}
 button{background:#244e40;border:1px solid #349b72;color:#affad8;border-radius:8px;padding:9px 14px;cursor:pointer}
 .pill{border:1px solid #3d5260;border-radius:18px;padding:4px 11px;color:#bdc9d2;font-size:12px}
 .ok{color:#51dda8;border-color:#31916e}.bad{color:#ff9d92;border-color:#aa5047}
@@ -30,14 +30,15 @@ th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #2a3d48}th{color:
 .scroll{overflow:auto}#message{min-height:27px;color:#a8b9c3}.note{color:#91a6b2;font-size:12px}
 @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){.grid{grid-template-columns:1fr}.wide{grid-column:span 1}main{padding:0 12px}.value{font-size:23px}}
+textarea{width:100%;max-width:none;min-height:88px;resize:vertical}.controls input{min-width:0}button:disabled{opacity:.5;cursor:default}.chat-log{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;border:1px solid #293b44;padding:12px;border-radius:8px}.chat-log p{margin:8px 0}.chat-log strong{color:#4bdfae}.full{grid-column:1/-1}.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.tools label{flex-wrap:wrap}.tools input[type=checkbox]{width:auto}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #6be4bd;outline-offset:2px}.scroll:focus-visible{outline:2px solid #6be4bd}@media(max-width:520px){label{flex-wrap:wrap}.controls label input{max-width:145px}}
 </style></head><body><main>
 <header><div><h1>NInfer <span class="green">Monitor</span></h1><div class="muted" id="model">Connecting to model…</div></div>
-<div><span class="pill" id="state">Connecting</span> <span class="pill">Read-only</span></div></header>
+<div><span class="pill" id="state">Connecting</span> <span class="pill">Telemetry read-only</span></div></header>
 <div class="controls">
 <label>API key <input type="password" id="key" placeholder="If enabled" autocomplete="off"></label>
 <label>Model <input id="selectedModel" placeholder="Auto / model id"></label>
 <label>GPU <input id="gpuIndex" type="number" min="0" max="7" value="0" style="width:58px"></label>
-<button id="refresh">Refresh</button><small>Auto-refresh: 3 seconds</small>
+<button id="refresh">Refresh</button><label>Language <select id="lang"><option value="en">English</option><option value="de">Deutsch</option></select></label><small>Auto-refresh: 3 seconds</small>
 </div><div id="message" role="status" aria-live="polite"></div>
 <div class="grid">
 <div class="card"><div class="label">Decode now</div><div class="value green" id="decode">–</div><small>tokens/s (last interval)</small></div>
@@ -49,7 +50,15 @@ th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #2a3d48}th{color:
 <div class="card"><div class="label">Running / waiting</div><div class="value" id="requests">–</div><small id="admitted">requests</small></div>
 <div class="card"><div class="label">DFlash2 acceptance</div><div class="value" id="draft">–</div><small>last 50 requests · model drafts only</small></div>
 </div>
-<div class="grid section">
+<div class="grid section"><div class="card"><div class="label">Average decode</div><div class="value" id="avgDecode">–</div><small>tokens/s · engine execution</small></div>
+<div class="card"><div class="label">Average prefill</div><div class="value" id="avgPrefill">–</div><small>tokens/s · engine execution</small></div>
+<div class="card"><div class="label">MTP acceptance</div><div class="value" id="mtp">–</div><small>last 50 requests · model drafts only</small></div>
+<div class="card"><div class="label">Median TTFT</div><div class="value" id="ttft">–</div><small>ms · successful requests</small></div>
+<div class="card"><div class="label">Host CPU</div><div class="value" id="cpu">–</div><small>% · system-wide</small></div>
+<div class="card"><div class="label">Host RAM</div><div class="value" id="ram">–</div><small>GiB · system-wide</small></div>
+<div class="card"><div class="label">GPU graphics clock</div><div class="value" id="gpuClock">–</div><small>MHz · NVIDIA NVML</small></div>
+<div class="card"><div class="label">GPU memory clock</div><div class="value" id="memClock">–</div><small>MHz · NVIDIA NVML</small></div></div>
+<div class="grid section"><section class="card full"><h2>Request latency (last 50)</h2><div class="scroll" tabindex="0" role="region" aria-label="Latency percentiles"><table><thead><tr><th>Metric</th><th>P50</th><th>P95</th><th>P99</th><th>Samples</th></tr></thead><tbody><tr><th>TTFT (ms)</th><td id="ttft50">–</td><td id="ttft95">–</td><td id="ttft99">–</td><td id="ttftN">0</td></tr><tr><th>Total duration (ms)</th><td id="lat50">–</td><td id="lat95">–</td><td id="lat99">–</td><td id="latN">0</td></tr></tbody></table></div><p class="note">Nearest-rank percentiles of successful recorded events; small samples are not a benchmark. TTFT excludes requests without generated tokens. Router request events span models unless a model is selected.</p></section>
 <section class="card wide"><h2>Live token throughput</h2><canvas id="rates" role="img" aria-label="Recent prefill and decode throughput"></canvas>
 <div class="legend"><span><i class="dot" style="background:#49dcaa"></i>Decode</span><span><i class="dot" style="background:#59acfa"></i>Prefill</span></div></section>
 <section class="card wide"><h2>GPU utilization / temperature</h2><canvas id="gpuChart" role="img" aria-label="Recent GPU utilization and temperature"></canvas>
@@ -63,26 +72,30 @@ th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #2a3d48}th{color:
 <div class="row"><span class="muted">Reused prompt tokens</span><strong id="reused">–</strong></div>
 <div class="row"><span class="muted">Uptime</span><strong id="uptime">–</strong></div></section>
 <section class="card" style="grid-column:1/-1"><h2>Recent requests (last 50)</h2><div class="scroll">
-<table><thead><tr><th>Time</th><th>Status</th><th>Prompt</th><th>Cached</th><th>Output</th><th>Decode tok/s</th><th>Total duration</th></tr></thead>
-<tbody id="recentRequests"><tr><td colspan="7">No requests recorded</td></tr></tbody></table></div>
+<table><thead><tr><th>Time</th><th>Status</th><th>Prompt</th><th>Cached</th><th>Output</th><th>Decode tok/s</th><th>TTFT (ms)</th><th>Total duration</th></tr></thead>
+<tbody id="recentRequests"><tr><td colspan="8">No requests recorded</td></tr></tbody></table></div>
 <p class="note">Metadata only: no prompts or generated text are stored. History resets when the server restarts.</p>
 </section>
 <section class="card" style="grid-column:1/-1"><h2>Recent activity (aggregate samples)</h2><div class="scroll">
 <table><thead><tr><th>Time</th><th>Completed Δ</th><th>Decode Δ</th><th>Prefill Δ</th><th>Running</th><th>Waiting</th></tr></thead>
 <tbody id="activity"><tr><td colspan="6">Waiting for samples…</td></tr></tbody></table></div>
-<p class="note">Data is stored only in this tab (120 samples). The optional Python sidecar tools/monitor/monitor.py provides full per-request JSONL logs, CPU/RAM and further sensor metrics.</p>
-</section></div></main>
+<p class="note">Live charts keep 120 samples in this tab. The optional Python sidecar provides full per-request JSONL logs and further metrics.</p>
+</section>
+<section class="card full"><h2>Export and optional history</h2><div class="tools"><button id="jsonExport">Export JSON</button><button id="csvExport">Export CSV</button><label><input id="persist" type="checkbox"> Keep local numeric history (max 500 samples)</label><button id="clearHistory">Clear saved history</button></div><p class="note" id="historyStatus" role="status"></p><p class="note">Off by default. Opt-in stores only numeric telemetry in this browser and origin, across server restarts. No API keys, model names, request text or chat history. Exports include only numeric telemetry; no prompts or answers. Clear history deletes the saved samples.</p></section>
+<section class="card full"><h2>Test chat</h2><p class="note">Sending a message runs inference on this server. Chat stays in this tab; it is not part of telemetry exports. Choose an exact model ID and keep prompts within the model context.</p><div class="tools"><label>Chat model <input id="chatModel" placeholder="Auto / model id" maxlength="256"></label><label>Max output tokens <input id="chatMax" type="number" min="1" max="4096" value="256" style="width:92px"></label><button id="chatReset">Clear chat</button></div><div id="chatLog" class="chat-log" role="log" aria-live="polite"></div><label for="chatInput">Message</label><textarea id="chatInput" maxlength="32000" placeholder="Enter a message"></textarea><div class="tools"><button id="chatSend">Send</button><button id="chatStop" disabled>Cancel request</button><span id="chatStatus" role="status"></span></div></section>
+</div></main>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-const samples=[];let prev=null,polling=false;
+const samples=[];let prev=null,polling=false,lastModel='',selectionEpoch=0;
+let locale='en',history=[],persist=false,chat=[],chatAbort=null,chatEpoch=0,chatIdentity='';
 const n=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
-const format=v=>v===null||v===undefined?'–':Number(v).toLocaleString(undefined,{maximumFractionDigits:1});
+const format=v=>v===null||v===undefined?'–':Number(v).toLocaleString(locale==='de'?'de-DE':'en-US',{maximumFractionDigits:1});
 const txt=(id,v)=>{$(id).textContent=v};
 const count=(obj,key)=>n(obj?.[key])||0;
-async function fetchApi(url){
- const headers={};const key=$('key').value;if(key)headers.Authorization='Bearer '+key;
- const response=await fetch(url,{headers,cache:'no-store'});
+async function fetchApi(url,options={}){
+ const headers={...(options.headers||{})};const key=$('key').value;if(key)headers.Authorization='Bearer '+key;
+ const response=await fetch(url,{...options,headers,cache:'no-store',credentials:'same-origin',redirect:'error'});
  if(!response.ok)throw Error('HTTP '+response.status+(response.status===401?' — API key required':''));
  return response;
 }
@@ -126,7 +139,7 @@ function requestRows(events){
  const body=$('recentRequests');body.replaceChildren();
  if(!Array.isArray(events)||!events.length){
   const tr=document.createElement('tr'),td=document.createElement('td');
-  td.colSpan=7;td.textContent='No requests recorded';tr.appendChild(td);body.appendChild(tr);return;
+  td.colSpan=8;td.textContent=tr('No requests recorded');tr.appendChild(td);body.appendChild(tr);return;
  }
  for(const event of events){
   const tr=document.createElement('tr');
@@ -134,9 +147,10 @@ function requestRows(events){
    (event.output_tokens-1)/event.decode_seconds:null;
   const cells=[new Date(event.time_unix_ms).toLocaleTimeString(),event.status,
    event.prompt_tokens,event.cached_tokens,event.output_tokens,decodeRate,
+   n(event.ttft_seconds)!==null&&n(event.ttft_seconds)>0&&n(event.output_tokens)>0?format(event.ttft_seconds*1000):'–',
    n(event.total_seconds)!==null?format(event.total_seconds)+' s':'–'];
   for(const v of cells){const td=document.createElement('td');
-   td.textContent=typeof v==='string'?v:format(v);tr.appendChild(td)}
+   td.textContent=typeof v==='string'?tr(v):format(v);tr.appendChild(td)}
   body.appendChild(tr);
  }
 }
@@ -151,18 +165,22 @@ function activity(){
 }
 async function refresh(){
  if(polling||document.hidden)return;
- polling=true;
+ polling=true;const epoch=selectionEpoch;
  try{
   const model=$('selectedModel').value.trim();
   const query=model?'?model='+encodeURIComponent(model):'';
   const results=await Promise.all([
     fetchApi('/stats'+query),fetchApi('/metrics'+query),fetchApi('/monitor/requests')]);
   const stats=await results[0].json(),metrics=metricMap(await results[1].text());
-  const recent=await results[2].json();
+  const allRecent=await results[2].json();
+  const recent=Array.isArray(allRecent)?allRecent.filter(e=>!model||e.model===model):[];
+  let system={};try{system=await(await fetchApi('/monitor/system')).json()}catch{}
+  
   let gpu={available:false};
   try{const idx=Math.min(7,Math.max(0,Number($('gpuIndex').value)||0));
     gpu=await(await fetchApi('/monitor/gpu?index='+idx)).json();
   }catch(e){/* GPU telemetry is optional. */}
+  if(epoch!==selectionEpoch)return;
   const now=performance.now();
   const curr={time:Date.now(),uptime:stats.uptime_seconds,model:stats.model,
    prefill:count(stats.counters,'computed_prefill_tokens'),decode:count(stats.counters,'committed_decode_tokens'),
@@ -176,14 +194,28 @@ async function refresh(){
     if(curr.completed>=prev.completed)completeDelta=curr.completed-prev.completed;
   }else if(prev){samples.length=0}
   prev={...curr,mono:now};
-  txt('model',(stats.model||'Unknown model')+' · '+format(stats.capacity?.max_context)+' max context');
+  lastModel=typeof stats.model==='string'?stats.model:'';
+  txt('model',(stats.model||tr('Unknown model'))+' · '+format(stats.capacity?.max_context)+' '+tr('max context'));
   txt('decode',format(decodeRate));txt('prefill',format(prefillRate));
   txt('requests',format(curr.running)+' / '+format(curr.waiting));
-  txt('admitted',format(stats.requests?.admitted||0)+' admitted');
+  txt('admitted',format(stats.requests?.admitted||0)+' '+tr('admitted'));
   const dflash=recent.filter(e=>typeof e.drafter==='string'&&e.drafter.toLowerCase()==='dflash2');
   const drafted=dflash.reduce((sum,e)=>sum+count(e,'drafted_tokens'),0);
   const accepted=dflash.reduce((sum,e)=>sum+count(e,'accepted_tokens'),0);
   txt('draft',drafted?format(accepted/drafted*100)+' %':'–');
+  const mtp=recent.filter(e=>typeof e.drafter==='string'&&e.drafter.toLowerCase()==='mtp');
+  const mDraft=mtp.reduce((s,e)=>s+count(e,'drafted_tokens'),0),mAccepted=mtp.reduce((s,e)=>s+count(e,'accepted_tokens'),0);
+  txt('mtp',mDraft?format(mAccepted/mDraft*100)+' %':'–');
+  txt('avgDecode',format(n(metrics['llamacpp:predicted_tokens_seconds'])));
+  txt('avgPrefill',format(n(metrics['llamacpp:prompt_tokens_seconds'])));
+  const completed=recent.filter(e=>e.status==='completed');
+  const ttfts=completed.filter(e=>n(e.output_tokens)>0&&n(e.ttft_seconds)>0).map(e=>e.ttft_seconds*1000);
+  const totals=completed.filter(e=>n(e.total_seconds)>0).map(e=>e.total_seconds*1000);
+  const summary=(prefix,values)=>{for(const p of [50,95,99])txt(prefix+p,format(percentile(values,p)));txt(prefix+'N',String(values.length))};
+  summary('ttft',ttfts);summary('lat',totals);txt('ttft',format(percentile(ttfts,50)));
+  txt('cpu',n(system.cpu_pct)!==null?format(system.cpu_pct)+' %':'–');
+  txt('ram',n(system.ram_used_bytes)!==null&&n(system.ram_total_bytes)>0?format(system.ram_used_bytes/1073741824)+' / '+format(system.ram_total_bytes/1073741824):'–');
+  txt('gpuClock',format(n(gpu.graphics_clock_mhz)));txt('memClock',format(n(gpu.memory_clock_mhz)));
   const capacity=count(stats.capacity,'kv_capacity_tokens'),used=count(stats.occupancy,'device_main_kv_tokens');
   const fill=capacity?Math.min(100,used/capacity*100):0;
   txt('kv',format(used)+' / '+format(capacity)+' tokens');txt('kvPct',capacity?format(fill)+' %':'–');
@@ -194,19 +226,86 @@ async function refresh(){
   const available=gpu.available===true;
   txt('gpuLoad',available&&n(gpu.utilization_pct)!==null?format(gpu.utilization_pct)+' %':'–');
   txt('vram',available&&n(gpu.memory_used_bytes)!==null?format(gpu.memory_used_bytes/1073741824)+' GB':'–');
-  txt('vramTotal',available&&n(gpu.memory_total_bytes)!==null?'of '+format(gpu.memory_total_bytes/1073741824)+' GB':'NVML unavailable');
+  txt('vramTotal',available&&n(gpu.memory_total_bytes)!==null?'of '+format(gpu.memory_total_bytes/1073741824)+' GB':tr('NVML unavailable'));
   txt('temp',available&&n(gpu.temperature_c)!==null?format(gpu.temperature_c)+' °C':'–');
   txt('power',available&&n(gpu.power_w)!==null?format(gpu.power_w)+' W':'–');
   samples.push({time:curr.time,decodeRate,prefillRate,decodeDelta,prefillDelta,completeDelta,
-   running:curr.running,waiting:curr.waiting,gpuUtil:n(gpu.utilization_pct),gpuTemp:n(gpu.temperature_c)});
+   running:curr.running,waiting:curr.waiting,gpuUtil:n(gpu.utilization_pct),gpuTemp:n(gpu.temperature_c),cpuPct:n(system.cpu_pct),ramUsedBytes:n(system.ram_used_bytes),vramUsedBytes:n(gpu.memory_used_bytes),gpuClockMHz:n(gpu.graphics_clock_mhz),memoryClockMHz:n(gpu.memory_clock_mhz),medianTtftMs:percentile(ttfts,50),latencyP95Ms:percentile(totals,95),kvUsed:used,kvCapacity:capacity,avgDecode:n(metrics['llamacpp:predicted_tokens_seconds']),avgPrefill:n(metrics['llamacpp:prompt_tokens_seconds']),dflashAcceptance:drafted?accepted/drafted*100:null,mtpAcceptance:mDraft?mAccepted/mDraft*100:null});
+  saveSample(samples[samples.length-1]);
   if(samples.length>120)samples.shift();
   draw();activity();requestRows(recent);
-  $('state').className='pill ok';txt('state','Online');txt('message','');
- }catch(e){$('state').className='pill bad';txt('state','Offline');txt('message',e.message||String(e))}
+  $('state').className='pill ok';txt('state',tr('Online'));txt('message','');
+ }catch(e){if(epoch!==selectionEpoch)return;$('state').className='pill bad';txt('state',tr('Offline'));txt('message',e.message||String(e))}
  finally{polling=false}
 }
-$('refresh').addEventListener('click',()=>{prev=null;samples.length=0;refresh()});
-for(const id of ['key','selectedModel','gpuIndex'])$(id).addEventListener('change',()=>{prev=null;samples.length=0;refresh()});
+
+const DICT={"Telemetry read-only":"Telemetrie schreibgeschützt","Connecting":"Verbindung…","Connecting to model…":"Verbinde mit Modell…","API key":"API-Schlüssel","Model":"Modell","GPU":"GPU","Refresh":"Aktualisieren","Language":"Sprache","Auto-refresh: 3 seconds":"Aktualisierung alle 3 Sekunden","Decode now":"Decode aktuell","Prefill now":"Prefill aktuell","tokens/s (last interval)":"Token/s (letztes Intervall)","GPU utilization":"GPU-Auslastung","VRAM used":"VRAM belegt","GPU temperature":"GPU-Temperatur","GPU power":"GPU-Leistung","Running / waiting":"Aktiv / wartend","requests":"Anfragen","DFlash2 acceptance":"DFlash2-Akzeptanz","MTP acceptance":"MTP-Akzeptanz","last 50 requests · model drafts only":"letzte 50 Anfragen · nur Modelldrafts","Average decode":"Decode-Durchschnitt","Average prefill":"Prefill-Durchschnitt","tokens/s · engine execution":"Token/s · Engine-Ausführungszeit","Median TTFT":"Median TTFT","ms · successful requests":"ms · erfolgreiche Anfragen","Host CPU":"Host-CPU","Host RAM":"Host-RAM","% · system-wide":"% · systemweit","GiB · system-wide":"GiB · systemweit","GPU graphics clock":"GPU-Grafiktakt","GPU memory clock":"GPU-Speichertakt","Request latency (last 50)":"Anfragelatenz (letzte 50)","Metric":"Metrik","Samples":"Stichproben","Total duration (ms)":"Gesamtdauer (ms)","Nearest-rank percentiles of successful recorded events; small samples are not a benchmark. TTFT excludes requests without generated tokens. Router request events span models unless a model is selected.":"Nearest-Rank-Perzentile erfolgreicher Ereignisse; kleine Stichproben sind kein Benchmark. TTFT nur bei generierten Token. Router-Ereignisse sind modellübergreifend, sofern kein Modell ausgewählt ist.","Live token throughput":"Live-Token-Durchsatz","GPU utilization / temperature":"GPU-Auslastung / Temperatur","Utilization %":"Auslastung %","Temperature °C":"Temperatur °C","Device KV occupancy":"Device-KV-Belegung","This is device KV usage, not the total input context. Configured maximum context:":"Device-KV-Belegung, nicht Gesamtkontext. Konfigurierter Maximal-Kontext:","tokens.":"Token.","Server statistics":"Serverstatistik","Completed requests":"Abgeschlossene Anfragen","Rejected / failed":"Abgelehnt / fehlgeschlagen","Reused prompt tokens":"Wiederverwendete Prompt-Token","Uptime":"Laufzeit","Recent requests (last 50)":"Letzte Anfragen (50)","Time":"Zeit","Status":"Status","Prompt":"Prompt","Cached":"Cache","Output":"Ausgabe","Decode tok/s":"Decode Token/s","Total duration":"Gesamtdauer","No requests recorded":"Keine Anfragen erfasst","Metadata only: no prompts or generated text are stored. History resets when the server restarts.":"Nur Metadaten: keine Prompts oder Antworten. Ereignishistorie endet beim Serverneustart.","Recent activity (aggregate samples)":"Letzte Aktivität (aggregiert)","Completed Δ":"Abgeschlossen Δ","Decode Δ":"Decode Δ","Prefill Δ":"Prefill Δ","Running":"Aktiv","Waiting":"Wartend","Waiting for samples…":"Warte auf Messpunkte…","Live charts keep 120 samples in this tab. The optional Python sidecar provides full per-request JSONL logs and further metrics.":"Live-Diagramme halten 120 Messpunkte im Tab. Der optionale Python-Sidecar bietet JSONL-Logs und weitere Metriken.","Export and optional history":"Export und optionale Historie","Export JSON":"JSON exportieren","Export CSV":"CSV exportieren","Keep local numeric history (max 500 samples)":"Lokale numerische Historie behalten (max. 500 Messpunkte)","Clear saved history":"Gespeicherte Historie löschen","Off by default. Opt-in stores only numeric telemetry in this browser and origin, across server restarts. No API keys, model names, request text or chat history. Exports include only numeric telemetry; no prompts or answers. Clear history deletes the saved samples.":"Standardmäßig aus. Opt-in speichert nur numerische Telemetrie lokal im Browser für diesen Origin, auch über Serverneustarts. Keine API-Schlüssel, Modellnamen, Anfragetexte oder Chatverläufe. Exporte enthalten nur numerische Telemetrie. Löschen entfernt gespeicherte Messpunkte.","Test chat":"Test-Chat","Sending a message runs inference on this server. Chat stays in this tab; it is not part of telemetry exports. Choose an exact model ID and keep prompts within the model context.":"Senden startet Inferenz auf diesem Server. Der Chat bleibt im Tab und ist nicht Teil der Telemetrie-Exporte. Verwende die genaue Modell-ID und beachte das Kontextlimit.","Chat model":"Chat-Modell","Max output tokens":"Max. Ausgabe-Token","Clear chat":"Chat leeren","Message":"Nachricht","Enter a message":"Nachricht eingeben","Send":"Senden","Cancel request":"Anfrage abbrechen","If enabled":"Falls aktiv","Auto / model id":"Auto / Modell-ID","Online":"Online","Offline":"Offline","Unknown model":"Unbekanntes Modell","max context":"max. Kontext","admitted":"zugelassen","NVML unavailable":"NVML nicht verfügbar","completed":"abgeschlossen","rejected":"abgelehnt","failed":"fehlgeschlagen","Saved samples":"Gespeicherte Messpunkte","History off":"Historie aus","Storage unavailable":"Speicher nicht verfügbar","You":"Du","Assistant":"Assistent","Select a model ID first":"Zuerst Modell-ID auswählen","Generating…":"Generiere…","Cancelled":"Abgebrochen","No text response":"Keine Textantwort","Request failed":"Anfrage fehlgeschlagen","Chat cleared":"Chat geleert","No samples to export":"Keine Messpunkte zum Exportieren"};
+const tr=s=>locale==='de'?(DICT[s]||s):s;
+const staticTexts=[];
+const walker=document.createTreeWalker(document.querySelector('main'),NodeFilter.SHOW_TEXT);
+while(walker.nextNode()){const node=walker.currentNode,v=node.nodeValue.trim();if(DICT[v])staticTexts.push([node,node.nodeValue,v]);}
+const placeholders=[...document.querySelectorAll('[placeholder]')].map(e=>[e,e.placeholder]);
+function language(){
+ locale=$('lang').value==='de'?'de':'en';document.documentElement.lang=locale;
+ for(const [node,original,v] of staticTexts)if(node.isConnected)node.nodeValue=original.replace(v,tr(v));
+ for(const [e,v] of placeholders)e.placeholder=tr(v);
+ updateHistoryStatus();renderChat();if(!polling)refresh();
+}
+function percentile(values,p){
+ const sorted=values.filter(v=>Number.isFinite(v)&&v>=0).sort((a,b)=>a-b);
+ return sorted.length?sorted[Math.ceil(p*sorted.length/100)-1]:null;
+}
+const HISTORY_KEY='ninfer-monitor-history-v1';
+const fields=['time','decodeRate','prefillRate','decodeDelta','prefillDelta','completeDelta','running','waiting','gpuUtil','gpuTemp','cpuPct','ramUsedBytes','vramUsedBytes','gpuClockMHz','memoryClockMHz','medianTtftMs','latencyP95Ms','kvUsed','kvCapacity','avgDecode','avgPrefill','dflashAcceptance','mtpAcceptance'];
+function numericSample(s){return Object.fromEntries(fields.map(k=>[k,n(s?.[k])]))}
+function updateHistoryStatus(){txt('historyStatus',persist?tr('Saved samples')+': '+history.length:tr('History off'))}
+function saveSample(s){if(!persist)return;history.push(numericSample(s));if(history.length>500)history.shift();try{localStorage.setItem(HISTORY_KEY,JSON.stringify({version:1,samples:history}));updateHistoryStatus()}catch{persist=false;$('persist').checked=false;txt('historyStatus',tr('Storage unavailable'))}}
+try{const stored=JSON.parse(localStorage.getItem(HISTORY_KEY)||'null');if(stored?.version===1&&Array.isArray(stored.samples)){history=stored.samples.slice(-500).map(numericSample);persist=true;$('persist').checked=true}}catch{}
+$('persist').addEventListener('change',()=>{persist=$('persist').checked;if(!persist){history=[];try{localStorage.removeItem(HISTORY_KEY)}catch{}}else{try{localStorage.setItem(HISTORY_KEY,JSON.stringify({version:1,samples:history}))}catch{persist=false;$('persist').checked=false;txt('historyStatus',tr('Storage unavailable'));return}}updateHistoryStatus()});
+$('clearHistory').addEventListener('click',()=>{history=[];persist=false;$('persist').checked=false;try{localStorage.removeItem(HISTORY_KEY)}catch{}updateHistoryStatus()});
+function exportSamples(kind){
+ const rows=(persist&&history.length?history:samples).map(numericSample);
+ if(!rows.length){txt('historyStatus',tr('No samples to export'));return}
+ const body=kind==='json'?JSON.stringify({schema:1,samples:rows},null,2):[fields.join(','),...rows.map(row=>fields.map(k=>row[k]??'').join(','))].join('\r\n');
+ const url=URL.createObjectURL(new Blob([body],{type:kind==='json'?'application/json':'text/csv;charset=utf-8'}));
+ const a=document.createElement('a');a.href=url;a.download='ninfer-monitor-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+kind;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('jsonExport').addEventListener('click',()=>exportSamples('json'));
+$('csvExport').addEventListener('click',()=>exportSamples('csv'));
+function renderChat(){
+ const log=$('chatLog');log.replaceChildren();
+ for(const entry of chat){const p=document.createElement('p'),strong=document.createElement('strong');strong.textContent=tr(entry.role==='user'?'You':'Assistant')+': ';p.append(strong,document.createTextNode(entry.content));log.append(p)}
+ log.scrollTop=log.scrollHeight;
+}
+function resetChat(){chatEpoch++;if(chatAbort)chatAbort.abort();chatAbort=null;chat=[];chatIdentity='';$('chatSend').disabled=false;$('chatStop').disabled=true;$('chatInput').value='';txt('chatStatus',tr('Chat cleared'));renderChat()}
+async function sendChat(){
+ if(chatAbort)return;
+ const prompt=$('chatInput').value.trim(),model=$('chatModel').value.trim()||$('selectedModel').value.trim()||lastModel;
+ const max=Number($('chatMax').value);
+ if(!prompt)return;
+ if(!model){txt('chatStatus',tr('Select a model ID first'));return}
+ if(!Number.isInteger(max)||max<1||max>4096){txt('chatStatus','Max output tokens: 1–4096');return}
+ if(chatIdentity!==model){chat=[];chatIdentity=model;}
+ const messages=[...chat.slice(-18),{role:'user',content:prompt}];const ctl=new AbortController(),epoch=++chatEpoch;
+ chatAbort=ctl;$('chatSend').disabled=true;$('chatStop').disabled=false;txt('chatStatus',tr('Generating…'));
+ try{
+ const res=await fetchApi('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model,messages,max_tokens:max,stream:false}),signal:ctl.signal});
+ const data=await res.json(),answer=data?.choices?.[0]?.message?.content;
+ if(epoch!==chatEpoch)return;
+ if(typeof answer!=='string')throw Error(tr('No text response'));
+ chat=[...messages,{role:'assistant',content:answer}].slice(-20);$('chatInput').value='';txt('chatStatus','');renderChat();
+ }catch(e){if(epoch===chatEpoch)txt('chatStatus',ctl.signal.aborted?tr('Cancelled'):tr('Request failed')+': '+(e.message||String(e)))}
+ finally{if(epoch===chatEpoch){chatAbort=null;$('chatSend').disabled=false;$('chatStop').disabled=true}}
+}
+$('chatSend').addEventListener('click',sendChat);
+$('chatStop').addEventListener('click',()=>chatAbort?.abort());
+$('chatReset').addEventListener('click',resetChat);
+$('chatModel').addEventListener('change',resetChat);
+$('lang').addEventListener('change',language);
+updateHistoryStatus();
+
+$('refresh').addEventListener('click',()=>{selectionEpoch++;prev=null;samples.length=0;refresh()});
+for(const id of ['key','selectedModel','gpuIndex'])$(id).addEventListener('change',()=>{selectionEpoch++;prev=null;samples.length=0;if(id!=='gpuIndex')resetChat();refresh()});
 window.addEventListener('resize',draw);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
 refresh();setInterval(refresh,3000);

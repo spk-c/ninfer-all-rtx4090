@@ -9,6 +9,7 @@
 #include "serve/mcp_proxy.h"
 #include "serve/monitor_dashboard.h"
 #include "serve/monitor_gpu.h"
+#include "serve/monitor_system.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 #include "serve/webui.h"
@@ -37,7 +38,7 @@ constexpr std::string_view kCorsAllowedHeaders =
 bool is_api_path(std::string_view path) {
     return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
-           path == "/monitor/gpu" || path == "/monitor/requests" ||
+           path == "/monitor/gpu" || path == "/monitor/requests" || path == "/monitor/system" ||
            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
            path == "/rerank" || path == "/reranking" || path == kMcpProxyPath;
@@ -754,6 +755,10 @@ void HttpServer::register_routes() {
     });
     server_.Get("/monitor/requests", [this](const httplib::Request&, httplib::Response& res) {
         handle_monitor_requests(res);
+    });
+    server_.Get("/monitor/system", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(monitor_system_json(), "application/json");
     });
     server_.Get("/monitor/gpu", [](const httplib::Request& req, httplib::Response& res) {
         unsigned int index = 0;

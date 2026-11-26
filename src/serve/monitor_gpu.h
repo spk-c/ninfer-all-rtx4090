@@ -60,6 +60,7 @@ inline std::string monitor_gpu_json(unsigned int requested_index) {
     using GetTemp = Result (*)(Device, unsigned int, unsigned int*);
     using GetPower = Result (*)(Device, unsigned int*);
     using GetMemory = Result (*)(Device, Memory*);
+    using GetClock = Result (*)(Device, unsigned int, unsigned int*);
     const auto init = function<Init>(module, "nvmlInit_v2");
     const auto shutdown = function<Shutdown>(module, "nvmlShutdown");
     auto get_handle = function<GetHandle>(module, "nvmlDeviceGetHandleByIndex_v2");
@@ -80,13 +81,16 @@ inline std::string monitor_gpu_json(unsigned int requested_index) {
     const auto get_temp = function<GetTemp>(module, "nvmlDeviceGetTemperature");
     const auto get_power = function<GetPower>(module, "nvmlDeviceGetPowerUsage");
     const auto get_memory = function<GetMemory>(module, "nvmlDeviceGetMemoryInfo");
+    const auto get_clock = function<GetClock>(module, "nvmlDeviceGetClockInfo");
     Utilization utilization{};
     Memory memory{};
-    unsigned int temperature = 0, power_mw = 0;
+    unsigned int temperature = 0, power_mw = 0, graphics_mhz = 0, memory_mhz = 0;
     const bool util_ok = get_util && get_util(device, &utilization) == 0;
     const bool temp_ok = get_temp && get_temp(device, 0, &temperature) == 0;
     const bool power_ok = get_power && get_power(device, &power_mw) == 0;
     const bool memory_ok = get_memory && get_memory(device, &memory) == 0;
+    const bool graphics_ok = get_clock && get_clock(device, 0, &graphics_mhz) == 0;
+    const bool memory_clock_ok = get_clock && get_clock(device, 2, &memory_mhz) == 0;
     shutdown();
     close(module);
 
@@ -96,6 +100,8 @@ inline std::string monitor_gpu_json(unsigned int requested_index) {
     result += ",\"power_w\":" + value(power_ok, power_mw / 1000.0);
     result += ",\"memory_used_bytes\":" + value(memory_ok, static_cast<double>(memory.used));
     result += ",\"memory_total_bytes\":" + value(memory_ok, static_cast<double>(memory.total));
+    result += ",\"graphics_clock_mhz\":" + value(graphics_ok, graphics_mhz);
+    result += ",\"memory_clock_mhz\":" + value(memory_clock_ok, memory_mhz);
     result += "}";
     return result;
 }
