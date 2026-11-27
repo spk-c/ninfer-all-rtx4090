@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const axe = require.resolve("axe-core/axe.min.js");
 const count = [...readFileSync("site/sitemap.xml","utf8").matchAll(/<loc>/g)].length;
 
-const server = spawn("python3", ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "site"], {stdio:"ignore"});
+const server = spawn(process.env.PYTHON || "python3", ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "site"], {stdio:"ignore"});
 const base = "http://127.0.0.1:8765/";
 let browser;
 try {
@@ -124,8 +124,9 @@ try {
     await p.locator("#demoModel").selectOption("mtp");
     await p.waitForFunction(()=>document.querySelector("#mtp").textContent.includes("%"));
     assert.equal(await p.locator("#draft").textContent(),"–");
-    await p.locator("#lang").selectOption(lang==="en"?"de":"en");
-    assert.equal(await p.locator("html").getAttribute("lang"),lang==="en"?"de":"en");
+    const activeLang=lang==="en"?"de":"en";
+    await p.locator("#lang").selectOption(activeLang);
+    assert.equal(await p.locator("html").getAttribute("lang"),activeLang);
     await p.locator("#persist").check();
     await p.waitForFunction(()=>JSON.parse(localStorage.getItem("ninfer-monitor-public-demo-history-v1")||"{}").samples?.length>0);
     const persisted=await p.evaluate(()=>JSON.parse(localStorage.getItem("ninfer-monitor-public-demo-history-v1")));
@@ -134,8 +135,14 @@ try {
     const csv=p.waitForEvent("download");await p.locator("#csvExport").click();assert.match((await csv).suggestedFilename(),/\.csv$/);
     await p.locator("#chatInput").fill("demo-test-only");
     await p.locator("#chatSend").click();
-    await p.waitForFunction(()=>document.querySelector("#chatLog").textContent.includes("demo-test-only"));
-    assert.match(await p.locator("#chatLog").textContent(),lang === "de" ? /simuliert/i : /simulated/i);
+    // The test intentionally changed the locale; the response follows the active language,
+    // not the entry page. Wait for the assistant reply, not only the synchronous user echo.
+    const expectedReply=activeLang==="de"?"Simulierte Antwort der \u00f6ffentlichen Demo.":"Simulated public demo reply.";
+    await p.waitForFunction(reply=>document.querySelector("#chatLog").textContent.includes(reply),expectedReply);
+    const chatText=await p.locator("#chatLog").textContent();
+    assert.ok(chatText.includes("demo-test-only"));
+    assert.ok(chatText.includes(expectedReply));
+    assert.ok(chatText.includes(activeLang==="de"?"Es wurde kein Modell aufgerufen":"No model was invoked"));
     await p.locator("#chatReset").click();assert.equal(await p.locator("#chatLog").textContent(),"");
     await p.locator("#clearHistory").click();assert.equal(await p.evaluate(()=>localStorage.getItem("ninfer-monitor-public-demo-history-v1")),null);
     p.off("request",capture);
