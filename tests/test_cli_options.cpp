@@ -429,6 +429,21 @@ int run_tests() {
             (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--expert-tail-skip", rank});
         }), "CLI accepted an invalid expert tail skip");
     }
+    failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "x"})
+                                  .hybrid_experts.route_bias == 0.0F &&
+                          parse({"ninfer-cli", "model.ninfer", "--prompt", "x",
+                                 "--expert-route-bias", "0.1"})
+                                  .hybrid_experts.route_bias == 0.1F &&
+                          !parse({"ninfer-cli", "model.ninfer", "--prompt", "x",
+                                  "--expert-route-bias", "0.1"})
+                               .hybrid_experts.route_bias_prompts,
+                      "CLI did not leave the route bias off by default or preserve 0.1 for "
+                      "decode calls only");
+    for (const auto* bias : {"-0.1", "1.5", "nan", "0.1x"}) {
+        failures += check(rejects([&] {
+            (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--expert-route-bias", bias});
+        }), "CLI accepted an invalid expert route bias");
+    }
     for (const auto* budget : {"0", "32", "4096"}) {
         const auto disk = parse({"ninfer-cli", "model.ninfer", "--prompt", "x",
                                  "--ngram-residency", "disk", "--ngram-ram-mib", budget});
@@ -790,7 +805,7 @@ int run_tests() {
                       "CLI accepted an unknown log level");
     failures +=
         check(rejects([] {
-                  (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});
+                  (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "65"});
               }),
               "CLI accepted top_k beyond the executable candidate domain");
     failures += check(rejects([] {
