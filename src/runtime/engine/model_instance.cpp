@@ -1,10 +1,12 @@
 #include "runtime/engine/model_instance.h"
 
 #include "core/vmm.h"
+#include "core/mapped_host_copy.h"
+#include "core/host_memory.h"
+#include "artifact/materializer.h"
 #include "calibration/device_calibration.h"
 #include "calibration/route_catalog.h"
 #include "core/arena.h"
-#include "core/mapped_host_copy.h"
 #include "ops/common/device_route.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/device_profile.h"
@@ -120,6 +122,21 @@ void validate_options(const EngineOptions& options) {
     if (options.cuda_graph_allowance_bytes != 0 && !options.use_cuda_graph) {
         throw std::invalid_argument(
             "Engine cuda_graph_allowance_bytes requires CUDA graphs to be enabled");
+    }
+    if (options.kv_host_tier.enabled()) {
+        // One device's arena; host-memory pages the device reads in place; and pinned host
+        // memory that host or disk experts would compete for.
+        if (options.devices.size() > 1 || options.tensor_parallel) {
+            throw std::invalid_argument("--kv-host-mib runs on one device");
+        }
+        if (options.expert_residency != ExpertResidency::Device) {
+            throw std::invalid_argument("--kv-host-mib requires --expert-residency device");
+        }
+        if (serialized_copy_queue()) {
+            throw std::invalid_argument(
+                "--kv-host-mib needs a native Linux driver: Windows and WSL2 charge pinned host "
+                "memory to the GPU's shared segment");
+        }
     }
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
@@ -728,6 +745,29 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
                             reader.directory().component("text").proposal.has_value();
         options.speculative.proposal_head = stored ? ProposalHead::Optimized : ProposalHead::Full;
     }
+    // Before the splits below, which size the head stage with the table where it will live. Only
+    // a pool that takes all free memory puts the table's device memory to use: automatic KV
+    // capacity with the hybrid prefix cache, whose pages no request holds are block cache, or
+    // the device cache of host or disk experts, which takes what automatic KV leaves
+    // (expert_admission.h). Any other automatic pool stops at --max-context per request. A draft
+    // step gathers its token's row over the bus on its round's critical path (MTP with 3 drafts
+    // decoded 0.15% to 0.39% slower), so drafting keeps the table on the device.
+    if (options.embedding_residency == EmbeddingResidency::Auto) {
+        const bool automatic_kv = options.kv_capacity.mode == KvCapacityMode::Automatic;
+        const bool kv_fills_memory =
+            automatic_kv &&
+            ((options.context_cache.enabled &&
+              options.context_cache.mode == ContextCacheMode::Hybrid) ||
+             (options.expert_residency != ExpertResidency::Device &&
+              options.expert_cache_bytes.value_or(1) != 0));
+        const bool drafts = options.speculative.backend != SpeculativeBackend::None ||
+                            options.speculative.lookup_ngram != 0;
+        options.embedding_residency =
+            kv_fills_memory && !drafts &&
+                    models::qwen3_5::host_embedding_suits(reader, models::load_options(options))
+                ? EmbeddingResidency::Host
+                : EmbeddingResidency::Device;
+    }
     // Without --tensor-split the first load takes default_tensor_split's shares. Only the loaded
     // model's planner knows what the Engine reserves on each device; a device left short of it
     // (or with room the estimate did not give it) loads the model again with the shares
@@ -819,13 +859,6 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
         StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
         instance = std::make_unique<ModelInstance>(std::move(model), options);
         frontend.complete();
-        // Where a device's copies queue behind one another whatever their streams
-        // (serialized_copy_queue: Windows, WSL2), a replayed graph's device-side wait for missing
-        // host or disk experts can hold the copies the graph queued after it ahead of the
-        // delivery's own, which end that wait. Eager passes wait on the host.
-        if (!instance->model->expert_sources().layers.empty() && serialized_copy_queue()) {
-            options.use_cuda_graph = false;
-        }
         planning.emplace(options.startup_observer, StartupPhase::TargetFinalize);
         overlay_window_bytes =
             models::qwen3_5::prepare_vision_overlay(instance->parameters, device, options);
@@ -958,7 +991,93 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             plan_sequences();
         }
     };
+    // KV host tier: the pool continues past the device into pinned host memory. Free memory is
+    // raised by the tier's host bytes less what each KV plane may keep of its host pages on the
+    // device (two partial granules at most), so a plan of M pages keeps no more than the device
+    // holds once its last kv_host_pages pages are host memory.
+    std::uint32_t kv_host_pages  = 0;
+    std::uint64_t kv_device_pages = 0;
+    if (options.kv_host_tier.enabled()) {
+        const auto shape              = planner->host_tier_shape();
+        const auto& curve             = planner->capacity_curve();
+        const std::size_t granularity = vmm::granularity(device.device);
+        const std::uint64_t step      = curve.bytes_per_additional_main_page_group;
+        if (shape.planes == 0 || granularity == 0 || step == 0 || step != shape.page_bytes) {
+            throw std::invalid_argument(
+                "--kv-host-mib needs one device with CUDA virtual memory management and no "
+                "full-attention draft layers");
+        }
+        const std::uint64_t slack    = 2ULL * granularity * shape.planes;
+        const std::uint64_t headroom = options.kv_capacity.mode == KvCapacityMode::Automatic
+                                           ? options.kv_capacity.automatic_headroom_bytes
+                                           : 0;
+        const std::uint64_t fixed    = headroom + slack + curve.minimum_device_reservation_bytes;
+        const std::uint64_t free     = free_by_rank.front();
+        if (free <= fixed - std::min<std::uint64_t>(fixed, curve.minimum_main_page_groups * step)) {
+            throw std::invalid_argument(
+                "--kv-host-mib: the device lacks room for the Program beside its KV pages");
+        }
+        // Main pages the device holds beside the slack: what stays device memory.
+        const std::int64_t device_pages =
+            static_cast<std::int64_t>(curve.minimum_main_page_groups) +
+            (free >= fixed ? static_cast<std::int64_t>((free - fixed) / step)
+                           : -static_cast<std::int64_t>((fixed - free + step - 1) / step));
+        const std::uint64_t context_pages =
+            (std::uint64_t(options.max_context) + curve.main_page_tokens - 1U) /
+            curve.main_page_tokens;
+        std::uint64_t budget_pages = 0;
+        if (options.kv_host_tier.automatic) {
+            // Pinned host memory left once the hybrid cache's Host tier and the media caches
+            // have theirs, less the headroom every pinned allocation keeps.
+            const std::optional<std::uint64_t> available = available_host_memory_bytes();
+            if (!available) {
+                throw std::runtime_error(
+                    "--kv-host-mib auto needs the host's available memory, which this platform "
+                    "does not report; give the tier in MiB");
+            }
+            std::uint64_t taken = artifact::kPinnedHeadroomBytes +
+                                  options.context_cache.host_cache_budget_bytes.value_or(0) +
+                                  (options.enable_vision ? std::uint64_t(options.media_cache_bytes) +
+                                                               options.media_live_bytes
+                                                         : 0U);
+            budget_pages = *available > taken ? (*available - taken) / step : 0;
+        } else {
+            budget_pages = options.kv_host_tier.bytes / step;
+        }
+        std::uint64_t target_pages =
+            options.kv_capacity.mode == KvCapacityMode::Explicit
+                ? (std::uint64_t(options.kv_capacity.explicit_tokens) + curve.main_page_tokens -
+                   1U) / curve.main_page_tokens + curve.resident_main_pages
+            : options.kv_host_tier.automatic
+                ? context_pages * options.max_concurrency + curve.resident_main_pages
+                : static_cast<std::uint64_t>(std::max<std::int64_t>(device_pages, 0)) +
+                      budget_pages;
+        target_pages = std::min<std::uint64_t>(target_pages, curve.maximum_main_page_groups);
+        const std::uint64_t held = static_cast<std::uint64_t>(std::max<std::int64_t>(device_pages, 0));
+        if (target_pages > held) {
+            if (device_pages <= 0) {
+                throw std::invalid_argument(
+                    "--kv-host-mib: the device holds no KV page beside the Program");
+            }
+            const std::uint64_t host = std::min(target_pages - held, budget_pages);
+            if (host > 0) {
+                kv_host_pages   = static_cast<std::uint32_t>(host);
+                kv_device_pages = held;
+                free_by_rank.front() += host * step - slack;
+            }
+        }
+        if (kv_host_pages == 0) {
+            publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
+                               "KV host tier: the device holds the pool, no host pages");
+        }
+    }
     auto resolution = resolve_capacity();
+    if (kv_host_pages != 0) {
+        // The pages beyond what the device holds: fewer when the pool's maximum capped the plan.
+        const std::uint64_t resolved = resolution.main_page_groups;
+        kv_host_pages = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            kv_host_pages, resolved > kv_device_pages ? resolved - kv_device_pages : 0));
+    }
     std::unique_ptr<models::qwen3_5::execution::NativeExpertRuntime> experts;
     if (!instance->model->expert_sources().layers.empty()) {
         // Price startup with the real allocations before the KV plan is finalized: the delivery
@@ -1006,7 +1125,7 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
                                           instance->model->storage_stats().device_capacity_bytes);
         resolution = resolve_capacity();
     }
-    auto sequence   = std::move(*planner).finalize(resolution.main_page_groups);
+    auto sequence = std::move(*planner).finalize(resolution.main_page_groups, kv_host_pages);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens ||
         !std::ranges::equal(sequence.extra_rank_reservation_bytes(),

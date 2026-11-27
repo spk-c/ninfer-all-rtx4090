@@ -362,14 +362,16 @@ struct ExpertTable {
     std::int64_t row_bytes = 0;
     std::int32_t rows      = 0;
     std::vector<const void*> pointers; // each expert's rows where the artifact put them
+    std::vector<const void*> device_pointers; // device aliases for pinned host experts, if any
     DeviceBuffer table;
     bool aligned16 = false;
 
     // A null entry (another rank's expert) is never read.
     void seal() {
-        aligned16 = std::any_of(pointers.begin(), pointers.end(),
+        const auto& entries = device_pointers.empty() ? pointers : device_pointers;
+        aligned16 = std::any_of(entries.begin(), entries.end(),
                                 [](const void* pointer) { return pointer != nullptr; }) &&
-                    std::all_of(pointers.begin(), pointers.end(), [](const void* pointer) {
+                    std::all_of(entries.begin(), entries.end(), [](const void* pointer) {
                         return reinterpret_cast<std::uintptr_t>(pointer) % 16 == 0;
                     });
     }
@@ -379,9 +381,11 @@ struct ExpertTable {
     }
 };
 
-ExpertTable make_table(const Model& model, std::span<const WeightId> ids) {
+ExpertTable make_table(const Model& model, std::span<const WeightId> ids,
+                       bool pinned_experts = false) {
     ExpertTable out;
     std::vector<const void*> pointers;
+    std::vector<const void*> device_pointers;
     for (const WeightId id : ids) {
         const Weight w = native_weight(model.weight(id).view);
         if (!is_gguf(w.qtype)) {
@@ -398,11 +402,18 @@ ExpertTable make_table(const Model& model, std::span<const WeightId> ids) {
                                         ": every expert of a bank must share its block type");
         }
         pointers.push_back(w.qdata);
+        if (pinned_experts) {
+            const auto* alias = model.pinned_device_alias(w.qdata, std::size_t(row) * std::size_t(w.n));
+            if (!alias) { throw std::runtime_error("host expert is outside the pinned block"); }
+            device_pointers.push_back(alias);
+        }
         out.rows = w.n;
     }
     out.table = DeviceBuffer(pointers.size() * sizeof(void*));
-    out.table.copy_from_host(pointers.data(), pointers.size() * sizeof(void*));
+    const auto& device_entries = pinned_experts ? device_pointers : pointers;
+    out.table.copy_from_host(device_entries.data(), device_entries.size() * sizeof(void*));
     out.pointers = std::move(pointers);
+    out.device_pointers = std::move(device_pointers);
     out.seal();
     return out;
 }
@@ -1203,6 +1214,8 @@ struct Executor::Impl {
     // A span's expert call that a wider call of the same layer follows: the pool keeps that
     // layer's experts.
     bool span_hold = false;
+    // Executor::set_span_progress: told as a span queues each layer.
+    std::function<void(std::uint32_t, std::uint32_t)> span_progress;
     // A span's last expert call of a layer: the disk cache releases the layer's experts the span's
     // earlier calls read and this one does not route to.
     bool span_last = false;
@@ -1747,9 +1760,10 @@ struct Executor::Impl {
             plan.moe.up   = make_located_table(lw.moe.located_up);
             plan.moe.down = make_located_table(lw.moe.located_down);
         } else {
-            plan.moe.gate = make_table(model, lw.moe.gate);
-            plan.moe.up   = make_table(model, lw.moe.up);
-            plan.moe.down = make_table(model, lw.moe.down);
+            const bool pinned_experts = model.options().experts == ExpertResidency::Host;
+            plan.moe.gate = make_table(model, lw.moe.gate, pinned_experts);
+            plan.moe.up   = make_table(model, lw.moe.up, pinned_experts);
+            plan.moe.down = make_table(model, lw.moe.down, pinned_experts);
         }
         plan.moe.device_resident   = model.options().experts != ExpertResidency::Host;
         plan.moe.shared_gate_table = make_table(model, std::span(&lw.moe.shared_gate, 1));
@@ -2781,7 +2795,8 @@ struct Executor::Impl {
             const auto bank = [](const ExpertTable& table) {
                 return ExpertBank{.expert_bytes = std::int64_t(table.rows) * table.row_bytes,
                                   .host         = table.pointers,
-                                  .table        = table.table.p};
+                                  .table        = table.table.p,
+                                  .device       = table.device_pointers};
             };
             cache_layers.push_back(ExpertCacheLayer{.rank   = plan->rank,
                                                     .stream = ranks[plan->rank].stream,
@@ -2854,6 +2869,7 @@ struct Executor::Impl {
                     p.located = located[k];
                 } else {
                     p.host = tables[k]->pointers;
+                    p.device = tables[k]->device_pointers;
                 }
             }
             if (const auto& latent = plan->moe.latent) {
@@ -5917,6 +5933,9 @@ struct Executor::Impl {
                     }
                     capture = {};
                 }
+                if (span_progress) {
+                    span_progress(std::uint32_t(i + 1), std::uint32_t(layers.size()));
+                }
             }
             span_hold   = false;
             span_last   = false;
@@ -7755,6 +7774,11 @@ void Executor::forward(std::uint32_t sequence, std::span<const std::int32_t> tok
 }
 
 bool Executor::packs_prompts() const noexcept { return impl_->span_tokens != 0; }
+
+void Executor::set_span_progress(
+    std::function<void(std::uint32_t done, std::uint32_t layers)> progress) {
+    impl_->span_progress = std::move(progress);
+}
 std::uint32_t Executor::narrow_prompt_tokens() const noexcept {
     return impl_->span_tokens == 0
                ? 0

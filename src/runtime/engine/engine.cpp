@@ -78,12 +78,26 @@ EngineOptions with_family_context_cache(EngineOptions options) {
 }
 
 // The host token embedding is a Qwen3.5 load placement; the other families bind their own tables.
+// The other families keep their tables on the device, which `auto` selects for them.
 EngineOptions with_family_embedding(EngineOptions options) {
-    if (options.embedding_residency != EmbeddingResidency::Device &&
-        own_family_artifact(options.artifact_path)) {
+    if (options.embedding_residency == EmbeddingResidency::Device ||
+        !own_family_artifact(options.artifact_path)) {
+        return options;
+    }
+    if (options.embedding_residency == EmbeddingResidency::Host) {
         throw std::invalid_argument(
             "--embedding-residency host applies to Qwen3_5ForCausalLM and "
             "Qwen3_5MoeForCausalLM artifacts");
+    }
+    options.embedding_residency = EmbeddingResidency::Device;
+    return options;
+}
+
+// The KV host tier extends the Qwen3.5 Program's paged pool.
+EngineOptions with_family_kv_host_tier(EngineOptions options) {
+    if (options.kv_host_tier.enabled() && own_family_artifact(options.artifact_path)) {
+        throw std::invalid_argument(
+            "--kv-host-mib applies to Qwen3_5ForCausalLM and Qwen3_5MoeForCausalLM artifacts");
     }
     return options;
 }
@@ -543,7 +557,8 @@ public:
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(with_family_speculation(
               with_family_context_cache(with_family_attention(with_family_steering(
-                  with_family_embedding(with_expert_disk_reads(std::move(engine_options))))))))),
+                  with_family_embedding(with_family_kv_host_tier(
+                      with_expert_disk_reads(std::move(engine_options)))))))))),
           device(initialize_device(options)),
           clock_floor(device.device_ids(), options.gpu_clock_floor_mhz) {
         report_gpu_clock_floor(options, clock_floor);

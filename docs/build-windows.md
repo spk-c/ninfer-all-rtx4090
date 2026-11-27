@@ -34,8 +34,11 @@ CUDA 13.4 on an RTX 5070 Ti, and `89` builds with CUDA 13.4 on RTX 4090s
 - Visual Studio 2022 with MSVC 19.44 (toolset 14.44, Visual Studio 17.14) and CUDA 12.8 or newer
   for `75`, `86` and `89`, or Visual Studio 2026 with CUDA 13.1 or newer for `120a` except 13.2.0 and 13.2.1
   ([CUDA toolkits](build-linux.md#cuda-toolkits));
-- CMake, Ninja and [vcpkg](https://github.com/microsoft/vcpkg), which provides FFmpeg and curl
-  through `vcpkg.json`;
+- CMake, Ninja and [vcpkg](https://github.com/microsoft/vcpkg), which provides FFmpeg through
+  `vcpkg.json`; the build compiles Mbed TLS, the TLS library of
+  [HTTPS media URLs](serving.md#trusted-certificates), from the release archive that
+  `scripts\build-native.bat configure` and `scripts\build.ps1` fetch into
+  `third_party\media-sources`;
 - the Microsoft Visual C++ runtime to run the executables, and a `.ninfer` artifact.
 
 Configure stops on an MSVC older than 19.44: cl 19.38 (Visual Studio 17.8) computes the overflow
@@ -108,18 +111,28 @@ with queued copies; it uses mapped host memory and a copy kernel on Windows and 
 misses, whose service copies the missing experts while a replayed layer waits for them on the
 device, hung while the warm-up prepared the CUDA Graphs on Windows; on Windows and under WSL2 the
 service copies a decode or verification call's experts with a kernel that reads them in place
-(`NINFER_MISS_COPY_KERNEL=0` forces the copy engine, `1` the kernel on any driver). Native Qwen
+(`NINFER_MISS_COPY_KERNEL=0` forces the copy engine, `1` the kernel on any driver). The pinned
+expert block is registered as mapped, and kernels read it at the device address CUDA gives each
+registered part: under WDDM that address may differ from the host's, and an RTX 4090 D faulted
+reading the host address. Native Qwen
 MoE, Gemma MoE, Flint, DeepSeek-V4.1-Flash and Inkling 2 with host or disk experts deliver the
-missing experts while a replayed graph waits for them on the device, so on Windows and under WSL2
-they run their passes eagerly, without CUDA Graphs, and wait for the misses on the host. The
-decision falls before the startup memory checks, so Gemma MoE, Flint, DeepSeek-V4.1-Flash and
-Inkling 2 then keep 64 MiB free for the kernels CUDA loads at their first launch instead of the
-320 MiB they keep for the graphs; experts on the GPU keep their graphs and that reserve. This
-repository has no Windows or WSL2 host:
-`ninfer_qwen4_exp_hybrid_experts_test` and `ninfer_qwen4_exp_expert_misses_test` run both forms on
-Linux and only the kernel under WDDM, where they have not run yet. Inkling 2's eager passes ran
-under Windows 11 in a [field report](performance/field-reports.md#rtx-3070-ti-windows-11); those
-of the other families have not run there. A process started
+missing experts while a replayed graph waits for them on the device; on Windows and under WSL2
+their delivery runs every copy of a call and of the work after it (layer banks, promotions, the
+cache's rounds) as the same kernel, reading the pinned block at its device addresses, and they keep
+their CUDA Graphs (`NINFER_MISS_COPY_KERNEL` forces either copy here too). Each launch is a grid of
+32 blocks at the device's greatest stream priority, which leaves the rest of the device to the
+prompt's kernels. Forced on Linux on an RTX 4090 (PCIe 4.0 x16, 5,753-token prompt, 128 tokens),
+the kernel prefilled Inkling 2 with host experts 4.9% slower than the copy engine (4.08k against
+4.29k tokens/s), Gemma MoE, Flint and Qwen3.6-35B-A3B with host experts 0.8-1.7% faster, and the
+five families with disk experts 0.9% (DeepSeek-V4.1-Flash) to 16% faster; decode changed by
+−1.9% (DeepSeek-V4.1-Flash) to +10.8% (Qwen3.6-35B-A3B). This repository has no
+Windows or WSL2 host: `ninfer_qwen4_exp_hybrid_experts_test`,
+`ninfer_qwen4_exp_expert_misses_test` and `ninfer_expert_delivery_test` run both forms on Linux and
+only the kernel under WDDM, where a contributor ran the second on an RTX 4090 D, and Edge0-145B
+with host experts served there with CUDA Graphs. Inkling 2 ran under Windows 11 in a
+[field report](performance/field-reports.md#rtx-3070-ti-windows-11) with eager passes, before its
+delivery copied with the kernel; the five families' kernel copies have not run on Windows or WSL2.
+A process started
 by a low-priority parent (a Task Scheduler task at its default priority, a service, some IDE
 terminals) inherits I/O priority Low, and Windows throttles its reads; the Engine raises such a
 priority to normal before it reads the artifact and logs that it did, or warns when Windows refuses

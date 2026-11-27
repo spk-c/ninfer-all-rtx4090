@@ -5,7 +5,6 @@
 #include "core/device_wait.h"
 #include "core/expert_parallel.h"
 #include "core/growable_region.h"
-#include "core/mapped_host_copy.h"
 #include "core/pdl_scope.h"
 #include "core/pinned_memory.h"
 #include "core/qtype.h"
@@ -21,6 +20,7 @@
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_policy.h"
 #include "ninfer/ops/moe_expert_prefetch.h"
+#include "ninfer/ops/sampling.h"
 #include "ninfer/ops/weight_input.h"
 #include "ops/common/device_tier.h"
 #include "ops/linear/gguf/ggml_bridge.h"
@@ -209,6 +209,9 @@ struct Spark {
     DeviceBuffer contexts, contexts_kept, state, prev, drafts, confidence;
     std::unique_ptr<PinnedHostBuffer> host;
     std::unique_ptr<CudaCompletionEvent> copied;
+    // Sampled drafts (ExecutorOptions::sampled_drafts): a row's config, then its keys.
+    DeviceBuffer sampling;
+    std::unique_ptr<PinnedHostBuffer> host_sampling;
     std::uint64_t bytes = 0; // beside the caches (in kv_bytes)
 };
 
@@ -285,8 +288,13 @@ struct Executor::Impl {
     // head: the vocabulary's rows; head_tiles: the stored rows the matrix kernel reads for them,
     // whole 128-row tiles (the GGUF pads the vocabulary past them).
     Weight embedding, head, head_tiles;
-    // A model with BF16 matrices runs every call on BF16 rows: the BF16 products read no q8_1 form.
+    // A model whose attention output, experts or head is BF16 (or MXFP8) runs every call on BF16
+    // rows: those products read no q8_1 form.
     bool bf16_rows = false;
+    // A BF16 attention input projection (query, gate, relative, key or value) beside GGUF block
+    // matrices elsewhere (GSQ-RCO's relative features): it multiplies the call's BF16 rows, which
+    // a call of q8_1 rows then writes as well, and the other products keep their q8_1 form.
+    bool attention_bf16 = false;
     const float *embedding_norm = nullptr, *final_norm = nullptr, *output_mix = nullptr;
     std::vector<std::uint32_t> positions;
     // The position at which each sequence's rings last came whole from a prompt, a checkpoint or
@@ -341,12 +349,6 @@ struct Executor::Impl {
         stream = device.stream;
         const int device_id = device.rank(0).device;
         kvfmt = kv_format(o.kv_cache);
-        // Where a device's copies queue behind one another whatever their streams
-        // (serialized_copy_queue: Windows, WSL2), a replayed graph's device-side wait for a missing host
-        // or disk expert can hold back the copies that end it, so those placements run eager. Experts on
-        // the device capture their graphs as everywhere else.
-        if (!model.expert_banks().empty() && serialized_copy_queue()) { options.cuda_graphs = false; }
-
         growing = !model.expert_banks().empty() && !options.expert_cache_bytes &&
                   vmm::granularity(device_id) != 0;
         hidden      = int(config.hidden_size);
@@ -387,7 +389,9 @@ struct Executor::Impl {
         output_mix     = fp32(model, w.output_mix, hidden);
         require_gguf(model, w.token_embedding, embedding);
         require_gguf(model, w.output_head, head);
-        bf16_rows = embedding.qtype == QType::BF16 || head.qtype == QType::BF16;
+        // The token table is only read row by row (table_rows), so its format leaves the calls'
+        // forms alone.
+        bf16_rows = head.qtype == QType::BF16;
         if (options.dspine && (model.dspine() == nullptr || options.draft_tokens == 0 ||
                                options.draft_tokens + 1 > model.dspine()->config().block_size)) {
             throw std::invalid_argument("inkling2 executor: DSpine drafting needs the model's "
@@ -659,10 +663,11 @@ struct Executor::Impl {
         require_gguf(model, aw.value, p.value);
         require_gguf(model, aw.output, p.output);
         for (const Weight& m : p.query) { require_gguf(model, aw.query, m); }
-        for (const Weight* m : {&p.key, &p.value, &p.output}) {
-            bf16_rows = bf16_rows || m->qtype == QType::BF16;
+        bf16_rows = bf16_rows || p.output.qtype == QType::BF16;
+        for (const Weight* m : {&p.key, &p.value}) {
+            attention_bf16 = attention_bf16 || m->qtype == QType::BF16;
         }
-        for (const Weight& m : p.query) { bf16_rows = bf16_rows || m.qtype == QType::BF16; }
+        for (const Weight& m : p.query) { attention_bf16 = attention_bf16 || m.qtype == QType::BF16; }
         const MoeWeights& mw = lw.moe;
         const int e = int(config.num_experts), width = int(config.moe_intermediate_size);
         p.router      = fp32(model, mw.router, e * hidden);
@@ -1050,6 +1055,11 @@ struct Executor::Impl {
         d->confidence = DeviceBuffer(std::size_t(d->block) * 4);
         d->host   = std::make_unique<PinnedHostBuffer>(std::size_t(d->block) * 8);
         d->copied = std::make_unique<CudaCompletionEvent>(device);
+        if (options.sampled_drafts) {
+            const std::size_t bytes = sizeof(ops::SamplingConfig) + std::size_t(d->block) * 4;
+            d->sampling      = DeviceBuffer(bytes);
+            d->host_sampling = std::make_unique<PinnedHostBuffer>(bytes);
+        }
         spark = std::move(d);
     }
 
@@ -1123,11 +1133,17 @@ struct Executor::Impl {
         }
     }
 
+    // The sampled vocabulary.
+    [[nodiscard]] int sample_domain() const {
+        return static_cast<int>(model.resources().public_token_count);
+    }
+
     // The drafter's block over staged rows (the anchor, then masks, at the sequence's next
     // positions): its layers over the context and the block (every row seeing the anchor's window
     // and the whole block), the final norm, the head's products, then `k` steps of the recurrent
-    // head, their drafts and probabilities copied to the pinned buffer.
-    void spark_pass(int k) {
+    // head (`sampled`: each draws its draft among the candidates with the staged config and keys),
+    // their drafts and probabilities copied to the pinned buffer.
+    void spark_pass(int k, bool sampled) {
         Spark& d = *spark;
         const DSparkConfig& dc = *d.config;
         const int b = d.block, q = query_heads * kD, w = int(dc.intermediate_size);
@@ -1259,9 +1275,28 @@ struct Executor::Impl {
         sa.confidence   = static_cast<float*>(d.confidence.p);
         sa.joint        = scratch;
         sa.logits       = scratch + 3 * dc.markov_rank;
-        for (int i = 1; i <= k; ++i) {
-            sa.row = i;
-            kernels::spark_step(sa, stream);
+        if (!sampled) {
+            for (int i = 1; i <= k; ++i) {
+                sa.row = i;
+                kernels::spark_step(sa, stream);
+            }
+        } else {
+            sa.scores = static_cast<float*>(workspace->alloc_bytes(std::size_t(vocab) * 4).data);
+            sa.vocab  = vocab;
+            const auto* configs = static_cast<const ops::SamplingConfig*>(d.sampling.p);
+            auto* keys          = reinterpret_cast<std::int32_t*>(
+                static_cast<std::byte*>(d.sampling.p) + sizeof(ops::SamplingConfig));
+            const Tensor scores(sa.scores, DType::FP32, {vocab, 1});
+            for (int i = 1; i <= k; ++i) {
+                sa.row = i;
+                kernels::spark_score(sa, stream);
+                Tensor drawn(sa.drafts + i - 1, DType::I32, {1});
+                ops::sample(scores, drawn, std::min(vocab, sample_domain()), configs,
+                            Tensor(keys + i - 1, DType::I32, {1}), ops::kSamplePurposeDecode,
+                            *workspace, stream);
+                sa.sampled = sa.drafts + i - 1;
+                kernels::spark_take(sa, stream);
+            }
         }
         auto* host = static_cast<std::uint8_t*>(d.host->data());
         CUDA_CHECK(cudaMemcpyAsync(host, d.drafts.p, std::size_t(k) * 4, cudaMemcpyDeviceToHost, stream));
@@ -1269,8 +1304,10 @@ struct Executor::Impl {
                                    cudaMemcpyDeviceToHost, stream));
     }
 
+    // `config` and `length`: a row's sampler and committed length (draft()), or null.
     void spark_draft(std::uint32_t sequence, std::int32_t anchor, std::span<std::int32_t> drafts,
-                     std::span<float> confidence) {
+                     std::span<float> confidence, const ops::SamplingConfig* config = nullptr,
+                     std::int32_t length = 0) {
         if (!spark) { throw std::logic_error("inkling2: an executor without the DSpark drafter"); }
         Spark& d    = *spark;
         const int b = d.block;
@@ -1289,7 +1326,25 @@ struct Executor::Impl {
         tokens[0] = anchor;
         for (int i = 0; i < b; ++i) { pos[i] = std::int32_t(first) + i; }
         stage(tokens, pos, seq);
-        run_graph(48 + std::uint32_t(k), [&] { spark_pass(k); });
+        const bool sampled = options.sampled_drafts && config != nullptr && config->temperature > 0.0F;
+        if (sampled) {
+            // The target's own draw of draft i's position is keyed (seed, length + i + 1).
+            auto* host = static_cast<std::byte*>(d.host_sampling->data());
+            ops::SamplingConfig c = *config;
+            c.presence_penalty    = 0.0F;
+            c.frequency_penalty   = 0.0F;
+            c.token_counts        = nullptr;
+            c.token_mask          = nullptr;
+            c.token_mask_stride   = 0;
+            c.non_finite_token    = 0;
+            std::memcpy(host, &c, sizeof(c));
+            auto* keys = reinterpret_cast<std::int32_t*>(host + sizeof(c));
+            for (int i = 0; i < k; ++i) { keys[i] = length + i + 1; }
+            CUDA_CHECK(cudaMemcpyAsync(d.sampling.p, host, sizeof(c) + std::size_t(k) * 4,
+                                       cudaMemcpyHostToDevice, stream));
+        }
+        run_graph((sampled ? 0x10000U : 0U) | (48 + std::uint32_t(k)),
+                  [&] { spark_pass(k, sampled); });
         d.copied->record(stream);
         d.copied->synchronize();
         const auto* host = static_cast<const std::uint8_t*>(d.host->data());
@@ -1573,7 +1628,8 @@ struct Executor::Impl {
         std::size_t query_rows = 0, gguf_scratch = 0, bf16_plane = 0;
         for (const LayerPlan& p : layers) {
             query_rows = std::max<std::size_t>(query_rows, p.query_rows);
-            // A BF16 matrix writing columns wider than its rows goes through a plane (project_f32).
+            // A BF16 query part writes a plane of its own rows: the relative feature's (visit) or
+            // project_f32's scratch for another part.
             for (const Weight& part : p.query) {
                 if (part.qtype == QType::BF16 && part.n != p.query_rows) {
                     bf16_plane = std::max<std::size_t>(bf16_plane, part.n);
@@ -1610,6 +1666,10 @@ struct Executor::Impl {
         add(t * h * 4);                   // MoE raw mix
         if (options.dspark) {             // the drafter's stored taps
             add((model.dspark_config()->target_visits.size() - 1) * t * h * 4);
+            if (options.sampled_drafts) { // a sampled step's row and its sampler
+                add(std::size_t(vocab) * 4);
+                add(ops::sampling_workspace_capacity_bytes(std::min(vocab, sample_domain()), 1, 1));
+            }
         }
         // Visit scope.
         add(t * query_rows * 4);          // [Q; gate; relative]
@@ -1968,19 +2028,24 @@ struct Executor::Impl {
     }
 
     // W x into FP32 [T][column_stride] from row `row`, x in the call's form: q8_1 rows (up to 8)
-    // or BF16 rows.
+    // or BF16 rows. A BF16 W multiplies the BF16 rows in either form (a call of q8_1 rows writes
+    // them too where attention_bf16 needs them).
     void product(const Weight& w, const void* xq, const __nv_bfloat16* x, int t, float* out,
                  int column_stride, int row = 0) {
-        if (xq != nullptr) {
+        if (xq != nullptr && w.qtype != QType::BF16) {
             vector_f32(xq, w, t, out, column_stride, row);
             return;
+        }
+        if (x == nullptr) {
+            throw std::logic_error("inkling2: a BF16 product of a call without BF16 rows");
         }
         project_f32(Tensor(const_cast<__nv_bfloat16*>(x), DType::BF16, {w.k, t}), w, out,
                     column_stride, row);
     }
 
-    // product() for a layer's projections of one call: with q8_1 inputs those of one block type
-    // and row size share a launch (ops::detail::gguf_vector_project).
+    // product() for a layer's projections of one call: the GGUF matrices with q8_1 inputs of one
+    // block type and row size share a launch (ops::detail::gguf_vector_project); the others run
+    // one at a time.
     struct Projection {
         const Weight* w;
         const void* xq;
@@ -1990,20 +2055,20 @@ struct Executor::Impl {
         int row;
     };
     void products(std::span<const Projection> list, int t) {
-        if (std::any_of(list.begin(), list.end(), [](const Projection& p) { return p.xq == nullptr; })) {
-            for (const Projection& p : list) {
+        std::vector<ops::detail::GgufVectorProduct> queued;
+        queued.reserve(list.size());
+        for (const Projection& p : list) {
+            if (p.xq == nullptr || p.w->qtype == QType::BF16) {
                 product(*p.w, p.xq, p.x, t, p.out, p.column_stride, p.row);
+                continue;
             }
-            return;
+            ops::detail::GgufVectorProduct& q = queued.emplace_back();
+            q.weight            = p.w;
+            q.activation        = p.xq;
+            q.out.f32           = p.out + p.row;
+            q.out.column_stride = p.column_stride;
         }
-        std::vector<ops::detail::GgufVectorProduct> queued(list.size());
-        for (std::size_t i = 0; i < list.size(); ++i) {
-            queued[i].weight            = list[i].w;
-            queued[i].activation        = list[i].xq;
-            queued[i].out.f32           = list[i].out + list[i].row;
-            queued[i].out.column_stride = list[i].column_stride;
-        }
-        ops::detail::gguf_vector_project(queued, t, stream);
+        if (!queued.empty()) { ops::detail::gguf_vector_project(queued, t, stream); }
     }
 
     static constexpr std::size_t kStagingRegions = 4;
@@ -2120,15 +2185,16 @@ struct Executor::Impl {
         return m;
     }
 
+    // A call of BF16 rows writes them; a call of q8_1 rows writes those, and the BF16 rows where it
+    // holds them (`bf16` null otherwise: its attention inputs with attention_bf16).
     void set_outputs(const Call& c, __nv_bfloat16*& out, kernels::Q8Rows& out_q, float*& f32,
                      std::int64_t& q8_stride, __nv_bfloat16* bf16, const Q8Act& q,
                      std::size_t q_stride, float* rows) const {
         if (c.q8) {
             out_q     = q.rows;
             q8_stride = std::int64_t(q_stride);
-        } else {
-            out = bf16;
         }
+        out = bf16;
         f32 = rows;
     }
 
@@ -2375,9 +2441,23 @@ struct Executor::Impl {
         auto* qgr = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * lp.query_rows * 4).data);
         auto* kv  = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * 2 * kvd * 4).data);
         auto* sinks = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * query_heads * 4).data);
+        // The relative feature's rows: in the product's at column 2 q_floats, or, from a BF16
+        // matrix of its own (Linear's A16 route writes whole [N][T] planes), a plane of their own.
+        const float* relative        = qgr + 2 * q_floats;
+        std::int64_t relative_stride = lp.query_rows;
         std::vector<Projection> qkv;
         for (std::size_t i = 0, row = 0; i < lp.query.size(); row += lp.query[i].n, ++i) {
-            qkv.push_back({&lp.query[i], input_q(c, 0), bf16_in(0), qgr, lp.query_rows, int(row)});
+            const Weight& part = lp.query[i];
+            if (part.qtype == QType::BF16 && int(row) == 2 * q_floats && part.n == query_heads * rel &&
+                part.n != lp.query_rows) {
+                auto* plane = static_cast<float*>(
+                    workspace->alloc_bytes(std::size_t(t) * part.n * 4).data);
+                qkv.push_back({&part, input_q(c, 0), bf16_in(0), plane, part.n, 0});
+                relative        = plane;
+                relative_stride = part.n;
+                continue;
+            }
+            qkv.push_back({&part, input_q(c, 0), bf16_in(0), qgr, lp.query_rows, int(row)});
         }
         qkv.push_back({&lp.key, input_q(c, ki), bf16_in(ki), kv, 2 * kvd, 0});
         qkv.push_back({&lp.value, input_q(c, vi), bf16_in(vi), kv, 2 * kvd, kvd});
@@ -2388,17 +2468,25 @@ struct Executor::Impl {
         const int tap_columns = 2 * kv_heads * kTaps;
         if (lp.full) {
             taps = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * tap_columns * 4).data);
-            kernels::gemm_f32(kv_heads * kTaps, t, hidden, lp.key_taps, f32_in(ki), taps, stream, 0,
-                              tap_columns);
-            kernels::gemm_f32(kv_heads * kTaps, t, hidden, lp.value_taps, f32_in(vi),
-                              taps + kv_heads * kTaps, stream, 0, tap_columns);
+            // The key and value taps in one batch: gemm_f32_batch computes both exactly as
+            // gemm_f32 does (per-entry weights, activations and output columns).
+            kernels::GemvBatch tap_batch;
+            tap_batch.w[0]     = lp.key_taps;
+            tap_batch.x[0]     = f32_in(ki);
+            tap_batch.out[0]   = taps;
+            tap_batch.w[1]     = lp.value_taps;
+            tap_batch.x[1]     = f32_in(vi);
+            tap_batch.out[1]   = taps + kv_heads * kTaps;
+            tap_batch.count    = 2;
+            kernels::gemm_f32_batch(kv_heads * kTaps, t, hidden, tap_batch, stream, 0, tap_columns);
         }
         auto* q = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * q_floats * 4).data);
         auto* r = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * query_heads * rel * 4).data);
         kernels::QueryArgs qa;
         qa.qgr             = qgr;
         qa.stride          = lp.query_rows;
-        qa.relative_column = 2 * q_floats;
+        qa.relative        = relative;
+        qa.relative_stride = relative_stride;
         qa.tokens          = t;
         qa.heads           = query_heads;
         qa.query_clip      = lp.query_clip;
@@ -2494,17 +2582,18 @@ struct Executor::Impl {
         }
         kernels::attention_inputs(qa, ka, stream);
         if (quantized && kvfmt.staged()) {
-            for (const auto& [src, plane] :
-                 {std::pair{ka.k_cache, k_view}, std::pair{ka.v_cache, v_view}}) {
-                kernels::KvStoreArgs store;
-                store.rows            = c.rows;
-                store.src             = src;
-                store.src_head_stride = std::int64_t(t) * kD;
-                store.rows_count      = t;
-                store.heads           = kv_heads;
-                store.dst             = plane;
-                kernels::kv_store(store, stream);
+            kernels::KvStoreArgs stores[2];
+            const __half* srcs[2] = {ka.k_cache, ka.v_cache};
+            const KvPlaneView* planes[2] = {&k_view, &v_view};
+            for (int i = 0; i < 2; ++i) {
+                stores[i].rows            = c.rows;
+                stores[i].src             = srcs[i];
+                stores[i].src_head_stride = std::int64_t(t) * kD;
+                stores[i].rows_count      = t;
+                stores[i].heads           = kv_heads;
+                stores[i].dst             = *planes[i];
             }
+            kernels::kv_store_pair(stores[0], stores[1], stream);
         }
         if (c.chunk) {
             const auto [begin, end] = kept_history(c);
@@ -2972,6 +3061,10 @@ struct Executor::Impl {
             c.in_q_stride = q8_bytes(hidden, t);
             c.in_q        = alloc_q8(hidden, t, 3);
             c.ffn_q       = alloc_q8(hidden, t);
+            if (attention_bf16) {
+                c.in_bf16 = static_cast<__nv_bfloat16*>(
+                    workspace->alloc_bytes(std::size_t(3) * c.plane * 2).data);
+            }
         } else {
             c.in_bf16  = static_cast<__nv_bfloat16*>(
                 workspace->alloc_bytes(std::size_t(3) * c.plane * 2).data);
@@ -3159,7 +3252,13 @@ struct Executor::Impl {
     }
 
     void draft(std::span<const std::uint32_t> sequences, std::span<const std::int32_t> anchors,
-               std::uint32_t k, std::span<std::int32_t> drafts, std::span<float> confidence) {
+               std::uint32_t k, std::span<std::int32_t> drafts, std::span<float> confidence,
+               std::span<const ops::SamplingConfig> configs = {},
+               std::span<const std::int32_t> lengths       = {}) {
+        if ((!configs.empty() || !lengths.empty()) &&
+            (configs.size() != sequences.size() || lengths.size() != sequences.size())) {
+            throw std::invalid_argument("inkling2 draft: invalid samplers");
+        }
         if (spark) {
             if (anchors.size() != sequences.size() || drafts.size() != sequences.size() * k ||
                 confidence.size() != drafts.size()) {
@@ -3167,7 +3266,8 @@ struct Executor::Impl {
             }
             for (std::size_t j = 0; j < sequences.size(); ++j) {
                 spark_draft(sequences[j], anchors[j], drafts.subspan(j * k, k),
-                            confidence.subspan(j * k, k));
+                            confidence.subspan(j * k, k), configs.empty() ? nullptr : &configs[j],
+                            lengths.empty() ? 0 : lengths[j]);
             }
             return;
         }
@@ -3203,6 +3303,13 @@ struct Executor::Impl {
             std::vector<std::int32_t> drafts(options.draft_tokens);
             std::vector<float> confidence(options.draft_tokens);
             for (int pass = 0; pass < 2; ++pass) { spark_draft(0, 2, drafts, confidence); }
+            if (options.sampled_drafts) {
+                ops::SamplingConfig sampler;
+                sampler.temperature = 1.0F;
+                for (int pass = 0; pass < 2; ++pass) {
+                    spark_draft(0, 2, drafts, confidence, &sampler, 1);
+                }
+            }
         }
         positions[0] = 0;
         std::vector<std::uint32_t> sequences;
@@ -3545,8 +3652,10 @@ void Executor::commit(std::span<const std::uint32_t> sequences,
 
 void Executor::draft(std::span<const std::uint32_t> sequences,
                      std::span<const std::int32_t> anchors, std::uint32_t k,
-                     std::span<std::int32_t> drafts, std::span<float> confidence) {
-    impl_->draft(sequences, anchors, k, drafts, confidence);
+                     std::span<std::int32_t> drafts, std::span<float> confidence,
+                     std::span<const ops::SamplingConfig> configs,
+                     std::span<const std::int32_t> lengths) {
+    impl_->draft(sequences, anchors, k, drafts, confidence, configs, lengths);
 }
 
 std::uint32_t Executor::block_drafts() const noexcept {

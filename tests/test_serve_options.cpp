@@ -279,16 +279,35 @@ int main() {
         failures += check(rejected, "server accepted --draft-tokens without --spec or --lookup-ngram");
     }
     failures += check(parse({"ninfer-serve", "model.ninfer"}).embedding_residency ==
-                              ninfer::EmbeddingResidency::Device &&
+                              ninfer::EmbeddingResidency::Auto &&
                           parse({"ninfer-serve", "model.ninfer", "--embedding-residency", "host"})
-                                  .embedding_residency == ninfer::EmbeddingResidency::Host,
-                      "server did not default the embedding to the device or keep a host one");
+                                  .embedding_residency == ninfer::EmbeddingResidency::Host &&
+                          parse({"ninfer-serve", "model.ninfer", "--embedding-residency",
+                                 "device"})
+                                  .embedding_residency == ninfer::EmbeddingResidency::Device,
+                      "server did not default the embedding to auto or keep a chosen residency");
     {
         bool rejected = false;
         try {
             (void)parse({"ninfer-serve", "model.ninfer", "--embedding-residency", "ram"});
         } catch (const std::invalid_argument&) { rejected = true; }
         failures += check(rejected, "server accepted an invalid embedding residency");
+    }
+    {
+        const ninfer::KvHostTier off = parse({"ninfer-serve", "model.ninfer"}).kv_host_tier;
+        const ninfer::KvHostTier mib =
+            parse({"ninfer-serve", "model.ninfer", "--kv-host-mib", "6144"}).kv_host_tier;
+        const ninfer::KvHostTier automatic =
+            parse({"ninfer-serve", "model.ninfer", "--kv-host-mib", "auto"}).kv_host_tier;
+        failures += check(!off.enabled() && mib.enabled() && !mib.automatic &&
+                              mib.bytes == (6144ULL << 20) && automatic.enabled() &&
+                              automatic.automatic && automatic.bytes == 0,
+                          "server did not default the KV host tier off or keep --kv-host-mib");
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--kv-host-mib", "lots"});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "server accepted an invalid --kv-host-mib");
     }
     failures += check(!parse({"ninfer-serve", "model.ninfer", "--expert-residency", "host"})
                                .hybrid_experts.dma_share.has_value(),
@@ -1587,6 +1606,7 @@ int main() {
                                         "--kv-capacity",
                                         "--kv-dtype",
                                         "--kv-headroom-mib",
+                                        "--kv-host-mib",
                                         "--kv-lease-growth",
                                         "--lenient-assistant-history",
                                         "--lenient-image-detail",
@@ -1962,9 +1982,17 @@ int main() {
                 parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
                        "--mtp-attention-window", "4096"})
                             .speculative.mtp_attention_window == 4096 &&
-                    parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3"})
-                            .speculative.mtp_attention_window == 0,
-                "--mtp-attention-window was not an off-by-default MTP option");
+                    !parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3"})
+                         .speculative.mtp_attention_window &&
+                    !parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
+                            "--mtp-attention-window", "auto"})
+                         .speculative.mtp_attention_window &&
+                    parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
+                           "--mtp-attention-window", "0"})
+                            .speculative.mtp_attention_window == 0U &&
+                    parse({"ninfer-serve", "model.ninfer", "--mtp-attention-window", "0"})
+                            .speculative.mtp_attention_window == 0U,
+                "--mtp-attention-window did not take auto (the default), 0 or a width");
             for (const std::vector<std::string>& bad :
                  {std::vector<std::string>{"--mtp-attention-window", "4096"},
                   std::vector<std::string>{"--spec", "mtp", "--draft-tokens", "5",

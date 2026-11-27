@@ -152,6 +152,10 @@ try {
         }
         $PythonArgs = @("-DPython3_EXECUTABLE=$((Resolve-Path -LiteralPath $PythonExecutable).Path.Replace('\', '/'))")
     }
+    # The build compiles Mbed TLS from its pinned release archive (cmake/MediaSources.cmake).
+    cmake '-DNINFER_MEDIA_SOURCES_DIR=third_party/media-sources' '-DNINFER_MEDIA_SOURCES_ONLY=MBEDTLS' `
+          -P cmake/FetchMediaSources.cmake
+    if ($LASTEXITCODE -ne 0) { throw "fetching the Mbed TLS release failed ($LASTEXITCODE)" }
     cmake -S . -B $BuildDir -G Ninja '-DCMAKE_BUILD_TYPE=Release' "-DCMAKE_CUDA_ARCHITECTURES=$Arch" `
           "-DCMAKE_RC_COMPILER=$RcCmake" `
           "-DCMAKE_TOOLCHAIN_FILE=$VcpkgToolchain" '-DVCPKG_TARGET_TRIPLET=x64-windows' `
