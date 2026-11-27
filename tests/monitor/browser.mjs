@@ -12,7 +12,12 @@ try {
   {id:2,model:'fixture',status:'done',time_unix_ms:2,output_tokens:8,prompt_tokens:100,cached_tokens:0,ttft_seconds:.4,total_seconds:3,decode_seconds:1,drafter:'mtp',drafted_tokens:10,accepted_tokens:6},
   {id:3,model:'fixture',status:'failed',time_unix_ms:3,ttft_seconds:99,total_seconds:99},
   {id:4,model:'fixture',status:'done',time_unix_ms:4,output_tokens:0,ttft_seconds:0,total_seconds:.5},
-  {id:5,model:'different',status:'done',time_unix_ms:5,output_tokens:8,ttft_seconds:20,total_seconds:20}
+  {id:5,model:'different',status:'done',time_unix_ms:5,prompt_tokens:9999,cached_tokens:0,prefill_seconds:.1,output_tokens:80,decode_seconds:.1,ttft_seconds:20,total_seconds:20},
+  {id:6,model:'fixture',status:'done',prompt_tokens:1024,cached_tokens:512,prefill_seconds:2,output_tokens:17,decode_seconds:2},
+  {id:7,model:'fixture',status:'done',prompt_tokens:1024,cached_tokens:0,prefill_seconds:1,output_tokens:33,decode_seconds:1},
+  {id:8,model:'fixture',status:'done',prompt_tokens:1024,cached_tokens:513,prefill_seconds:.1,output_tokens:15,decode_seconds:.1},
+  {id:9,model:'fixture',status:'done',prompt_tokens:1024,cached_tokens:0,output_tokens:17,decode_seconds:0},
+  {id:10,model:'fixture',status:'failed',prompt_tokens:9999,cached_tokens:0,prefill_seconds:.1,output_tokens:80,decode_seconds:.1}
  ];
  await ctx.route('http://127.0.0.1:8767/**',async route=>{
   const req=route.request(),url=new URL(req.url()),path=url.pathname;
@@ -38,6 +43,16 @@ try {
  assert.equal(await p.locator('#ttft50').textContent(),'100');
  assert.equal(await p.locator('#ttft95').textContent(),'400');
  assert.equal(await p.locator('#latN').textContent(),'3');
+ for(const [prefix,p50,upper] of [['prefillRate','256','1,024'],['decodeRate','8','32']]){
+  assert.equal(await p.locator('#'+prefix+'N').textContent(),'2');
+  assert.equal(await p.locator('#'+prefix+'50').textContent(),p50);
+  assert.equal(await p.locator('#'+prefix+'95').textContent(),upper);
+  assert.equal(await p.locator('#'+prefix+'99').textContent(),upper);
+ }
+ await p.locator('#selectedModel').fill('missing');await p.locator('#selectedModel').dispatchEvent('change');
+ await p.waitForFunction(()=>document.querySelector('#prefillRateN').textContent==='0'&&document.querySelector('#decodeRate50').textContent==='–');
+ await p.locator('#selectedModel').fill('fixture');await p.locator('#selectedModel').dispatchEvent('change');
+ await p.waitForFunction(()=>document.querySelector('#prefillRateN').textContent==='2');
  assert.equal(await p.locator('#mtp').textContent(),'60 %');
  assert.equal(await p.locator('#draft').textContent(),'80 %');
  assert.equal(await p.locator('#avgDecode').textContent(),'192');

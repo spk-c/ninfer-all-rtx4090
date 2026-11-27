@@ -26,6 +26,14 @@ monotonic token counters), active/waiting requests, device KV occupancy,
 draft acceptance, uptime, aggregate activity and the last 50 request events. In router mode,
 enter the exact model ID in the Model input to inspect a particular model.
 
+The request table reports P50, P95 and P99 for TTFT, total duration, prefill rate
+and decode rate over successful events in the current ring. Prefill divides
+computed prompt tokens (total minus cache hits) by prefill time and requires
+at least 512 computed tokens. Decode requires at least 16 output tokens and
+divides the output count after the first token by decode time. Each row shows
+its sample count. Live interval rates and engine-lifetime averages are separate
+from these per-request statistics.
+
 ## NVIDIA GPU sensors
 
 GET /monitor/gpu?index=0 provides optional NVML readings, including
