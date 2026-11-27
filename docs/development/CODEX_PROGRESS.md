@@ -254,3 +254,36 @@
 - Upstream still reports `b7df0a63`. PR #62 remained green and stacked.
   The other four tracked PRs had checks pending and no failed check or
   recorded review decision. Source, master and release tags are unchanged.
+
+## ChatGPT continuation checkpoint (2026-11-27)
+
+- Took over via SentinelX without interrupting coordinator PID 11104 or
+  changing integration source 1b5313ad. Corrected CTest #178 Gemma passed
+  in 5.86 s and #248 `ninfer_softmax_attention_test` passed in 433.98 s
+  (original local timeout was 360.24 s). The isolated 1200 s run with
+  telemetry remains queued, and full corrected CTest is not finished.
+- Confirmed the long test currently has no dedicated CTest TIMEOUT
+  property; the original local 360 s limit was an invocation setting.
+  Do not change production kernels or general CI timeouts on this basis.
+- Hardened local `C:/coding/ninfer-codex-deps/run-fixed-ab.py`: paired
+  performance summaries exclude repetitions whose prompt token hashes
+  differ; mismatches are persisted in failures.json and make the run
+  return nonzero. Output hashes remain a separate equality check among
+  matching inputs. All raw measurements are preserved.
+- CPU-only regression `test-ab-prompt-pairing.py` in the same directory
+  passed: one valid pair, one mismatched input with extreme synthetic
+  throughput, and one missing B arm. The report retained all five raw
+  rows and reported only the valid +10% pair. Used the SentinelX Python
+  interpreter because its service identity cannot find the user's
+  py -3.11 installation. No GPU or model was used for this fixture.
+- Reviewed SM89 graph admission in startup.cpp: per-topology classes are
+  already counted per batch and speculative width; fallback DFlash
+  pricing uses 64/96 MiB by visible context, and measured class pricing
+  is 24 MiB per 64 text layers on eligible devices. Keep SM89 defaults
+  unchanged pending the measured graph sweep. A C1/K7 startup reading
+  is not sufficient to generalize to other topology families.
+- PR #62 remains green and stacked on #57; #57/#60/#61/#63 have
+  outstanding hosted checks, with no failed job at this checkpoint.
+  All remain open. No merges or release publication. The existing
+  coordinator still owns the corrected full CTest, isolated attention,
+  packaged GPU smoke, A/B, graph screening and retrieval in that order.
