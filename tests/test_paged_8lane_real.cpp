@@ -102,7 +102,7 @@ std::vector<std::vector<std::string>> run_engine(ninfer::Engine& engine) {
             texts[std::size_t(round)][std::size_t(lane)] = result.content;
         }
     }
-    
+
     return texts;
 }
 
