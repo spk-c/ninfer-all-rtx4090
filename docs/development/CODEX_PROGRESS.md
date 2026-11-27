@@ -1,0 +1,46 @@
+# RTX 4090 development status
+
+## 2026-11-27
+
+- Fork master was `d3299b73`. iamwavecut master was `4a714474`.
+- [Sync PR #57](https://github.com/spk-c/ninfer-all-rtx4090/pull/57) includes upstream
+  #501–#510 through merge commit `a5a90362`. Both merges were conflict-free and preserve
+  upstream ancestry. The RTX 4090 device-profile entries are retained. New ternary
+  64-column profile entries apply to RTX 5090. Shared Q4 gate/up changes at 33–64
+  rows can affect Ada. Measure that route on Windows before claiming a gain.
+- [Hub PR #60](https://github.com/spk-c/ninfer-all-rtx4090/pull/60) compares native
+  filesystem path values for the cached artifact and requires a regular file.
+  The full Hub test passed on Windows with MSVC 19.51 by linking the CMake-built
+  test object into a standalone entry point. The aggregate CTest suite requires
+  building the shared test dispatcher. In the v0.1.7 release workflow the package
+  job failed and publishing was skipped. v0.1.8 had no tag at review time.
+- [Monitor PR #61](https://github.com/spk-c/ninfer-all-rtx4090/pull/61) at `801c4c2a`
+  adds bilingual prefill/decode P50/P95/P99 from successful requests. The Windows
+  host smoke and installed-Chrome Playwright fixture passed. Hosted checks and
+  live integration remain pending. Further v3 scope is tracked in #59.
+
+## Resuming validation
+
+- Windows worktrees are `C:/coding/ninfer-codex-sync`, `C:/coding/ninfer-hub-win-fix`
+  and `C:/coding/ninfer-codex-monitor`. The original worktree has two pre-existing
+  untracked HF-card items. The native SM89 Release build for the sync uses
+  `C:/coding/ninfer-codex-deps/build-1`, CUDA 13.4.92 and MSVC 19.51. Check its
+  status and CI before claiming build success. The local Ubuntu WSL registration
+  points to a missing virtual disk, so use hosted Linux CI for Linux validation.
+- The RTX 4090 uses Windows WDDM with driver 621.40. The explicit primary artifact is
+  `C:/ninfer-all/models/Huihui-Qwen3.8-27B-GSQ-RCO-IQ3S-Vision-DFlash2.ninfer`.
+  Recheck GPU occupancy and existing server processes before running inference.
+- #56 has historical K5/C2 and K7/C1 graph-reservation samples. No new default follows
+  from those samples. Start the synced binary at the existing defaults, test
+  explicit graph allowance overrides, and compare output, memory, and throughput.
+- Upstream #500 remains open. The suspect range includes paired KV stores,
+  BF16/q8_1 projections and serialized expert-copy changes. Upstream #506
+  measured a partial recovery for Inkling with its forced kernel-copy path
+  on Linux RTX 4090. Reproduce on Windows before bisecting. Confirm that the same
+  artifact and placement can load at both historical endpoints.
+- Upstream #449 and experimental #487 remain open. Evaluate elastic admission and
+  Inkling shared pages separately, including rollback, eviction and live leases.
+- Run synced serving schema and sampler tests, including the late-Reasoning cases.
+  Perform actual GPU smoke with the primary model before a release qualification
+  claim. Longer context, DFlash2/DSpark/MTP/N-Gram, graph allowance, WDDM and wide
+  decode work await measured baselines. No new inference speed or VRAM result yet.
