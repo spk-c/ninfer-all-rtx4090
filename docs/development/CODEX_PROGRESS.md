@@ -229,3 +229,28 @@
   Two independent related selectors passed: wide attention in 306.81 s
   and quantized-depth attention in 305.82 s. The corrected archive is
   produced after its own suite completes.
+
+## Phase 5 validation checkpoint
+
+- The existing coordinator remains PID 11104. The corrected dispatcher
+  built successfully and the corrected full Windows run passed Gemma
+  test #178 in 5.86 seconds. It is currently inside attention #248.
+  During the wait, the test process consumed roughly 38 CPU seconds over
+  39 wall seconds, with a point GPU utilization sample of 2%. This shows
+  ongoing host activity. No kernel deadlock diagnosis follows from that sample.
+- Audited all 41 original CTest skips. Three match the test host: Unix
+  fork-only wait checks, the two-GPU binding check, and NVFP4 TMA on SM89.
+  The other 38 require artifacts, fixture data or opt-in setup. The per-test
+  log or source prerequisite is in
+  `phase4-ctest-original-archive/skip-audit.csv`. The complete original
+  CTest dispatcher log is also preserved as `LastTest.log` there.
+- The existing queue still isolates attention with the 1200-second limit
+  after the corrected suite, then runs the packaged GPU smoke before
+  performance measurements. Do not start another test or benchmark.
+- The A/B summary generator now reports absolute paired medians, percentage
+  changes, the range of paired changes, comparable-pair counts, and hash
+  matches per prompt size. Raw JSON/CSV, failure records and percentile
+  summaries remain. Python 3.11 syntax check passed. No measured rows yet.
+- Upstream still reports `b7df0a63`. PR #62 remained green and stacked.
+  The other four tracked PRs had checks pending and no failed check or
+  recorded review decision. Source, master and release tags are unchanged.
