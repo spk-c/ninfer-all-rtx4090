@@ -1,6 +1,7 @@
 #include "core/device.h"
 #include "core/device_buffer.h"
 #include "core/expert_delivery.h"
+#include "core/mapped_host_copy.h"
 #include "core/pinned_memory.h"
 #include "core/vmm.h"
 
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -16,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,6 +30,9 @@ namespace {
 // How the disk fixtures' experts are read (a drive mirror, direct reads into a host window); the
 // Fixture copies its files into the mirror directory.
 ExpertDiskReads disk_reads;
+// How every scenario's delivery copies (ExpertDeliveryOptions::copy_kernel): main() runs them with
+// the copy engine and with the copy kernel.
+std::optional<bool> copy_kernel;
 
 const char* disk_label(bool disk) {
     if (!disk) { return "host"; }
@@ -175,6 +181,7 @@ int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesy
         bool shifting = false) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.disk          = disk_reads;
     options.pair_capacity = kPairs;
     options.cache_bytes = cache;
@@ -273,6 +280,7 @@ int run(DeviceContext& device, bool disk, std::uint64_t cache, const std::filesy
 int span_prefetch(DeviceContext& device, bool disk, const std::filesystem::path& path) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.disk          = disk_reads;
     options.pair_capacity = kPairs;
     options.cache_bytes   = 0;
@@ -336,6 +344,7 @@ int prompt_settle(DeviceContext& device, bool disk, std::uint32_t top_k,
                   const std::filesystem::path& path) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.disk          = disk_reads;
     options.pair_capacity = kPairs;
     options.cache_bytes   = 6ULL << 20;
@@ -411,6 +420,7 @@ int prompt_settle(DeviceContext& device, bool disk, std::uint32_t top_k,
 int lent_landing(DeviceContext& device, bool disk, const std::filesystem::path& path) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.pair_capacity = kPairs;
     options.cache_bytes   = 3 * kLayers * (kGu + kDown + 2 * kTail + 512);
     options.staging_bytes = 4096;
@@ -487,6 +497,7 @@ int failure_control(DeviceContext& device, const std::filesystem::path& path, bo
     // and must release the GPU wait without publishing an incomplete expert.
     if (!omit_wait) { std::filesystem::resize_file(fixture.paths.front(), 0); }
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.pair_capacity = kPairs;
     options.cache_bytes = 0;
     options.staging_bytes = 4096;
@@ -531,6 +542,7 @@ int admission_boundaries(DeviceContext& device) {
     layer.aliases = {{0, 0}};
     for (const bool suspendable : {false, true}) {
         ExpertDeliveryOptions options;
+        options.copy_kernel = copy_kernel;
         options.pair_capacity = 1;
         options.suspendable = suspendable;
         options.banks = 1;
@@ -618,6 +630,7 @@ int tier_policy(DeviceContext& device) {
         }
     }
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.pair_capacity = 64;
     options.cache_bytes = slots * 256;
     options.tier.every = 1; // a round at every pass
@@ -717,6 +730,7 @@ int cpu_share(DeviceContext& device, bool disk, double share, const std::filesys
     Fixture fixture(disk, path);
     PairEcho echo;
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.disk              = disk_reads;
     options.pair_capacity = kPairs;
     options.cache_bytes = 6ULL << 20;
@@ -795,6 +809,7 @@ int elastic_cache(DeviceContext& device, bool disk, const std::filesystem::path&
     // Every layer's slots alike, so the cache is one pool of interchangeable slots.
     Fixture fixture(disk, path, 0);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.pair_capacity = kPairs;
     options.cache_bytes   = 64ULL << 20; // every expert
     options.staging_bytes = 4096;
@@ -904,6 +919,7 @@ int elastic_cache(DeviceContext& device, bool disk, const std::filesystem::path&
 int lent_banks(DeviceContext& device, bool disk, const std::filesystem::path& path) {
     Fixture fixture(disk, path);
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.disk          = disk_reads;
     options.pair_capacity = kPairs;
     options.cache_bytes   = 0;
@@ -1079,6 +1095,7 @@ int slot_pools(DeviceContext& device) {
     };
     {
         ExpertDeliveryOptions options;
+        options.copy_kernel = copy_kernel;
         options.pair_capacity = 64;
         options.cache_bytes   = 2 * 8 * size(0) + 2 * 8 * size(2);
         options.lend_banks    = false;
@@ -1094,6 +1111,7 @@ int slot_pools(DeviceContext& device) {
     }
     {
         ExpertDeliveryOptions options;
+        options.copy_kernel = copy_kernel;
         options.pair_capacity = 64;
         options.cache_bytes   = 64ULL << 20; // every expert
         options.suspendable   = true;
@@ -1185,6 +1203,7 @@ int alignment(DeviceContext& device) {
         }
     };
     ExpertDeliveryOptions options;
+    options.copy_kernel = copy_kernel;
     options.pair_capacity = 64;
     options.cache_bytes   = 64ULL << 10; // fewer slots than experts: narrow calls also lend banks
     ExpertDelivery delivery(device.rank(0), {}, layers, options);
@@ -1336,16 +1355,27 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Usage: ninfer_expert_delivery_test [--case NAME]\n");
             return 2;
         }
+        std::vector<std::optional<bool>> copies{false, true};
+        if (std::getenv("NINFER_MISS_COPY_KERNEL") != nullptr) {
+            copies = {std::nullopt};
+        } else if (serialized_copy_queue()) {
+            copies = {true};
+        }
         int failures = 0;
         bool selected = false;
-        for (const auto& [name, execute] : cases) {
-            if (argc == 3 && name != argv[2]) { continue; }
-            selected = true;
-            std::printf("START expert-delivery case %s\n", name.c_str());
-            const int result = execute();
-            failures += result;
-            std::printf("%s expert-delivery case %s (exit %d)\n",
-                        result == 0 ? "PASS" : "FAIL", name.c_str(), result);
+        for (const auto copy : copies) {
+            copy_kernel = copy;
+            std::printf("-- %s\n", !copy ? "copies as forced" : *copy ? "copy kernel" : "copy engine");
+            for (const auto& [name, execute] : cases) {
+                if (argc == 3 && name != argv[2]) { continue; }
+                selected = true;
+                disk_reads = {};
+                std::printf("START expert-delivery case %s\n", name.c_str());
+                const int result = execute();
+                failures += result;
+                std::printf("%s expert-delivery case %s (exit %d)\n",
+                            result == 0 ? "PASS" : "FAIL", name.c_str(), result);
+            }
         }
         if (!selected) {
             std::fprintf(stderr, "Unknown expert-delivery case: %s\n", argv[2]);

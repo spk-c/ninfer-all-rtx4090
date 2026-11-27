@@ -987,7 +987,7 @@ public:
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
     const ops::RopeYarn rope_yarn;
-    const std::uint32_t mtp_attention_window;
+    const MtpAttentionWindow mtp_attention_window;
 
     // A checkpoint captured under one execution profile (backend, proposal head, KV coding) must
     // never be replayed under another. Capture and reuse-lookup derive the tag from this one place:
@@ -1005,6 +1005,7 @@ public:
     // columns they fill.
     const bool gumbel_sampling;
     const std::size_t kv_payload_bytes;
+    const std::uint32_t kv_host_pages;
     const std::size_t graph_allowance_bytes;
     // Free device memory CUDA Graph preparation consumed at startup (instantiate, upload and one
     // launch of every executable), for comparison with graph_allowance_bytes; empty when no free

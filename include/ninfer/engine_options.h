@@ -36,6 +36,19 @@ struct KvCapacityPolicy {
     }
 };
 
+// Qwen3.5 family, one device (`--kv-host-mib`): the KV pool continues past what device memory
+// holds into pinned host memory at the pool's highest pages, which the device reads and writes
+// across the bus in place. Requests take device pages first. Output is unchanged; a step that
+// attends over host pages reads them over the bus each time. Off by default.
+struct KvHostTier {
+    // Host bytes the pool may extend into; zero is off unless automatic.
+    std::size_t bytes = 0;
+    // As many host pages as let every lane reach max_context, within the host's available memory.
+    bool automatic = false;
+
+    [[nodiscard]] constexpr bool enabled() const noexcept { return automatic || bytes != 0; }
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup-fixed K: MTP, DFlash and DFlash2 1..15 (query width K+1).
@@ -79,9 +92,11 @@ struct SpeculativeOptions {
     std::size_t ngram_archive_bytes = 0;
     std::size_t ngram_session_bytes = 128ULL << 20;
     // MTP only: the draft head attends to its first 64 keys and the newest this many keys before
-    // its query instead of the whole history; target verification keeps full attention, so the
-    // committed tokens do not depend on it. Zero reads the whole history.
-    std::uint32_t mtp_attention_window = 0;
+    // its query instead of the whole history; target verification keeps full attention and alone
+    // chooses the committed tokens. Zero reads the whole history. nullopt leaves it to the Engine:
+    // a Qwen3.5-core model's MTP draft reads the newest 4096 keys from position 32768 on, others
+    // read the whole history.
+    std::optional<std::uint32_t> mtp_attention_window;
     // The backend was left to the Engine (no --spec): a MoE model whose artifact carries a drafter
     // drafts with it, since a verification window's routes share the layer's missing experts:
     // Qwen3.8-Flash-Next with host experts with its DFlash2 drafter, kAutomaticDFlash2Tokens a
@@ -574,11 +589,11 @@ struct EngineOptions {
     bool structured_output = false;
     // Every sampled request draws its tokens by Gumbel-max over keyed noise
     // (ResolvedSamplingParameters::gumbel) instead of by inverse CDF, and its chained drafts (an
-    // MTP block, Gemma 4's assistant) become the drafter's own draws under the noise of the
-    // positions they fill instead of its argmax, so a draft matches the verified token whenever
-    // the drafter and the target rank the drawn token first. The draws differ from the default's
-    // for the same seed; greedy requests are unaffected. DSpark drafts stay the drafter's argmax,
-    // and DFlash2 drafts keep their rejection-sampled verification.
+    // MTP block, Gemma 4's assistant, the DSpark drafters of Inkling 2 and DeepSeek-V4.1) become
+    // the drafter's own draws under the noise of the positions they fill instead of its argmax,
+    // so a draft matches the verified token whenever the drafter and the target rank the drawn
+    // token first. The draws differ from the default's for the same seed; greedy requests are
+    // unaffected. DFlash2 drafts keep their rejection-sampled verification.
     bool gumbel_sampling = false;
     // Admit waiting requests to free lanes while other requests prefill, instead of holding
     // admission until the staged prefill finishes.
@@ -596,6 +611,7 @@ struct EngineOptions {
     bool wddm_evictable_budget         = false;
     ModelSuspendOptions suspend;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
+    KvHostTier kv_host_tier;
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
@@ -672,8 +688,9 @@ struct EngineOptions {
     bool embedding_q6                      = false;
     // Qwen3.5 family: keep the token embedding in mapped host RAM (`--embedding-residency
     // host`). Output is unchanged (the same gather reads the same stored bytes); excludes
-    // embedding_q4/q6, which only shrink the device copy.
-    EmbeddingResidency embedding_residency = EmbeddingResidency::Device;
+    // embedding_q4/q6, which only shrink the device copy. Auto resolves at startup, and
+    // options() reports the result; the other families resolve it to Device.
+    EmbeddingResidency embedding_residency = EmbeddingResidency::Auto;
     // Qwen3.6-35B-A3B only: the MTP draft layer's routed experts are stored W8 in the artifact;
     // transcode them to the text layers' formats (Q4 gate_up, Q6 down) at load. Drafts are
     // verified exactly, so this can change acceptance but never the output distribution.

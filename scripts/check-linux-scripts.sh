@@ -35,10 +35,9 @@ if [[ -n "$crlf" ]]; then
   printf 'Linux bash rejects these outright inside a `case` block.\n' >&2
   exit 1
 fi
-# Windows scripts normally need a Bash sibling. These three Ada/RTX 4090 wrappers
-# are intentionally Windows-only (PowerShell, MSVC and native CUDA 13.4);
-# they do not ship as Linux launchers. Keep the exceptions explicit rather than
-# exempting all PowerShell scripts or weakening the Linux release guard.
+# Windows scripts normally need a Bash sibling. The exact names below are
+# project-specific Windows/SM89 developer tools, not Linux release launchers.
+# Keep the exceptions explicit; new scripts still require a counterpart or review.
 #
 # Accumulate rather than exiting on the first miss. This loop used to `exit 1` immediately, and
 # because it was failing on a cosmetic counterpart rule, none of the downloader coverage below it
@@ -47,7 +46,16 @@ fi
 missing=''
 for windows_script in "$root"/*.bat "$root"/*.ps1; do
   case "$(basename -- "$windows_script")" in
-    benchmark-rtx4090.ps1|build-rtx4090.ps1|compare-rtx4090-sfu.ps1) continue ;;
+    # Native Windows builds, launch profiles and portable package validation.
+    benchmark-rtx4090.ps1|build-rtx4090.ps1|compare-rtx4090-sfu.ps1|\
+    Start-RTX4090-Huihui-Optimized.ps1|optimize-rtx4090.ps1|\
+    publish-rtx4090-windows-release.ps1|test-rtx4090-release-smoke.ps1) continue ;;
+    # Windows benchmark/profiling harnesses for exact native SM89 artifacts.
+    ab-sm89-factorial.ps1|ab-sm89-flat-graphs.ps1|ab-sm89-long-context.ps1|\
+    bench-sm89-bonsai25.ps1|compare-upstream-rtx4090.ps1|\
+    measure-rtx4090-regressions.ps1) continue ;;
+    # Windows installer, GUI launcher and repository-owner maintenance helper.
+    install-rtx4090.ps1|launch-rtx4090-gui.ps1|update-github-project-metadata.ps1) continue ;;
   esac
   counterpart="${windows_script%.*}.sh"
   [[ -f "$counterpart" ]] || missing+="  $(basename -- "$counterpart")"$'

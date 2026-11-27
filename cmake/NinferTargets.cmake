@@ -144,8 +144,8 @@ endfunction()
 # Runtime DLL staging for the apps and tests.
 #
 # ninfer / ninfer-serve (and fully-linked test binaries) statically import the
-# FFmpeg + libcurl runtime DLLs (avutil/avcodec/avformat/swscale/swresample/libcurl
-# plus their own deps, e.g. z.dll). The vcpkg IMPORTED_LINK_DEPENDENT_LIBRARIES hook
+# FFmpeg runtime DLLs (avutil/avcodec/avformat/swscale/swresample plus their own
+# deps, e.g. z.dll). The vcpkg IMPORTED_LINK_DEPENDENT_LIBRARIES hook
 # does not reliably stage them into the output tree, and the Windows loader will not
 # search the vcpkg bin dir when the exe is launched directly -- it only searches the
 # exe's own directory, system dirs, and PATH. An unresolved import aborts the process
@@ -153,14 +153,14 @@ endfunction()
 # standalone.
 
 # Collect the vcpkg and cuBLAS runtime DLL closures, including transitive dependencies of
-# FFmpeg and curl (OpenSSL, Brotli, codecs, etc.). Staging only their direct DLLs
+# FFmpeg (codecs, etc.). Staging only their direct DLLs
 # makes the Windows loader abort before main with STATUS_DLL_NOT_FOUND (0xC0000135).
 function(ninfer_runtime_dll_list out_var)
   set(_list "")
   if(WIN32 AND NINFER_WINDOWS_KERNEL_DLL AND TARGET ninfer_kernels)
     list(APPEND _list "$<TARGET_FILE:ninfer_kernels>")
   endif()
-  if(WIN32 AND TARGET CUDA::cublas)
+  if(WIN32 AND TARGET CUDA::cublas AND NOT NINFER_STATIC_CUDA_LIBS)
     # CUDA 13 puts redistributable DLLs in bin/x64; older Toolkits use bin.
     # Do not rely on the Toolkit being on PATH, including on driverless CI hosts.
     foreach(_name cublas cublasLt)

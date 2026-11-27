@@ -135,7 +135,7 @@ try {
     await p.locator("#chatInput").fill("demo-test-only");
     await p.locator("#chatSend").click();
     await p.waitForFunction(()=>document.querySelector("#chatLog").textContent.includes("demo-test-only"));
-    assert.match(await p.locator("#chatLog").textContent(),/simulat|Simulat/i);
+    assert.match(await p.locator("#chatLog").textContent(),lang === "de" ? /simuliert/i : /simulated/i);
     await p.locator("#chatReset").click();assert.equal(await p.locator("#chatLog").textContent(),"");
     await p.locator("#clearHistory").click();assert.equal(await p.evaluate(()=>localStorage.getItem("ninfer-monitor-public-demo-history-v1")),null);
     p.off("request",capture);

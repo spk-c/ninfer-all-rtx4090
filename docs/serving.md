@@ -9,7 +9,9 @@ artifacts as a [router](#several-models-router), one Engine per loaded model.
 See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_CUDA_SYNC` setting.
 The options can also come from a file: `--config FILE` reads them, the command line overrides the
 file, and `configs/` holds one for each [launch recipe](recipes.md)
-([launch configuration files](cli.md#launch-configuration-files)).
+([launch configuration files](cli.md#launch-configuration-files)). A Hugging Face repository,
+`OWNER/REPO` or `OWNER/REPO:FILE`, may stand for the artifact's path: the server fetches the file
+into the Hub's cache before it starts ([artifacts from the Hub](cli.md#artifacts-from-the-hugging-face-hub)).
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b.ninfer \
@@ -107,8 +109,11 @@ two every 96 rounds. A width changes after it has led by 2% for four rounds in a
 request starts from the pooled averages of the requests before it. The Engine captures CUDA Graphs
 for both widths, and the KV sizing reserves graph memory for both: on an RTX 5090 with eight
 requests and an 8,192-token window, DSpine's graphs measured 264 MiB against 186 MiB with one width,
-but the reservation doubled to 4.5 GiB and the KV pool fell from 52,544 tokens to 15,680;
-`--cuda-graph-allowance-mib 2304` keeps the one-width pool. On that card with Qwen3.8-27B
+but the reservation doubled to 4.5 GiB and the KV pool fell from 52,544 tokens to 15,680, which
+`--cuda-graph-allowance-mib 2304` restored. Compute 8.6 and 12.0 now reserve the measured 24 MiB a
+graph class instead of 96 MiB ([context and memory](cli.md#context-and-memory)), 1,152 MiB for these
+classes, so the two widths no longer cost that card its one-width pool; on other cards the option
+still keeps it. On that card with Qwen3.8-27B
 (`ninfer-serve`, `bf16` KV, no copy rounds), in decode tok/s:
 
 | Workload | Drafter | 7 drafts | 15 drafts | `--adaptive-mtp`, 15 |
@@ -164,13 +169,58 @@ request starts with drafts.
 ### MTP attention window
 
 Each MTP draft step attends over the whole history of its cache, so at a long context the draft
-reads as many keys as one target attention layer, once per draft. With `--mtp-attention-window N`
-the draft head attends to the first 64 keys and the newest `N` (at least `--draft-tokens + 1`,
-rounded out to whole 64-key pages) before its first query, which keeps its read constant as the
-context grows. Only the drafts see the window: target verification attends to everything and
-alone decides which tokens are committed, so greedy output is unchanged and only the acceptance
-rate can move. The Engine rebinds the draft's page table to those pages and shifts its positions,
-so the attention kernels are the unwindowed ones. `server_start` records the window.
+reads as many keys as one target attention layer, once per draft. A window keeps that read
+constant: the draft head attends to the first 64 keys and the newest `N` (at least
+`--draft-tokens + 1`, rounded out to whole 64-key pages) before its first query. By default
+(`--mtp-attention-window auto`) a Qwen3.5-core model's draft reads the newest 4096 keys from
+position 32768 on and the whole history before it; `--mtp-attention-window N` sets a window of `N`
+keys from the first position, and `0` reads the whole history everywhere. Other families' drafters
+read their whole history and refuse a nonzero window. The Engine rebinds the draft's page table to
+those pages and shifts its positions, so the attention kernels are the unwindowed ones.
+`server_start` records the window (`auto` or the width).
+
+Only the drafts see the window: target verification attends to everything and alone chooses the
+committed tokens. The window changes which drafts survive, and a round's verification arithmetic
+depends on how many drafts it holds, so where two candidates are nearly tied a greedy reply can
+differ from one without the window, as an MTP reply can differ from plain decoding.
+
+Qwen3.8-27B GSQ-RCO IQ3_S with `rk8v4` KV and three drafts on an RTX 3090, 128 decoded tokens
+after each prompt:
+
+| Prompt tokens | Whole history (tok/s) | Window 4096 (tok/s) | Change |
+|---:|---:|---:|---:|
+| 6,734 | 113.78 | 110.76 | −2.7% |
+| 53,423 | 103.69 | 104.72 | +1.0% |
+| 106,935 | 90.32 | 94.48 | +4.6% |
+| 162,840 | 85.87 | 90.79 | +5.7% |
+
+The window of this table starts at the first position; `auto` leaves a prompt below 32768 tokens
+whole. At 6,734 tokens `auto` and `0` decoded the same reply at 113.65 and 113.54 tok/s, and at
+40,704 tokens the same reply at 107.12 and 105.87 tok/s (+1.2%).
+
+The same model and card at 105,897 prompt tokens, `auto` against `0` per KV format, one run each (a
+round is three drafts and their verification):
+
+| KV format | Whole history (tok/s) | `auto` (tok/s) | Change | ms per round, whole / `auto` | Same reply |
+|---|---:|---:|---:|---:|---|
+| `bf16` | 82.10 | 82.41 | +0.4% | 40.0 / 37.9 | no |
+| `bf16p` | 59.59 | 63.68 | +6.9% | 55.1 / 49.0 | no |
+| `int8` | 79.78 | 90.37 | +13.3% | 31.5 / 30.6 | no |
+| `fp8` | 68.03 | 67.19 | −1.2% | 38.9 / 37.6 | no |
+| `k8v4` | 67.65 | 74.06 | +9.5% | 39.1 / 36.8 | no |
+| `nvfp4` | 69.96 | 80.79 | +15.5% | 36.8 / 35.7 | no |
+| `rk8v4` | 101.44 | 103.67 | +2.2% | 31.3 / 30.4 | no |
+| `rk4v4` | 93.87 | 100.93 | +7.5% | 32.0 / 31.2 | yes |
+| `rk4v4-e8` | 82.93 | 90.51 | +9.1% | 32.2 / 31.0 | no |
+| `rk2v4-e8` | 72.74 | 79.61 | +9.4% | 33.8 / 33.0 | no |
+
+Every format's round got shorter. Where the reply changed, its drafts survived at a different rate,
+which moves the decode rate either way: with `fp8` 49% of the drafts survived against 54% without
+the window, so it decoded 1.2% slower despite rounds 1.3 ms shorter.
+
+On an RTX 5070 Ti the same model with `rk8v4` and a window of 4096 from the first position decoded
+138.91 against 135.87 tok/s at 6,734 tokens (+2.2%) and 130.92 against 129.63 at 44,816 (+1.0%), with
+the same replies.
 
 ### Vision residency
 
@@ -1084,8 +1134,10 @@ The WebUI's MCP client cannot reach an MCP server from the browser: the Streamab
 answer POST from a raw writer without CORS headers. `--webui-mcp-proxy` serves the `/cors-proxy`
 relay that the WebUI's "Use llama-server proxy" option targets (the target in the `url` query
 parameter, its headers prefixed with `x-llama-server-proxy-header-`) and reports
-`cors_proxy_enabled` in `/props`. The relay streams and forwards to any `http://` host it is given
-(`https://` is refused: there is no TLS client). It requires `--api-key` like every API route; the
+`cors_proxy_enabled` in `/props`. The relay streams and forwards to any `http://` or `https://`
+host it is given, and verifies an HTTPS server's certificate against the
+[same trusted certificates](#trusted-certificates) as media URL fetches; it never retries an
+`https://` target over plain HTTP. It requires `--api-key` like every API route; the
 WebUI sends its configured key unprefixed beside the MCP server's prefixed headers. It holds at most
 1 MiB of a reply the browser has not read yet and stops reading the MCP server until the browser
 catches up. It reaches any host, so enable it only on a trusted bind address.
@@ -1609,8 +1661,8 @@ and `--max-request-mib`.
 
 A fetch:
 
-- uses HTTP or HTTPS only, verifies TLS certificates, and sends no credentials, goes through no
-  proxy and decodes no `Content-Encoding`;
+- uses HTTP or HTTPS only, verifies the server's TLS certificate and host name, and sends no
+  credentials, goes through no proxy and decodes no `Content-Encoding`;
 - connects only to the address that the host name resolved to, and only when that address is
   outside loopback, private, shared, link-local, documentation, benchmarking, reserved and multicast
   networks, including the IPv6 forms that carry such an IPv4 address;
@@ -1620,8 +1672,20 @@ A fetch:
   cancellation.
 
 A refused URL or address returns 400 `invalid_media`, a file over SIZE 400
-`media_budget_exceeded`, a failed fetch 502 `media_fetch_failed` and a timeout 504
-`media_fetch_timeout`.
+`media_budget_exceeded`, a failed fetch 502 `media_fetch_failed` (an untrusted certificate among
+them) and a timeout 504 `media_fetch_timeout`.
+
+#### Trusted certificates
+
+HTTPS (media URLs and the [MCP relay](#webui)) uses Mbed TLS 4.3.0, which every build compiles in
+from its pinned release (TLS 1.2 and 1.3), so no build needs a system TLS or HTTP library. It
+trusts the PEM bundle that the `SSL_CERT_FILE` environment variable names, else the certificate
+directory that `SSL_CERT_DIR` names, else the system's certificates: on Windows the certificate
+store, on Linux the first of `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/ssl/ca-bundle.pem`, `/etc/pki/tls/cacert.pem` and `/etc/ssl/cert.pem` that exists (else the
+first of the directories `/etc/ssl/certs`, `/etc/pki/tls/certs` and `/usr/share/ca-certificates`).
+The container images install Ubuntu's or Debian's `ca-certificates`. A host without any of these
+needs `SSL_CERT_FILE`.
 
 ### Media formats
 
@@ -2601,6 +2665,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--rope-scaling-original-context N` | the interpolation threshold | the native window |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `auto` with the hybrid prefix cache and `--max-context` with the checkpoint catalog | `auto`; `--max-context` with the checkpoint catalog |
 | `--kv-headroom-mib N` | device memory in MiB that `--kv-capacity auto` leaves free after sizing the KV pool; requires `auto`. `--vram-headroom-mib` is accepted as an alias | `1024` |
+| `--kv-host-mib N\|auto` | Qwen3.5 family on one device under Linux: continue the KV pool into N MiB of pinned host memory that the GPU reads in place, exact but slower for the part of a context there ([KV host tier](cli.md#kv-host-tier)); `auto` sizes it for every request to reach `--max-context` | `0` (off) |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
@@ -2624,7 +2689,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--tensor-parallel-prompt-partials fp32\|bf16\|int8` | with `--tensor-parallel` on a Qwen3.5-core model or Qwen3.8-Flash-Next, how a prompt chunk's partial sums cross between the GPUs: as computed (`fp32`), rounded to BF16 (`bf16`, half their bytes) or to 8-bit blocks of 32 values with a scale (`int8`, 9/32 of their bytes). Rounding speeds up prefill where host transfers bound it, but rounds each device's partial, so prompt outputs and perplexity differ slightly ([rounded prompt partials](maintainer/pipeline-stages.md#tensor-parallelism)); decode and verification keep FP32 | `fp32` |
 | `--invariant-attention` | Qwen3.5-core models: every text attention call of 1 to 16 columns per sequence (64 for one sequence verifying a lookup window longer than 15) reduces its keys in fixed segments of the context, so a column's attention output is the same bytes at any decode width, verification window and batch ([invariant attention](maintainer/qwen3_5-model.md#invariant-attention)); MTP attention keeps its tuned splits | off |
 | `--expert-residency device\|host\|disk` | routed MoE experts on GPU, in pinned host memory, or in artifact files: [native Qwen](maintainer/qwen3_5-model.md#routed-expert-residency), [Gemma 4](gemma4.md#expert-residency), [Flint](flint.md#expert-residency), [Inkling 2](inkling2.md#expert-residency), [DeepSeek-V4.1](deepseek-v41.md#expert-residency) and [Flash-Next](qwen3-8-flash-next.md#run). Native Qwen, Gemma 4, Flint, Inkling 2 and DeepSeek-V4.1 bring misses into whole-layer device banks | `device` |
-| `--embedding-residency device\|host` | Qwen3.5 family: the input token embedding in the GPU's weight arena, or in pinned host memory mapped into the GPU, which the gather reads in place over the bus each step. The table's VRAM goes to the KV cache (Qwen3.8-27B: 388 MiB for an IQ2_S table, 1.26 GiB for Q8); output is unchanged. Excludes `--embedding-q4/q6`; refused for an artifact whose embedding is tied to the output head and for the other families. On Windows (WDDM) mapped host memory may still count against the card | `device` |
+| `--embedding-residency auto\|device\|host` | Qwen3.5 family: the input token embedding in the GPU's weight arena, or in pinned host memory mapped into the GPU, which the gather reads in place over the bus each step. The table's VRAM goes to the KV cache (Qwen3.8-27B: 388 MiB for an IQ2_S table, 1.26 GiB for Q8); output is unchanged. `host` excludes `--embedding-q4/q6` and is refused for an artifact whose embedding is tied to the output head and for the other families. `auto` selects `host` where the freed VRAM goes to a pool that takes all free memory (`--kv-capacity auto` with the hybrid prefix cache, both defaults, or the device cache of host or disk experts: Qwen3.6-35B-A3B NVFP4 with host experts on an RTX 5070 Ti decoded 0.3–1.2% and prefilled 0.9–3.5% faster with the same answers), no drafting reads the table (`--spec none` without `--lookup-ngram`, the default: a draft step gathers its token's row over the bus on the round's critical path, and MTP with 3 drafts decoded 0.15–0.39% slower), the table is untied and not transcoded, no Vision overlay borrows it, the driver is a Linux one (not Windows or WSL2, where WDDM charges pinned memory to the GPU's shared segment) and the host keeps 4 GiB available beside it and every routed expert that is off the GPU; `device` otherwise, and always for the other families. The startup log names a host table | `auto` |
 | `--expert-cache-mib N\|auto` | with host or disk experts, device memory for the most used experts; native Qwen, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 allow `0` and then keep only their layer banks, and Flash-Next disk mode needs a cache. With automatic KV, native Qwen gives the cache priority over KV beyond one request's context | `auto` (what is free after startup) |
 | `--expert-host-mib N` | Host experts: pin at most `N` MiB of them, in the artifact's order; the rest are read from the artifact's files as disk experts are, with the same results. By default the pinned block holds as many as fit the host's available memory and, on Windows and WSL2, what the GPU's shared memory segment can still lock (WDDM's budget, about half of Windows' memory however much WSL2 is given) less 4 GiB for what startup pins later. `N` replaces that segment estimate: the block then ends at `N` MiB, the available memory or the first part the host refuses, and a block that takes the whole segment can make a later startup pin fail. A part the host refuses ends the block, and the startup line names what ended it. Qwen3.8-Flash-Next GGUF experts that do not all fit run as disk experts, each copied from its pinned bytes where the block holds it ([Flash-Next](qwen3-8-flash-next.md#host-experts-that-do-not-all-fit)). Needs `--expert-residency host` | as many as fit |
 | `--expert-misses staged\|mapped` | Qwen3.8-Flash-Next only, GGUF host experts: copy each missing expert to the device while the cached experts run, into a cache slot when the [expert tier](qwen3-8-flash-next.md#the-expert-cache) admits it (`staged`), or let the expert kernels read the missing ones across the bus (`mapped`) | `staged` |
@@ -2673,7 +2738,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--lm-head-draft` | require the optimized proposal head | used when the artifact stores it |
 | `--full-draft-head` | draft through the full output head even when the artifact stores a proposal head | off |
 | `--adaptive-mtp` | MTP: each round verifies 3..`--draft-tokens` drafts (Qwen3.8-Flash-Next: 1..`--draft-tokens` for a lone request, drafting only those, and up to three in a round of several), the width favored by the drafts' measured survival and the measured round cost; DFlash, DFlash2 and DSpine on Qwen3.5-core models: each round without a copy drafts and verifies `--draft-tokens` or half of them, chosen the same way; Inkling 2's DSpark and DFlash2: a lone request's round drafts 1..`--draft-tokens`, and the request decodes plainly while its measured rounds commit tokens slower; see [Adaptive MTP](#adaptive-mtp) | off |
-| `--mtp-attention-window N` | MTP only: the draft head attends to the first 64 keys and the newest `N` before its query; verification keeps full attention; see [MTP attention window](#mtp-attention-window) | `0` (whole history) |
+| `--mtp-attention-window auto\|N` | MTP only: the draft head attends to the first 64 keys and the newest `N` before its query; verification keeps full attention; `0` reads the whole history; see [MTP attention window](#mtp-attention-window) | `auto` (Qwen3.5-core models: 4096 from position 32768) |
 | `--lookup-ngram N` | context-lookup drafting alongside `--spec` (Qwen3.8-Flash-Next: `--spec mtp` or `dflash2`; Flint, which has no drafter, and Inkling 2 without it): the last `N` tokens are matched against the sequence so far and what followed is proposed, from the occurrence the sequence was already copying while it still matches, else from the newest; exact, since verification rejects a wrong guess | `0` (off) |
 | `--ngram-draft-tokens N` | copy drafting alongside `--spec`: up to `N` tokens (1..63; above 15 only at `--max-concurrency 1`; with DFlash, DFlash2 or DSpine at least `--draft-tokens`) copied from earlier prompt, tool-result or output text that the last `--ngram-min-match` tokens match, verified by the target; `0` disables it; see [Ngram copy proposals](ngram.md) | `15` with `--spec`, else `0` |
 | `--ngram-min-match N` | shortest match a copy is drawn from, `4..64` | `12` |
@@ -2693,7 +2758,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request; see [default output limit](#default-output-limit) | largest budget that keeps every lane admissible |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
-| `--webui-mcp-proxy` | relay the WebUI's MCP traffic at `/cors-proxy` (http targets only) | off |
+| `--webui-mcp-proxy` | relay the WebUI's MCP traffic at `/cors-proxy` (http and https targets) | off |
 | `--ui-config-file PATH` | a JSON object of WebUI settings, reported as `/props` `ui_settings` ([WebUI](#webui)) | none |
 | `--structured-output` | enforce response formats (JSON, JSON Schema, regex, choice, GBNF) and strict tool arguments (see [Structured output](#structured-output)) | off |
 | `--unconstrained-response-format` | without `--structured-output`, generate a constrained request or strict tools unconstrained instead of refusing them | off |
@@ -2769,7 +2834,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--presence-penalty F` | process-level presence-penalty override | unset |
 | `--frequency-penalty F` | process-level frequency-penalty override | unset |
 | `--seed N` | fixed seed when a request omits one | fresh random seed per request |
-| `--gumbel-sampling` | draw sampled tokens by Gumbel-max over keyed noise, and MTP-style drafts as the drafter's own draws under that noise ([the CLI's coupled draws](cli.md#speculative-decoding)); a seed gives other tokens than the default draw | off |
+| `--gumbel-sampling` | draw sampled tokens by Gumbel-max over keyed noise, and MTP-style and DSpark drafts as the drafter's own draws under that noise ([the CLI's coupled draws](cli.md#speculative-decoding)); a seed gives other tokens than the default draw | off |
 | `--greedy` | force exact argmax for all requests | off |
 | `--post-thinking` | sample the answer of every thinking request with the post-thinking preset once its reasoning closes | off |
 | `--post-thinking-temperature F`, `--post-thinking-top-p F`, `--post-thinking-top-k N` | post-thinking overrides; each implies `--post-thinking` | preset |
@@ -2998,9 +3063,9 @@ receive request IDs.
 
 By default the server persistently reports aggregate activity every five seconds. `prefill` counts
 prompt suffix tokens actually computed during the interval, excluding prefix-cache hits, as each
-Engine step ends: Qwen3.8-Flash-Next computes a span of up to 16 prompt chunks in one step, so a
-long prompt's prefill lands in the interval its span ends in, and an interval inside a span shows
-none while the request counts as `running` and `prefilling`; `decode`
+Engine step ends. Qwen3.8-Flash-Next with experts off the GPU computes a span of up to 16 prompt
+chunks layer by layer in one step, and counts each layer's share of the span's tokens as the layer
+is queued, so the intervals inside a span show its rate; `decode`
 counts tokens finally committed by decode rounds, excluding the first token produced by prefill.
 For MTP, DFlash and DFlash2 this is the accepted committed output, not draft or rejected tokens.
 Pretty `batch` and JSONL `average_size` are decode row-rounds divided by decode rounds during the

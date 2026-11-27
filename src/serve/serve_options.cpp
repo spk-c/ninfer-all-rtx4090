@@ -1,4 +1,5 @@
 #include "serve/serve_options.h"
+#include "product/hub/hub.h"
 #include "product/kv_resident_options.h"
 #include "product/loop_kv_options.h"
 #include "product/option_layers.h"
@@ -21,6 +22,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -201,7 +203,8 @@ std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [options]\n"
            "\n"
-           "Serves the OpenAI Responses/Chat Completions and Anthropic Messages APIs.\n"
+           "Serves the OpenAI Responses/Chat Completions and Anthropic Messages APIs.\n" +
+           std::string(product::hub::kArtifactReferenceHelp) +
            "  --help, -h                    show this help and exit\n"
            "  --version                     print the build version and exit\n"
            "  --config FILE                 read options from an INI or flat JSON launch file\n"
@@ -252,8 +255,11 @@ std::string serve_usage_text(const char* argv0) {
            std::string(product::kInvariantAttentionHelp) +
            "  --expert-residency device|host|disk  MoE experts on GPU (default), in pinned\n"
            "                                host memory, or in artifact files\n"
-           "  --embedding-residency device|host  token embedding on GPU (default) or in\n"
-           "                                mapped pinned host memory, read in place\n"
+           "  --embedding-residency auto|device|host  token embedding on GPU or in mapped\n"
+           "                                pinned host memory, read in place; auto (default):\n"
+           "                                host where the hybrid cache sizes the KV pool from\n"
+           "                                free memory, nothing drafts and the table is\n"
+           "                                untied, on Linux\n"
            "  --expert-cache-mib N|auto     persistent GPU cache (default auto); native Qwen,\n"
            "                                Gemma, Flint and DeepSeek-V4.1 allow 0 (layer\n"
            "                                banks only).\n"
@@ -358,6 +364,11 @@ std::string serve_usage_text(const char* argv0) {
            "                                " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
+           "  --kv-host-mib N|auto          Qwen3.5 family, one device, Linux: extend the KV\n"
+           "                                pool past the device by N MiB of pinned host\n"
+           "                                memory the GPU reads across the bus (default 0,\n"
+           "                                off); auto: enough for every request to reach\n"
+           "                                --max-context, within the host's free memory\n"
            "  --kv-dtype T                  KV storage: bf16 (default), int8, fp8, rk8v4,\n"
            "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4 or bf16p;\n"
            "                                fp16: Flash-Next, Gemma 4 and Flint; mxfp8:\n"
@@ -543,10 +554,11 @@ std::string serve_usage_text(const char* argv0) {
            "                                --draft-tokens or half of them; with DSpark or\n"
            "                                DFlash2 on Inkling 2 a lone request's round takes\n"
            "                                1..--draft-tokens drafts\n"
-           "  --mtp-attention-window N      the MTP draft head attends to its first 64 keys\n"
+           "  --mtp-attention-window auto|N the MTP draft head attends to its first 64 keys\n"
            "                                and the newest N before its query, not the\n"
-           "                                whole history; verification is unchanged\n"
-           "                                (default 0: whole history)\n"
+           "                                whole history; verification is unchanged; 0\n"
+           "                                reads the whole history (default auto: Qwen3.5-\n"
+           "                                core models the newest 4096 from position 32768)\n"
            "  --ngram-draft-tokens N        copy up to N tokens (1..63) per round from\n"
            "                                earlier prompt, tool-result or output text,\n"
            "                                verified alongside --spec; on with 15 whenever\n"
@@ -598,9 +610,10 @@ std::string serve_usage_text(const char* argv0) {
            "                                per request)\n"
            "  --greedy                      force temperature 0 (exact argmax)\n"
            "  --gumbel-sampling             draw sampled tokens by Gumbel-max over keyed\n"
-           "                                noise, and MTP-style drafts as the drafter's\n"
-           "                                draws under the same noise: other tokens than\n"
-           "                                the default draw for the same seed (default off)\n"
+           "                                noise, and MTP-style and DSpark drafts as the\n"
+           "                                drafter's draws under the same noise: other\n"
+           "                                tokens than the default draw for the same seed\n"
+           "                                (default off)\n"
            "  --post-thinking               sample a thinking request's answer with the\n"
            "                                post-thinking preset (temperature 0.2) from the\n"
            "                                token after its reasoning closes (default off;\n"
@@ -678,9 +691,9 @@ std::string serve_usage_text(const char* argv0) {
            "  --cors                        send permissive CORS headers for browser clients\n"
            "  --no-webui                    do not serve a WebUI built in with\n"
            "                                NINFER_WEBUI_DIR on GET /\n"
-           "  --webui-mcp-proxy             relay the WebUI's MCP traffic at /cors-proxy;\n"
-           "                                http targets only and reaches any host, so only\n"
-           "                                on a trusted bind\n"
+           "  --webui-mcp-proxy             relay the WebUI's MCP traffic at /cors-proxy to\n"
+           "                                http and https targets; it reaches any host, so\n"
+           "                                only on a trusted bind\n"
            "  --ui-config-file PATH         JSON object of WebUI settings that /props reports\n"
            "                                as ui_settings, the WebUI's defaults (MCP servers\n"
            "                                among them)\n"
@@ -849,6 +862,19 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
                 throw std::invalid_argument(arg + " is out of range");
             }
             kv_headroom_mib = static_cast<std::size_t>(mib);
+            continue;
+        }
+        if (arg == "--kv-host-mib") {
+            const std::string value = require_value("--kv-host-mib");
+            if (value == "auto") {
+                options.kv_host_tier = KvHostTier{.bytes = 0, .automatic = true};
+                continue;
+            }
+            const std::uint64_t mib = parse_u64(value.c_str(), "kv-host-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--kv-host-mib is out of range");
+            }
+            options.kv_host_tier = KvHostTier{.bytes = static_cast<std::size_t>(mib << 20)};
             continue;
         }
         if (arg == "--max-concurrency") {
@@ -1568,9 +1594,11 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
             continue;
         }
         if (arg == "--mtp-attention-window") {
+            const char* text = require_value("--mtp-attention-window");
             options.speculative.mtp_attention_window =
-                static_cast<std::uint32_t>(parse_nonnegative_int(
-                    require_value("--mtp-attention-window"), "mtp-attention-window"));
+                std::string_view(text) == "auto" ? std::nullopt
+                               : std::optional(static_cast<std::uint32_t>(
+                                     parse_nonnegative_int(text, "mtp-attention-window")));
             continue;
         }
         if (product::switch_option(arg, "lm-head-q4", [&](bool on) { options.lm_head_q4 = on; })) {
@@ -1581,12 +1609,14 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
         }
         if (arg == "--embedding-residency") {
             const std::string residency = require_value("--embedding-residency");
-            if (residency == "device") {
+            if (residency == "auto") {
+                options.embedding_residency = EmbeddingResidency::Auto;
+            } else if (residency == "device") {
                 options.embedding_residency = EmbeddingResidency::Device;
             } else if (residency == "host") {
                 options.embedding_residency = EmbeddingResidency::Host;
             } else {
-                throw std::invalid_argument("--embedding-residency must be device or host");
+                throw std::invalid_argument("--embedding-residency must be auto, device or host");
             }
             continue;
         }
