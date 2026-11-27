@@ -221,3 +221,11 @@
 - Upstream is `b7df0a63` (#516, Tess Q8 tower documentation). The three
   contribution paths had no relevant change since `75ad218d`.
   Keep upstream PR publication and fork merges gated by review.
+
+- The original Windows suite completed all 418 entries in 4169.85 seconds:
+  375 passes, 41 CTest skips, one Gemma failure and one attention timeout.
+  The full log plus per-test CSV and timing summary are preserved in
+  `C:/coding/ninfer-codex-deps/phase4-ctest-original-archive`.
+  Two independent related selectors passed: wide attention in 306.81 s
+  and quantized-depth attention in 305.82 s. The corrected archive is
+  produced after its own suite completes.
