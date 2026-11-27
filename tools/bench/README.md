@@ -266,9 +266,12 @@ answer has exactly `--max-tokens` tokens (`--natural-eos` lets answers end). The
 
 Each row holds the burst's total tok/s (generated tokens over its wall time) and `steady_tps`, the
 rate while all N streams decode at once (from the latest first token to the earliest last token),
-with `round_ms = 1000 N / steady_tps`, the round time t(N) of N rows. It also holds TTFT and
-inter-token gaps (p50, p99, maximum), each request's decode rate, finish reasons, prompt and cached
-tokens, the device memory peak and the server's `ninfer:` metrics after the burst.
+with `round_ms = 1000 N / steady_tps`, the round time t(N) of N rows. The row includes TTFT,
+inter-token gaps and end-to-end request latency (p50, p95, p99 and maximum), per-request decode
+rates, finish reasons, prompt and cached tokens, device memory peak and server `ninfer:` metrics.
+The tool counts a measured stream as completed when it receives a finish reason, completion-token
+usage and `[DONE]`. It writes results for all requested levels and exits with status 1 if any
+measured request failed.
 
 ```bash
 python3 tools/bench/serve_load.py --base-url http://127.0.0.1:8080 --out results/c64 \
