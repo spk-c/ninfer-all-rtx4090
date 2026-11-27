@@ -287,3 +287,47 @@
   All remain open. No merges or release publication. The existing
   coordinator still owns the corrected full CTest, isolated attention,
   packaged GPU smoke, A/B, graph screening and retrieval in that order.
+
+## Phase 6: completed native validation and resumed performance screening
+
+- Corrected native Windows SM89 CTest (integration source 1b5313ad)
+  completed at 23:33:46 on 2026-11-27: 377 passed, 41 prerequisite
+  skips, no failures or timeouts; 3985.68 seconds elapsed. See
+  phase4-ctest-corrected-archive/{summary.json,cases.csv,ctest.log}.
+- The isolated attention #248 passed all causal, packed and context
+  checks in 434.63 s (full-suite result 433.98 s); both runs used 1200 s
+  timeout. This reproduces a runtime greater than the original 360 s
+  invocation limit without any assertion failure. Logs and GPU samples:
+  phase4-attention-isolated.log and phase4-attention-telemetry.csv.
+- The freshly extracted, offline-verified portable SM89 archive passed
+  all 11 GPU integration checks: initial start, Chat Completions, SSE,
+  forced tool calling, strict structured output, Vision, Native Monitor,
+  graceful stop, restart, chat after restart, graceful stop. See
+  phase4-package-gpu/checks.json and phase3-portable-validation.log.
+- The first A/B/graph/retrieval launch failed before any inference
+  measurements with UnicodeDecodeError in Python 3.11 decoding localized
+  Windows tasklist output as cp1252. Changed only the local measurement
+  harness to check the ASCII ninja.exe name in raw bytes. Extended
+  test-ab-prompt-pairing.py with invalid cp1252 byte 0x81 and reran
+  successfully. Original failure logs remain available.
+- Restarted only the remaining GPU benchmark sequence with
+  run-phase6-bench-resume.ps1 (PID 35476, started 00:00:26 on 2026-11-28).
+  The script locks its own run, verifies the pinned 1b5313ad version,
+  uses the actual Python 3.11 executable, and writes new results under
+  phase6-resumed/ rather than replacing original logs. No rebuild or
+  repeated release validation. A/B must produce usable rows before
+  continuing to graph and retrieval screening. C1 graph screening is
+  at 512 input tokens; do not generalize those results to long context
+  or adaptive/vision/concurrency configurations.
+- A/B began with actual GPU inference on v0.1.4. At this checkpoint,
+  five reference prompts completed (512 through 65536 computed tokens);
+  no comparable new-build pair yet. Manifest: phase6-resumed/fixed-ab/
+  manifest.json. NVIDIA driver 621.40. Baseline binary SHA256
+  1fcb3f20934997a81d980843e5ee3a0767de1ff82ee58153c543ea843004ff97;
+  candidate binary SHA256
+  1a00976cf25b52c1e704d46dfd4406b3715d9451d686d17c5f55769b46ba0f98.
+- PR #60 is fully green (19 successful CI jobs, six expected skips).
+  #62 remains green and stacked on #57; #57/#61/#63 still have
+  outstanding checks. No failed hosted checks at this checkpoint.
+  All PRs remain open. No master, integration source or release tag
+  changes. No release approval or performance claim yet.
