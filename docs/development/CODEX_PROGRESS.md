@@ -123,3 +123,20 @@
 - Draft release notes are `C:/coding/ninfer-codex-deps/rtx4090-v0.1.8-release-notes.md`.
   No PR was merged as CI and review were still pending. Complete the new
   portable-package and real-GPU gates before any tag or publication.
+
+### Release gate follow-up
+
+- The full GPU-backed CTest run exposed two Gemma 4 BF16 comparison failures
+  for H=5376, T=5, despite correct FP32 residuals. PR #63 checks the
+  downstream FP64 normalization against the observable stored FP32 residual
+  and independently checks that residual against the FP64 input oracle.
+  No numerical thresholds or production routes were changed.
+  Rebuilt test object plus a separately linked dispatcher passed on RTX 4090.
+- The hosted build-only branch now points to `1b5313ad`, including the test
+  correction. Workflow 46063235612 replaces the queued older build.
+- A local SM89 Ninja portable build is running in
+  `C:/coding/ninfer-codex-deps/build-portable-v018`. See `portable-build.log`
+  and `portable-package-vcenv.log` in its parent. The native development
+  server and its staged DLLs resolved all 135 recorded imports.
+  This does not verify the separate portable package. The measurement
+  harness also waits for Ninja to exit before collecting timed samples.
