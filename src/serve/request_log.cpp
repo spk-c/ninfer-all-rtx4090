@@ -927,6 +927,12 @@ std::string format_server_start_json(
              {"cuda_graph_measured_bytes", memory.cuda_graph_measured_bytes
                                                ? Json(*memory.cuda_graph_measured_bytes)
                                                : Json(nullptr)},
+             {"cuda_graph_free_before_bytes", memory.cuda_graph_free_before_bytes
+                                                  ? Json(*memory.cuda_graph_free_before_bytes)
+                                                  : Json(nullptr)},
+             {"cuda_graph_free_after_bytes", memory.cuda_graph_free_after_bytes
+                                                 ? Json(*memory.cuda_graph_free_after_bytes)
+                                                 : Json(nullptr)},
              {"kv_payload_bytes", memory.kv_payload_bytes},
              {"kv_host_tier_bytes", memory.kv_host_tier_bytes},
              {"kv_host_tier_pages", memory.kv_host_tier_pages},

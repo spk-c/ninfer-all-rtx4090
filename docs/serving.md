@@ -3023,9 +3023,13 @@ the aggregate prompt and maximum-item token bounds plus encode peak and handoff 
 that same allocation; these bytes must not be added to `workspace.capacity_bytes`. The field is
 `null` when Vision is disabled.
 `cuda_graph_allowance_bytes` is the CUDA Graph memory the KV sizing reserved, and
-`cuda_graph_measured_bytes` the Device memory graph preparation actually took at startup (`0`
-without CUDA Graphs, `null` when no free Device memory was left to measure it by, as under WDDM
-with the card full); the startup log warns when the second exceeds the first.
+`cuda_graph_measured_bytes` the observed device-wide net free-memory decrease during graph
+preparation (`0` without CUDA Graphs, `null` when the free-memory budget is saturated or the
+counter did not decrease). It is not isolated graph allocator accounting: unrelated processes
+and WDDM budget/eviction changes may mask or inflate the delta. The raw before/after samples are
+`cuda_graph_free_before_bytes` and `cuda_graph_free_after_bytes` (both `null` without an
+observation). The startup log warns when the positive observed delta exceeds the allowance.
+Do not infer a safe smaller allowance from a missing observation.
 
 `server_start.engine` records `ngram_draft_window` and `ngram_min_match` (`--ngram-draft-tokens`,
 `0` when n-gram drafting is off, and `--ngram-min-match`), the draft-archive budgets

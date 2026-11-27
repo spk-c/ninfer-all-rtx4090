@@ -1,4 +1,5 @@
 #include "core/device_wait.h"
+#include "core/graph_memory_observation.h"
 #include "models/qwen3_5/program/structured_round.h"
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
@@ -886,10 +887,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         device.synchronize();
         if (experts) { experts->check(); }
         const std::size_t free_after = device.free_bytes();
-        graph_measured_bytes =
-            free_after == 0 ? std::nullopt
-                            : std::optional<std::size_t>(
-                                  free_before > free_after ? free_before - free_after : 0);
+        graph_free_before_bytes = free_before;
+        graph_free_after_bytes  = free_after;
+        graph_measured_bytes    = graph_memory_net_decrease(free_before, free_after);
         graph_phase.complete();
     }
     work.reset();
@@ -1272,6 +1272,8 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
     out.workspace_logical_peak_bytes = workspace_logical_peak_bytes;
     out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
     out.cuda_graph_measured_bytes    = graph_measured_bytes;
+    out.cuda_graph_free_before_bytes = graph_free_before_bytes;
+    out.cuda_graph_free_after_bytes  = graph_free_after_bytes;
     out.kv_payload_bytes             = kv_payload_bytes;
     out.kv_host_tier_bytes           = kv_arena ? kv_arena->host_bytes() : 0;
     out.kv_host_tier_pages           = kv_host_pages;

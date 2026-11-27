@@ -85,11 +85,13 @@ struct MemorySummary {
     std::size_t planned_slack_bytes               = 0;
     std::size_t workspace_logical_peak_bytes      = 0;
     std::size_t cuda_graph_allowance_bytes        = 0;
-    // Device memory CUDA Graph preparation actually took at startup (free memory before minus
-    // after instantiating, uploading and launching every executable); 0 without CUDA Graphs.
-    // Empty when the device had no free memory left after preparation (WDDM can hand out more
-    // than the card holds), which leaves the difference only a lower bound.
+    // Device-wide net free-memory decrease during graph preparation, an estimate rather than
+    // isolated allocation accounting; 0 without CUDA Graphs. Empty when the budget is saturated
+    // or the free-byte counter did not decrease (e.g. WDDM or unrelated device-memory activity).
     std::optional<std::size_t> cuda_graph_measured_bytes = 0;
+    // Raw counter readings around graph preparation; absent when no observation was performed.
+    std::optional<std::size_t> cuda_graph_free_before_bytes;
+    std::optional<std::size_t> cuda_graph_free_after_bytes;
     std::size_t kv_payload_bytes                  = 0;
     // KV host tier: the pinned host memory backing the KV pool's last pages, and how many of the
     // Main pool's pages (and of the MTP pool's) lie there; zero without a tier.

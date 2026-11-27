@@ -1,3 +1,4 @@
+#include "core/graph_memory_observation.h"
 #include "serve/operational_log.h"
 #include "serve/request_log.h"
 
@@ -34,6 +35,15 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    failures += check(ninfer::graph_memory_net_decrease(1000, 550) == 450,
+                      "positive graph memory delta lost");
+    failures += check(!ninfer::graph_memory_net_decrease(1000, 1000),
+                      "zero net change is not an allocation measurement");
+    failures += check(!ninfer::graph_memory_net_decrease(1000, 1200),
+                      "free memory increase is not an allocation measurement");
+    failures += check(!ninfer::graph_memory_net_decrease(1000, 0) &&
+                          !ninfer::graph_memory_net_decrease(0, 0),
+                      "saturated device budget is not a complete measurement");
 
     bool protected_artifact_rejected = false;
     try {
@@ -140,6 +150,8 @@ int main() {
     memory.planned_slack_bytes               = 100;
     memory.cuda_graph_allowance_bytes        = 600;
     memory.cuda_graph_measured_bytes         = 450;
+    memory.cuda_graph_free_before_bytes      = 1000;
+    memory.cuda_graph_free_after_bytes       = 550;
     memory.kv_payload_bytes                  = 400;
     memory.host_state_capacity_slots         = 3;
     memory.host_state_occupied_slots         = 1;
@@ -255,13 +267,29 @@ int main() {
               "Vision workspace layout missing");
     failures += check(server.at("memory").at("cuda_graph_measured_bytes") == 450,
                       "server_start memory does not report the measured CUDA Graph bytes");
+    failures += check(server.at("memory").at("cuda_graph_free_before_bytes") == 1000 &&
+                          server.at("memory").at("cuda_graph_free_after_bytes") == 550,
+                      "raw graph observation samples missing");
     ninfer::MemorySummary saturated = memory;
     saturated.cuda_graph_measured_bytes.reset();
+    saturated.cuda_graph_free_after_bytes = 0;
     const Json saturated_server = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
         saturated, environment, std::uint64_t{123456}));
     failures += check(saturated_server.at("memory").at("cuda_graph_measured_bytes").is_null(),
                       "CUDA Graph bytes measured with no free memory left are not reported null");
+    failures += check(saturated_server.at("memory").at("cuda_graph_free_after_bytes") == 0,
+                      "saturated raw reading lost");
+    ninfer::MemorySummary unchanged = memory;
+    unchanged.cuda_graph_measured_bytes = ninfer::graph_memory_net_decrease(1000, 1000);
+    unchanged.cuda_graph_free_after_bytes = 1000;
+    const Json unchanged_server = Json::parse(format_server_start_json(
+        "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
+        unchanged, environment, std::uint64_t{123456}));
+    failures += check(unchanged_server.at("memory").at("cuda_graph_measured_bytes").is_null() &&
+                          unchanged_server.at("memory").at("cuda_graph_free_before_bytes") == 1000 &&
+                          unchanged_server.at("memory").at("cuda_graph_free_after_bytes") == 1000,
+                      "nonpositive graph observation represented as a valid cost");
     failures += check(server.at("engine").at("rope") ==
                           Json{{"type", "none"}, {"factor", 1.0}, {"native_context", 262144}},
                       "server_start does not report the unscaled rotation");
