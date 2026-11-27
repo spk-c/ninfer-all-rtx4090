@@ -1195,11 +1195,11 @@ The endpoint supports:
   processing without generation; llama.cpp's `-1` ("no limit", the WebUI's default) and omitting
   both apply the [default output limit](#default-output-limit); llama.cpp's `n_predict` overrides
   both, as on llama.cpp's server, and any negative `n_predict` is no limit;
-- `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
+- `temperature` (any value from `0`, with no upper bound), `top_p`, presence/frequency penalties
+  (any finite value), and signed integer `seed`;
 - the compatible `top_k` and `min_p` (`0..1`) sampler extensions; `top_k` is a non-negative
-  integer, and a value above the sampler's 20-candidate domain is clamped to 20 rather than
-  rejected (llama.cpp and Ollama default to 40), on every endpoint and in `post_thinking`; the
-  request log records the effective value;
+  integer, and a value above the sampler's 64-candidate domain is clamped to 64 rather than
+  rejected, on every endpoint and in `post_thinking`; the request log records the effective value;
 - the `post_thinking` extension object (see [post-thinking sampling](#post-thinking-sampling));
 - up to four non-empty stop strings, applied to both reasoning and answer output;
 - the `ignore_eos` benchmarking extension shared with vLLM, SGLang and llama.cpp: a boolean,
@@ -1325,7 +1325,11 @@ a stop string or a cancellation, or when prose, a quoted marker or a cut call fo
 call; the recovery pass for broken calls does not apply to thinking. Under strict tools the grammar
 admits the stop token only after the thinking closes, so a constrained turn never ends inside it.
 Gemma 4's, Flint's, DeepSeek-V4.1's and Inkling 2's tool calls are read by their own decoders and are not
-recovered from their reasoning.
+recovered from their reasoning. Instead, when the request declares tools, a call that Gemma 4, Flint
+or Inkling 2 opens while its reasoning is still open ends the reasoning there, as the close marker
+would, and is read as a call: Gemma 4 can open `<|tool_call>` without writing `<channel|>` first.
+Each of these models opens a call with one token. DeepSeek-V4.1 opens a calls block with several
+tokens of text, so a block inside its reasoning stays reasoning.
 
 Messages enter the selected template in their input order. The maintained Qwen templates keep
 system/developer messages at their original positions. With `--assistant-prefill` a final assistant
@@ -1742,7 +1746,7 @@ curl http://127.0.0.1:8080/v1/completions -d '{"prompt": "The capital of France 
 ```
 
 Both accept `temperature` (below zero samples greedily), `top_k` (zero or below is the widest
-candidate set, 20), `top_p`, `min_p`, `presence_penalty`, `frequency_penalty`, `seed` (negative for
+candidate set, 64), `top_p`, `min_p`, `presence_penalty`, `frequency_penalty`, `seed` (negative for
 a random one), `stop` (a string or up to 32 strings), [`bad_words`](#banned-words), `ignore_eos`,
 `stream`, `timings_per_token`,
 `response_format`, the vLLM and llama.cpp constraint fields of [Structured
@@ -2098,7 +2102,7 @@ wire response contains typed `output` Items.
 | `max_output_tokens` | non-negative integer; omission executes with the [default output limit](#default-output-limit) but remains `null` in the Response object |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
-| `temperature` | finite number in `[0,2]` |
+| `temperature` | finite number, `0` or more |
 | `top_p` | finite number in `[0,1]` |
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
@@ -2145,11 +2149,13 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments`; `async` may only be `false` |
 | `function_call_output` | completed result with required `call_id` and optional matching name/namespace assertion; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
 
-Contiguous assistant-owned Items form one assistant history turn in the representable order
-`reasoning` -> assistant message content -> `function_call`. Multiple message Items append their
-content parts, multiple calls retain declaration order, and a reasoning-only turn is retained. A
-user, system, developer, or `function_call_output` Item ends the group; an order that would require
-rearranging assistant content fails with `invalid_assistant_history`. Results are validated by
+Contiguous assistant-owned Items form one assistant history turn: `reasoning` and assistant
+message content, then `function_call`. Multiple message Items append their content parts, multiple
+reasoning Items join in order, before or after content (a response whose model reasoned after its
+content streams its reasoning that way), multiple calls retain declaration order, and a
+reasoning-only turn is retained. A user, system, developer, or `function_call_output` Item ends the
+group; content or reasoning after a call, which the turn would render before it, fails with
+`invalid_assistant_history` unless `--lenient-assistant-history` joins it. Results are validated by
 `call_id` and reordered to call declaration order before prompt rendering; unknown, duplicate, or
 unrepresentable partial result sets fail with `invalid_tool_history`. Canonical input Items retain
 client order. Input Item IDs are preserved when supplied and generated otherwise; duplicate IDs
@@ -2312,6 +2318,13 @@ For `include:["reasoning.encrypted_content"]`, the in-progress
 not available yet. `response.output_item.done` and the terminal Response output contain the same
 complete raw mirror. A response with no reasoning Item emits no encrypted placeholder.
 
+Items open and close one after another in the order the model writes them. A model that reasons
+after its content (Inkling 2 under a template that opens the text block in the prompt) gets a
+reasoning Item after the message, and content after that goes to a new message Item; the terminal
+Response output holds the same Items, and a request that returns them joins their reasoning and
+their content again. Chat Completions streams such reasoning as `reasoning_content` deltas after
+`content` ones, and Anthropic Messages as a new Thinking block after the text block.
+
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
 and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
 does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
@@ -2412,8 +2425,8 @@ explicitly.
 `max_tokens` is optional for local clients and otherwise uses the
 [default output limit](#default-output-limit); a positive
 value is the complete output budget. `max_tokens:0` is rejected because NInfer does not expose a
-completed zero-output cache-prewarm lifecycle. `temperature`, `top_p`, `top_k` (clamped to 20
-like the OpenAI endpoints), `stop_sequences` and vLLM's [`bad_words`](#banned-words) enter Engine
+completed zero-output cache-prewarm lifecycle. `temperature` (`0` or more, past Anthropic's `1`),
+`top_p`, `top_k` (clamped to 64 like the OpenAI endpoints), `stop_sequences` and vLLM's [`bad_words`](#banned-words) enter Engine
 execution. A matched custom stop is returned as
 `stop_reason:"stop_sequence"` together with the actual `stop_sequence`; context exhaustion returns
 `model_context_window_exceeded`.
@@ -2696,6 +2709,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next host experts' calls of 9 to 64 tokens give the CPU only missing experts with at most eight pairs; wider Flash-Next calls, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 calls of more than eight tokens, and Qwen3.5/3.6 calls at or past the codec's prefill frontier or that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
 | `--iq1m-experts matrix\|vector` | DeepSeek-V4.1 and Qwen3.8-Flash-Next: IQ1_M routed experts of calls past eight tokens on the integer matrix kernel once a call routes more than 16 rows to each expert on average for their gate and up products and 6 for their down products (the vector kernel below), or always on the vector kernel in groups of eight columns; the two round the sums differently, so outputs differ slightly ([IQ1_M experts](deepseek-v41.md#iq1_m-experts-in-prompt-chunks)) | `matrix` |
 | `--expert-tail-skip N` | Qwen3.8-Flash-Next only, GGUF host experts with staged misses: a decode or verification call leaves out each routed expert its device cache lacks when every token of the call ranks it past place `N` (`1..9`) of its top ten; the other experts keep their router weights, so results change | off |
+| `--expert-route-bias B` | Host or disk experts: `0..1` added to the routing score of each expert the GPU holds when a decode or verification call chooses a layer's experts, so more of them are cache hits; the chosen experts keep the weights of their unbiased scores. Lossy: which experts a call takes, and so its output, depend on what the cache holds; prompts route as trained. Not with `--tensor-parallel` or Flash-Next native host experts ([route bias](cli.md#route-bias-toward-held-experts)) | `0` (off) |
 | `--expert-prefill-buffers 1\|2` | Qwen3.8-Flash-Next only, GGUF host experts: device buffers a long prompt's uncached experts are copied into; `2` copies the next layer's while the current layer's experts run, when half the free memory holds both. With the automatic cache the buffers hold expert cache slots between prompts ([the expert cache](qwen3-8-flash-next.md#the-expert-cache)) | `2` with the automatic expert cache, else `1` |
 | `--expert-cpu-threads N` | Host or disk experts with a CPU share: `1..256` CPU threads, the calling one included, pinned one to a physical core | `min(physical cores, usable CPUs / 2)`, at least one. Usable CPUs: the process's affinity mask, bounded by a container's CPU quota; physical cores: those in the mask. A 30-CPU container quota gives 15 threads, a 16-core/32-thread desktop 16 |
 | `--expert-cache-adaptive` | Qwen3.8-Flash-Next only: replace cold cached experts between calls; changes the CPU/GPU arithmetic partition | off |
@@ -2829,7 +2843,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--usage-chunk-choice` | give the streamed usage chunk a zero-delta choice, for strict client parsers that reject the OpenAI-conformant empty `choices` array | off |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
-| `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |
+| `--top-k N` | process-level top-k override (`0..64`; zero selects the top-64 cap) | unset |
 | `--min-p F` | process-level min-p override | unset |
 | `--presence-penalty F` | process-level presence-penalty override | unset |
 | `--frequency-penalty F` | process-level frequency-penalty override | unset |
@@ -2872,7 +2886,7 @@ request enables it with a `post_thinking` object on Chat Completions, Responses 
 {"post_thinking": {"temperature": 0.1, "top_k": 10}}
 ```
 
-The object accepts `temperature` (`0..2`; `0..1` on Messages), `top_p`, `top_k`, `min_p`,
+The object accepts `temperature` (`0` or more), `top_p`, `top_k`, `min_p`,
 `presence_penalty`, `frequency_penalty` and `seed`; an empty object selects the preset. Request
 fields override the server's post-thinking flags, omitted fields come from the preset, an omitted
 seed continues the request's seed, and `--greedy` forces temperature `0` in both phases. A request
