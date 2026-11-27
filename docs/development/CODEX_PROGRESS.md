@@ -187,3 +187,37 @@
   master change. The local portable build and hosted build-only job remain
   pending. Keep the release notes labeled draft until package and GPU gates
   actually pass.
+
+## Phase 4 validation handoff
+
+- Kept the existing coordinator (PID 11104) and integration source `1b5313ad`.
+  No new package build or overlapping GPU run was started.
+- Portable candidate `ninfer-windows-x64-cuda13.4-sm89-1b5313ad3501.7z.001`
+  passed independent outer SHA256, 7-Zip integrity, staged and extracted
+  verification of 66 inner checksums, PE dependency audit (219 resolved
+  adjacent/system/API-set imports) and all six launcher help/version calls
+  on a Windows-system-only PATH. Archive SHA256 is
+  `979913a7c235b366d40cee3a679c791ae27021786804ab57997221d86cd64014`.
+  Logs: `phase4-portable-offline.log`, `phase4-extracted-verification.log`
+  and `dist/v018-portable-dll-audit.csv` in the validation worktree.
+- CTest #248 is `ninfer_softmax_attention_test` with no selector.
+  Its dispatcher executes causal-cache (including ordinary wide decode),
+  plain/packed, and context references. Relative to fork master, the
+  relevant upstream change extends the accepted batch-row domain and
+  adds fragmented-cache cases at up to 64 rows (BF16/INT8/RK8V4/RK4V4/FP8).
+  The 360.24-second original timeout produced no case-local failure.
+  This is an unlocalized timeout. The archived v0.1.4 package has no CTest
+  dispatcher for a like-for-like timing comparison.
+- The existing coordinator calls the updated `verify-v018-package.ps1`
+  after the corrected full suite. That hook runs #248 by itself with
+  `--timeout 1200 -V` and samples GPU VRAM/utilization every three seconds.
+  It then checks the extracted release server on a system-only PATH:
+  Chat Completions, SSE termination/usage, forced strict tool calling,
+  constrained JSON, a real image, native monitor/request metrics and
+  authenticated graceful shutdown followed by restart. Logs are
+  `phase4-attention-isolated.log`, `phase4-attention-telemetry.csv`, and
+  `phase4-package-gpu/checks.json`. The GPU integration script compiled
+  under Python 3.11. Its live results are pending.
+- Upstream is `b7df0a63` (#516, Tess Q8 tower documentation). The three
+  contribution paths had no relevant change since `75ad218d`.
+  Keep upstream PR publication and fork merges gated by review.
