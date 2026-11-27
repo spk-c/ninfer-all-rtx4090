@@ -1,6 +1,11 @@
 name: Website browser regression
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/website-browser.yml'
+      - 'scripts/check-website-browser.mjs'
+      - 'scripts/check-website-lighthouse.mjs'
   schedule:
     - cron: '41 6 * * *'
   push:
