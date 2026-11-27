@@ -83,9 +83,15 @@ INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.M)
 TYPE = re.compile(r'^(struct|class|enum class)\s+(\w+)\b[^;]*?(\{|;)', re.M)
 
 
+def repo_path(path):
+    # All graph keys and policy paths use repository-relative POSIX separators,
+    # even when os.path returns native Windows paths.
+    return path.replace(os.sep, '/')
+
+
 def resolve(source, name, cache):
     for directory in [os.path.dirname(source)] + INCLUDE_DIRS:
-        candidate = os.path.normpath(os.path.join(directory, name))
+        candidate = repo_path(os.path.normpath(os.path.join(directory, name)))
         if candidate in cache or os.path.isfile(os.path.join(ROOT, candidate)):
             cache.add(candidate)
             return candidate
@@ -147,14 +153,14 @@ def main():
             for name in sorted(names):
                 if not name.endswith(SOURCE_SUFFIXES):
                     continue
-                source = os.path.relpath(os.path.join(directory, name), ROOT)
+                source = repo_path(os.path.relpath(os.path.join(directory, name), ROOT))
                 if source != UMBRELLA_OWNER and UMBRELLA in includes(source, memo, cache):
                     failures.append(f'{source} includes {UMBRELLA}; include the defining headers')
     for directory, _, names in os.walk(os.path.join(ROOT, 'src')):
         for name in sorted(names):
             if not name.endswith('.cu'):
                 continue
-            source = os.path.relpath(os.path.join(directory, name), ROOT)
+            source = repo_path(os.path.relpath(os.path.join(directory, name), ROOT))
             chain = chain_to(source, ENGINE_LEVEL, memo, cache)
             if chain:
                 failures.append(f'{source} reaches {chain[-1]}: ' + ' -> '.join(chain))
@@ -162,13 +168,13 @@ def main():
         for name in sorted(names):
             if not name.endswith('.cu'):
                 continue
-            source = os.path.relpath(os.path.join(directory, name), ROOT)
+            source = repo_path(os.path.relpath(os.path.join(directory, name), ROOT))
             allowed = HOST_API_UNITS.get(source, set())
             for header in HOST_API:
                 chain = chain_to(source, {header}, memo, cache)
                 if chain and not (header in allowed and len(chain) == 2):
                     failures.append(f'{source} reaches {header}: ' + ' -> '.join(chain))
-    names = sorted(os.path.relpath(os.path.join(directory, name), os.path.join(ROOT, CAUSAL_CACHE))
+    names = sorted(repo_path(os.path.relpath(os.path.join(directory, name), os.path.join(ROOT, CAUSAL_CACHE)))
                    for directory, _, files in os.walk(os.path.join(ROOT, CAUSAL_CACHE))
                    for name in files)
     kernel_headers = {f'{CAUSAL_CACHE}/{name}' for name in names if name.endswith('.cuh')}
