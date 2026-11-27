@@ -44,3 +44,23 @@
   Perform actual GPU smoke with the primary model before a release qualification
   claim. Longer context, DFlash2/DSpark/MTP/N-Gram, graph allowance, WDDM and wide
   decode work await measured baselines. No new inference speed or VRAM result yet.
+
+## Screening and benchmark validation
+
+- [Load benchmark PR #62](https://github.com/spk-c/ninfer-all-rtx4090/pull/62)
+  is stacked on #57. It rejects premature SSE EOF or missing final usage and
+  finish reason, writes errors to the report, and adds P95 and total request
+  latency. Four Windows Python 3.11 tests pass. The upstream-only branch is
+  `codex/upstream-serve-load-validation` at `1a50227b`, based on `4a714474`.
+  Retarget #62 to master after #57 is merged.
+- Baseline screening used the archived v0.1.4 SM89 binary at `a6b1138b528b`,
+  the primary Huihui artifact, 8192-token context limit, one lane, rk4v4,
+  DFlash2 K7 and N-Gram off. After one warmup, all three 128-token completions
+  succeeded. Engine decode was 111.52–140.14 tok/s, prefill was
+  1089.90–1178.14 tok/s on 41–42 computed prompt tokens, and client TTFT was
+  35.68–39.41 ms. Peak device memory was 22621–22679 MiB.
+  Independently generated nonces produced different prompts. These are
+  screening observations and do not establish a speed or memory delta.
+- Raw logs, hashes, launch arguments and CSV/JSON/Markdown summaries are at
+  `C:/coding/ninfer-codex-deps/baseline-8192`. Use matched prompts in both arms
+  of the candidate comparison. Exact output hashes and peak host RAM are pending.
