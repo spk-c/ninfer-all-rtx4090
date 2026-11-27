@@ -32,7 +32,8 @@ computed prompt tokens (total minus cache hits) by prefill time and requires
 at least 512 computed tokens. Decode requires at least 16 output tokens and
 divides the output count after the first token by decode time. Each row shows
 its sample count. Live interval rates and engine-lifetime averages are separate
-from these per-request statistics.
+from these per-request statistics. Exports and optional local history include the numeric
+rate percentiles and sample counts from each dashboard poll.
 
 ## NVIDIA GPU sensors
 

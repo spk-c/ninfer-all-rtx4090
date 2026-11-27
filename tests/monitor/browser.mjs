@@ -67,6 +67,7 @@ try {
  const json=p.waitForEvent('download');await p.locator('#jsonExport').click();
  const saved=JSON.parse(readFileSync(await (await json).path(),'utf8'));
  assert.ok(saved.samples.every(row=>Object.values(row).every(v=>v===null||typeof v==='number')));
+ assert.ok(saved.samples.some(row=>row.prefillRate50===256&&row.decodeRate99===32&&row.prefillRateN===2));
  const csv=p.waitForEvent('download');await p.locator('#csvExport').click();assert.match((await csv).suggestedFilename(),/\.csv$/);
  await p.locator('#chatInput').fill('synthetic chat');assert.equal(chatPosts,0);
  await p.locator('#chatSend').click();await p.waitForFunction(()=>document.querySelector('#chatLog').textContent.includes('fixture response'));

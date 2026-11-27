@@ -212,7 +212,14 @@ async function refresh(){
   const completed=recent.filter(e=>e.status==='done');
   const ttfts=completed.filter(e=>n(e.output_tokens)>0&&n(e.ttft_seconds)>0).map(e=>e.ttft_seconds*1000);
   const totals=completed.filter(e=>n(e.total_seconds)>0).map(e=>e.total_seconds*1000);
-  const summary=(prefix,values)=>{for(const p of [50,95,99])txt(prefix+p,format(percentile(values,p)));txt(prefix+'N',String(values.length))};
+  const summary=(prefix,values)=>{
+   const stats={};
+   for(const p of [50,95,99]){
+    const key=prefix+p;stats[key]=percentile(values,p);txt(key,format(stats[key]));
+   }
+   stats[prefix+'N']=values.length;txt(prefix+'N',String(values.length));
+   return stats;
+  };
   const prefillRates=[],decodeRates=[];
   for(const e of completed){
    const prompt=n(e.prompt_tokens),cached=n(e.cached_tokens),output=n(e.output_tokens);
@@ -225,7 +232,7 @@ async function refresh(){
     const rate=(output-1)/decodeTime;if(Number.isFinite(rate))decodeRates.push(rate);
    }
   }
-  summary('prefillRate',prefillRates);summary('decodeRate',decodeRates);
+  const requestRates={...summary('prefillRate',prefillRates),...summary('decodeRate',decodeRates)};
   summary('ttft',ttfts);summary('lat',totals);txt('ttft',format(percentile(ttfts,50)));
   txt('cpu',n(system.cpu_pct)!==null?format(system.cpu_pct)+' %':'–');
   txt('ram',n(system.ram_used_bytes)!==null&&n(system.ram_total_bytes)>0?format(system.ram_used_bytes/1073741824)+' / '+format(system.ram_total_bytes/1073741824):'–');
@@ -244,6 +251,7 @@ async function refresh(){
   txt('temp',available&&n(gpu.temperature_c)!==null?format(gpu.temperature_c)+' °C':'–');
   txt('power',available&&n(gpu.power_w)!==null?format(gpu.power_w)+' W':'–');
   samples.push({time:curr.time,decodeRate,prefillRate,decodeDelta,prefillDelta,completeDelta,
+   ...requestRates,
    running:curr.running,waiting:curr.waiting,gpuUtil:n(gpu.utilization_pct),gpuTemp:n(gpu.temperature_c),cpuPct:n(system.cpu_pct),ramUsedBytes:n(system.ram_used_bytes),vramUsedBytes:n(gpu.memory_used_bytes),gpuClockMHz:n(gpu.graphics_clock_mhz),memoryClockMHz:n(gpu.memory_clock_mhz),medianTtftMs:percentile(ttfts,50),latencyP95Ms:percentile(totals,95),kvUsed:used,kvCapacity:capacity,avgDecode:n(metrics['llamacpp:predicted_tokens_seconds']),avgPrefill:n(metrics['llamacpp:prompt_tokens_seconds']),dflashAcceptance:drafted?accepted/drafted*100:null,mtpAcceptance:mDraft?mAccepted/mDraft*100:null});
   saveSample(samples[samples.length-1]);
   if(samples.length>120)samples.shift();
@@ -271,7 +279,8 @@ function percentile(values,p){
  return sorted.length?sorted[Math.ceil(p*sorted.length/100)-1]:null;
 }
 const HISTORY_KEY='ninfer-monitor-history-v1';
-const fields=['time','decodeRate','prefillRate','decodeDelta','prefillDelta','completeDelta','running','waiting','gpuUtil','gpuTemp','cpuPct','ramUsedBytes','vramUsedBytes','gpuClockMHz','memoryClockMHz','medianTtftMs','latencyP95Ms','kvUsed','kvCapacity','avgDecode','avgPrefill','dflashAcceptance','mtpAcceptance'];
+const fields=['time','decodeRate','prefillRate','decodeDelta','prefillDelta','completeDelta','running','waiting','gpuUtil','gpuTemp','cpuPct','ramUsedBytes','vramUsedBytes','gpuClockMHz','memoryClockMHz','medianTtftMs','latencyP95Ms','kvUsed','kvCapacity','avgDecode','avgPrefill','dflashAcceptance','mtpAcceptance',
+ 'prefillRate50','prefillRate95','prefillRate99','prefillRateN','decodeRate50','decodeRate95','decodeRate99','decodeRateN'];
 function numericSample(s){return Object.fromEntries(fields.map(k=>[k,n(s?.[k])]))}
 function updateHistoryStatus(){txt('historyStatus',persist?tr('Saved samples')+': '+history.length:tr('History off'))}
 function saveSample(s){if(!persist)return;history.push(numericSample(s));if(history.length>500)history.shift();try{localStorage.setItem(HISTORY_KEY,JSON.stringify({version:1,samples:history}));updateHistoryStatus()}catch{persist=false;$('persist').checked=false;txt('historyStatus',tr('Storage unavailable'))}}
