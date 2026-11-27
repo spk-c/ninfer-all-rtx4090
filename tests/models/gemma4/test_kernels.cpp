@@ -352,6 +352,8 @@ void row_kernels(int hidden, int tokens, bool moe, std::mt19937& rng) {
     }
     k::attn_residual(ra, nullptr);
     check(cudaDeviceSynchronize(), "attn_residual");
+    std::vector<float> got_h(n);
+    dh.copy_to_host(got_h.data(), n * 4);
     std::vector<double> h(n), mlp(n), moe_in(n), rx(n);
     for (int t = 0; t < tokens; ++t) {
         const std::size_t r = std::size_t(t) * hidden;
@@ -359,7 +361,10 @@ void row_kernels(int hidden, int tokens, bool moe, std::mt19937& rng) {
         for (int i = 0; i < hidden; ++i) { orow[i] = __bfloat162float(o16[r + i]); }
         const auto on = rms_row(orow.data(), hidden, eps, w_post.data());
         for (int i = 0; i < hidden; ++i) { h[r + i] = double(h0[r + i]) + on[i]; }
-        const auto nn = rms_row(h.data() + r, hidden, eps, nullptr);
+        // The next normalization consumes the observable FP32 residual. Compare its BF16
+        // rounding separately so cancellation in the residual add does not mix the two checks.
+        const std::vector<double> residual(got_h.begin() + r, got_h.begin() + r + hidden);
+        const auto nn = rms_row(residual.data(), hidden, eps, nullptr);
         for (int i = 0; i < hidden; ++i) {
             mlp[r + i]    = nn[i] * ffn_norm[i];
             moe_in[r + i] = nn[i] * pre_norm[i];
@@ -367,8 +372,6 @@ void row_kernels(int hidden, int tokens, bool moe, std::mt19937& rng) {
         }
     }
     {
-        std::vector<float> got_h(n);
-        dh.copy_to_host(got_h.data(), n * 4);
         std::vector<__nv_bfloat16> got_mlp(n);
         mlp_in.copy_to_host(got_mlp.data(), n * 2);
         expect(rel_error(got_h, h) < 1e-5, name + " attn_residual h");
@@ -419,6 +422,7 @@ void row_kernels(int hidden, int tokens, bool moe, std::mt19937& rng) {
     }
     k::ffn_combine(ca, nullptr);
     check(cudaDeviceSynchronize(), "ffn_combine");
+    dh.copy_to_host(got_h.data(), n * 4);
     std::vector<double> h2(n), next(n);
     for (int t = 0; t < tokens; ++t) {
         const std::size_t r = std::size_t(t) * hidden;
@@ -436,11 +440,10 @@ void row_kernels(int hidden, int tokens, bool moe, std::mt19937& rng) {
         }
         const auto yn = rms_row(y.data(), hidden, eps, w_post2.data());
         for (int i = 0; i < hidden; ++i) { h2[r + i] = (double(h_now[r + i]) + yn[i]) * scalar[0]; }
-        const auto nx = rms_row(h2.data() + r, hidden, eps, next_norm.data());
+        const std::vector<double> residual(got_h.begin() + r, got_h.begin() + r + hidden);
+        const auto nx = rms_row(residual.data(), hidden, eps, next_norm.data());
         std::copy(nx.begin(), nx.end(), next.begin() + r);
     }
-    std::vector<float> got_h(n);
-    dh.copy_to_host(got_h.data(), n * 4);
     std::vector<__nv_bfloat16> got_next(n);
     next_out.copy_to_host(got_next.data(), n * 2);
     std::vector<std::int8_t> qs;
