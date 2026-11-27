@@ -139,8 +139,11 @@ void offline() {
     std::ofstream(snapshot / "extra" / "second.ninfer").put('x');
     expect(refuses([&] { (void)fetch({"owner/repo", ""}, quiet); }, "owner/repo:extra/second.ninfer"),
            "several artifacts are listed for the person to choose");
-    expect(resolve_artifact("owner/repo:extra/second.ninfer", quiet) ==
-               (snapshot / "extra" / "second.ninfer").string(),
+    // Hub file names use '/' even on Windows, where path::operator/ may insert '\\'.
+    // Compare paths, not their spelling, and verify that the resolved artifact exists.
+    const fs::path resolved = resolve_artifact("owner/repo:extra/second.ninfer", quiet);
+    expect(resolved == snapshot / "extra" / "second.ninfer" &&
+               fs::is_regular_file(resolved),
            "resolve_artifact returns the cached path of a reference");
     expect(resolve_artifact("local.ninfer", quiet) == "local.ninfer",
            "resolve_artifact leaves a path alone");
