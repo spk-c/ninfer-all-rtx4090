@@ -140,3 +140,50 @@
   server and its staged DLLs resolved all 135 recorded imports.
   This does not verify the separate portable package. The measurement
   harness also waits for Ninja to exit before collecting timed samples.
+
+## Phase 3 restart
+
+- Source remains pinned to `1b5313ad` for the v0.1.8 integration build.
+  Upstream advanced to `75ad218d` (#511 Gemma tool calls and #512 Tess artifact
+  docs). Neither change enters this campaign.
+- At restart, the original 418-entry CTest was still running. It reported the
+  known Gemma #178 failure and a 360-second timeout in #248
+  `ninfer_softmax_attention_test`. The timeout does not establish a
+  numerical discrepancy. The quantized depth test #251 subsequently passed
+  in 305.82 seconds. The corrected full run is queued with 1200 seconds per
+  test and the #63 patch. If a test still times out, isolate its subcase.
+- Coordinator PID 11104 runs
+  `C:/coding/ninfer-codex-deps/run-phase3-resume.ps1`. It waits for the
+  existing CTest and build processes, builds the corrected dispatcher,
+  runs CTest, audits the actual portable package if available, pins the
+  integration server, then runs the five alternating A/B repeats, the C1
+  graph matrix and retrieval. Each phase logs under the same directory
+  using the `phase3-` prefix. The original Phase 2 benchmark waiter was
+  replaced before it launched GPU work.
+- The updated A/B harness records paired hashes, request and TTFT
+  percentiles, sampled GPU utilization and device VRAM, peak process working
+  set, draft acceptance and coverage. It keeps completed rows even when
+  a later request fails and pairs by repetition rather than list position.
+  Python 3.11 compilation and the partial-result/percentile fixture passed.
+- Graph screening now uses explicit 384, 320 and 256 MiB for each C1
+  K5/K7/K9/K11/K15. It tries 192 and experimental 160 only after a
+  successful preceding run whose measured graph allocation leaves at least
+  64 MiB under the next budget. This is a gate for experiments and carries
+  no implication for defaults. The planner already prices distinct topology
+  classes separately per batch and proposal width. Its measured per-class
+  price applies on SM86 and SM120. SM89 needs its own data including peak
+  configurations, Vision and adaptive and n-gram widths.
+- Huihui reports native context 262144. Retrieval points go through a
+  262016-token prompt with 128 output tokens reserved. Above the native
+  window is a separate extrapolation test with RoPE strategy stated.
+  Startup KV capacity is recorded separately from prompt length and quality.
+- Prepared three independent branches on current upstream and pushed them
+  to the fork after checking upstream source and PR history:
+  `codex/upstream-windows-hub` (`a2d3871e`),
+  `codex/upstream-stream-validation-nov27` (`d03838b7`) and
+  `codex/upstream-gemma-residual` (`8289e9de`).
+- PR #62 remains stacked on #57. PRs #57/#60/#61/#63 were open with
+  validation pending and no recorded review decision. No release tag or
+  master change. The local portable build and hosted build-only job remain
+  pending. Keep the release notes labeled draft until package and GPU gates
+  actually pass.
