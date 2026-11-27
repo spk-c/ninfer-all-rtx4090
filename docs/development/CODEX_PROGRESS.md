@@ -89,3 +89,37 @@
   tests need the appropriate artifact. A prefill bisect has no confirmed
   local reproduction. On Windows, leave forced copy-engine settings out of
   the default graph path because serialized copy queues can deadlock.
+
+## Phase 2 release validation
+
+- `eb997a54` is the local octopus-merge candidate containing exactly the four
+  reviewed PR heads. The pushed `ci/rtx4090-shard-test/v018-validation` branch
+  triggered build-only package workflow 46062515081. This path creates no tag
+  or release and stamps a test version. Master remains at `d3299b73`.
+- Upstream advanced to `ce57d546` with #511 Gemma 4 tool formatting and quoted
+  key parsing. It is outside the four-PR candidate and awaits separate validation.
+- The initial narrow build omitted the ALL-only test DLL staging target. CTest
+  then failed to start the dispatcher with 0xc0000135. Building the full graph
+  staged the DLL closure and native executables. A targeted rerun on the same
+  candidate passed all seven tests (Hub, three protocol suites, raw completion,
+  sampling and speculative-round). The whole 418-entry CTest run was then
+  started with Python 3.11 and a 360-second per-test timeout. Review
+  `C:/coding/ninfer-codex-deps/release-validation-ctest-full.log`.
+- The SM89 sync server `a5a90362` and archived v0.1.4 both ran the fixed-prompt
+  pilot. Output text SHA256 matched at 512, 2048 and 8192 actual computed
+  tokens with cache reuse disabled and 128 generated tokens. This one-pair
+  pilot overlapped the build and establishes wiring and output parity only.
+  Logs and CSV/JSON are in `C:/coding/ninfer-codex-deps/fixed-ab-pilot`.
+- For pilot C1 K7, the effective default was 384 MiB and the sync server
+  measured 127.29 MiB of graph storage with capacity 397312 KV tokens.
+  The 768 and 512 MiB cases therefore increase the allowance for this point.
+  The historical long-context points use different settings. No default change.
+- The GPU campaign was queued locally behind CTest. It alternates A and B
+  over five repeats and seven actual prompt lengths, then runs the C1 graph
+  screening for K5/K7/K9/K11/K15 at default, 768, 512 and 384 MiB.
+  See `run-fixed-ab.py`, `fixed-ab-5.log` and `graph-c1-screening.log` in
+  `C:/coding/ninfer-codex-deps`. If the session ended early, resume the
+  incomplete arm using a fresh output directory and preserve the earlier rows.
+- Draft release notes are `C:/coding/ninfer-codex-deps/rtx4090-v0.1.8-release-notes.md`.
+  No PR was merged as CI and review were still pending. Complete the new
+  portable-package and real-GPU gates before any tag or publication.
