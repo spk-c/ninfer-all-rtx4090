@@ -64,3 +64,28 @@
 - Raw logs, hashes, launch arguments and CSV/JSON/Markdown summaries are at
   `C:/coding/ninfer-codex-deps/baseline-8192`. Use matched prompts in both arms
   of the candidate comparison. Exact output hashes and peak host RAM are pending.
+
+## Follow-up verification
+
+- Monitor #61 head `e7edce16` also includes the rate summaries and sample counts
+  in opt-in numeric history and JSON/CSV export. Re-ran the Windows host smoke
+  and native browser fixture successfully.
+- #62's strict SSE client passed real RTX 4090 streaming against the archived
+  v0.1.4 package. The upstream-only patch is pushed to its own branch.
+- Verified archive SHA256, 7-Zip integrity and all six portable launcher help
+  commands for the archived v0.1.4 package with CUDA Toolkit removed from PATH.
+  The intended Windows release-tool test subset reported 25 passed, 6 skips
+  and 8 passing subtests. The POSIX publication suite failed when invoked
+  directly under Windows (including temporary-directory cleanup errors). It
+  belongs to the hosted Linux release-tools job, which passed on #62.
+- Experimental upstream #487 head `07da430a` is on `codex/elastic-kv` at
+  `dc9c17df` in `C:/coding/ninfer-codex-elastic`. The standalone MSVC queue
+  policy test passed. Run `ninfer_inkling2_paging_test` and
+  `ninfer_paged_8lane_real_test` before integration. Set
+  `NINFER_PAGED8_ARTIFACT` to an explicit compatible Inkling artifact.
+- No Inkling artifact was present in the inspected model directories or
+  standard Hub-cache location. The Huihui and Bonsai artifacts are present.
+  Inkling BF16 DSpark, the #500 paired Inkling measurements, and real paging
+  tests need the appropriate artifact. A prefill bisect has no confirmed
+  local reproduction. On Windows, leave forced copy-engine settings out of
+  the default graph path because serialized copy queues can deadlock.
