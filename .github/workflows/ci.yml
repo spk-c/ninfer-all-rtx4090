@@ -339,7 +339,7 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m pip install numpy safetensors pytest jinja2 gguf tokenizers transformers
       - name: Run artifact, conversion, reference and pod tooling tests
-        run: python -m pytest -q tests/artifact tests/convert tests/reference tests/pods
+        run: python -m pytest -q tests/artifact tests/convert tests/reference tests/pods tests/test_serve_load.py
 
   docker-build-cache:
     name: Dockerfile build cache
