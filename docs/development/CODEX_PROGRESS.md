@@ -331,3 +331,65 @@
   outstanding checks. No failed hosted checks at this checkpoint.
   All PRs remain open. No master, integration source or release tag
   changes. No release approval or performance claim yet.
+
+## Phase 7/8: performance results, correctness diagnostics, profile candidates
+
+- Phase 6 finished at 00:41:52 on 2026-11-28. All 70 fixed-input
+  A/B requests completed; all 35 input pairs matched, and 30/35
+  output hashes matched (5/5 through 131072, 0/5 at 176128).
+  Median prefill deltas at 512/2048/8192/32768/65536/131072/176128:
+  -7.76/+0.61/+2.61/+3.06/+8.92/+13.51/+16.01 percent respectively.
+  The short prompt had +15.03% TTFT; investigate warmed short calls.
+  Long-input gains have paired-run variability and are not generalized.
+  The 176128 output difference remains a correctness investigation,
+  not proof of quality regression. See phase6-resumed/fixed-ab/.
+- All 25 C1 short-prompt graph configurations started and completed
+  a request, but the measured graph delta was sometimes zero and
+  varied considerably (K5 at 160 MiB reported 111.64 MiB).
+  384 to 160 MiB increased physical KV capacity by 13120 tokens for
+  each tested width. Do not equate this with validated context or
+  treat it as a safe default. K5 at 160 MiB did not retain the 64 MiB
+  margin in its actual observation. Updated the stopped phase6
+  coordinator's future low-budget gate to reject a nonpositive
+  previous reading; historical results and logs remain intact.
+- Both 65536 retrieval requests processed successfully but failed the
+  original strict startswith test (rk4v4/rk8v4, GDN FP16). That test
+  used raw completion, forced 128 output tokens and stored hashes,
+  not answer text. Larger cases were stopped by design.
+- Started SentinelX job job_611f6e3186db at 00:52:52, executing
+  phase7-diagnostics.py with the pinned A/B binaries. The first
+  176128-token raw-output comparisons showed different wording
+  between old DFlash2 and old nonspeculative decoding; both recalled
+  all three objects in the synthetic prompt. The new DFlash2 output
+  also retained the three objects. These examples do not establish
+  general equivalence; the new nonspeculative arm was still running.
+  The diagnostic matrix captures actual answers, compares legacy
+  forced and EOS-aware raw retrieval with chat-template retrieval,
+  isolates GDN/KV/speculation configurations, runs warmed 512-token
+  pairs, and tests K5/K7 C1/C2/C4 at 384/256 MiB with concurrent calls.
+  Long-chat tests record actual computed lengths and multiple positions.
+- Prepared four candidate PowerShell launchers plus common launcher
+  and profiles.json under C:/ninfer-all/profiles/v018-candidates.
+  All four -Preview invocations passed under PowerShell 7 (the
+  SentinelX service's legacy Windows PowerShell execution policy
+  blocks scripts; process-local invocation only, no policy changed).
+  Existing production scripts untouched. Candidate launch requires
+  explicit experimental override; validated configurations are pinned
+  by binary SHA256 and checked for active inference and free VRAM.
+- Started job job_a3d349ac9aa1 for phase8-profile-tuning.py at 00:56:01.
+  It is waiting for the phase7 completion marker, not running another
+  GPU process. After the marker, it screens K5/K7 against ordinary
+  decode, compares 1024/2048/4096 prefill chunks, checks actual
+  262016-token rendered-template inputs with 128 output tokens
+  reserved at three positions, and qualifies balanced coding with
+  strict tool/JSON schema and real vision. Only profiles passing
+  their specific parity/retrieval/feature gates get validated status.
+  Both jobs have a 3600-second SentinelX limit; inspect partial logs
+  and resume unfinished cases if the limit is reached.
+- Telemetry source fix isolated from the pinned candidate:
+  codex/graph-memory-observation, commit 89360ef0, draft PR #64.
+  It reports null for saturated/nonpositive global free-byte deltas,
+  logs raw before/after values, and rejects legacy zero readings in
+  the graph-enabled allowance sweep. Windows Python sweep regressions
+  8/8 passed. C++ build/tests and hosted CI are not yet run.
+  No graph default, master, integration binary, or release tag changed.
