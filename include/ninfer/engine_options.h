@@ -186,7 +186,8 @@ private:
 struct HybridPrefixCacheOptions {
     // Device StateImage slots holding inactive snapshots (and tap/endpoint staging). Total Device
     // StateImage capacity is max_concurrency + device_snapshot_slots. Default: one per request
-    // lane plus two (a staging slot and one for a shared prefix or another conversation).
+    // lane up to kDefaultCheckpointImages lanes, plus two (a staging slot and one for a shared
+    // prefix or another conversation).
     std::optional<std::uint32_t> device_snapshot_slots;
     // Whether startup may lower device_snapshot_slots, down to one, when the KV capacity asked
     // for (an explicit one, or one --max-context window beside the automatic headroom) would not
@@ -236,16 +237,17 @@ struct SlotAutoSaveOptions {
 
 struct ContextCacheOptions {
     // Engine resolves every optional once at construction. With C=max_concurrency, the enabled
-    // defaults are H=C, R=8, Host KV=8 GiB, P=2C, S=max(C,7) and L=2 (4 with automatic anchors);
-    // Engine::options() returns those effective values.
+    // defaults are H=min(C,8) (kDefaultCheckpointImages), R=8, Host KV=8 GiB, P=2C, S=max(C,7)
+    // and L=2 (4 with automatic anchors); Engine::options() returns those effective values.
     bool enabled = true;
     ContextCacheMode mode = ContextCacheMode::Legacy;
     HybridPrefixCacheOptions hybrid;
     // Extra Device checkpoint StateImage slots H. Total Device StateImage capacity is C + H.
     std::optional<std::uint32_t> device_state_slots;
-    // Legacy mode, Qwen3.5-core models: one more Device StateImage for each of the C requests,
-    // outside the catalog, keeps the state at the token where a stop string's match began, so a
-    // turn that the stop string ends rounds later resumes its next turn from there. A startup
+    // Legacy mode, Qwen3.5-core models: min(C,8) more Device StateImages, outside the catalog,
+    // keep the state at the token where a stop string's match began, so a turn that the stop
+    // string ends rounds later resumes its next turn from there. Past eight requests the requests
+    // share them, and one that finds none free resumes such a turn from its prompt. A startup
     // whose KV capacity does not fit beside them drops them, and Engine::options() reports it.
     // The hybrid cache keeps that state in a snapshot slot.
     bool stop_hold_images = true;
@@ -322,8 +324,10 @@ struct ContextCacheOptions {
     // (4096 tokens, or the prefill chunk when larger), extended at decode-round boundaries, rather
     // than prompt plus the whole max_tokens budget. When the pool cannot extend it, idle retained
     // owners are released least recently used first; if the smallest step still does not fit, the
-    // answer ends with finish_reason length before max_tokens. Off by default for that reason.
-    bool kv_lease_growth = false;
+    // answer ends with finish_reason length before max_tokens. Default: on past eight requests
+    // (a reservation of every request's whole output budget would hold most of the pool out of
+    // use), off otherwise for that reason; Engine::options() reports the value.
+    std::optional<bool> kv_lease_growth;
     // The engine anchors message boundaries itself: every request offers private long anchors at
     // up to L message boundaries, on the grid long_anchor_min_spacing_tokens sets, so a later
     // request that rewrites history there resumes from the anchor instead of root. L then defaults
@@ -455,6 +459,17 @@ struct HybridExpertOptions {
     // uncached expert that all its tokens rank past this many places of their top ten, without
     // giving its router weight to the others (lossy); 0 (default) serves every miss.
     std::uint32_t tail_skip_rank = 0;
+    // Host and disk experts: 0..1 added to the routing score of each expert the device holds (its
+    // cache, lent banks or disk pools) when a decode or verification call ranks a layer's experts,
+    // the chosen experts keeping the weights of their unbiased scores (lossy: which experts a call
+    // takes, and so its results, depend on what the device holds). The score is the one each
+    // router weights its experts by: the softmax probability (Qwen3.5/3.6 MoE, Gemma 4, Flash-Next,
+    // Edge0), the sigmoid (Flint; Inkling 2 with its selection bias) or DeepSeek-V4.1's
+    // sqrt-softplus with its selection bias. 0 (default): routing as trained.
+    float route_bias = 0.0F;
+    // With route_bias, also the prompt chunks' calls (ninfer-perplexity, whose scores then carry
+    // the bias at every token).
+    bool route_bias_prompts = false;
     // GGUF host experts: device buffers a wide prefill call copies its layer's uncached experts
     // into. 2 copies the next layer's while this layer's experts run, and takes the second
     // buffer's memory from the expert cache; 1 keeps one. 0 (default) takes two with the automatic
@@ -613,6 +628,10 @@ struct EngineOptions {
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     KvHostTier kv_host_tier;
     std::uint32_t max_concurrency      = 1;
+    // --max-concurrency auto (Qwen3.5-core generation): max_concurrency is the most requests, and
+    // startup lowers it to the most whose recurrent states and one --max-context KV window each
+    // fit on the devices beside the weights, at least one. Engine::options() reports the count.
+    bool max_concurrency_auto          = false;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     // Prompt tokens per prefill chunk; 0 is automatic: 1024, or 4096 for a native Qwen3.5-family MoE

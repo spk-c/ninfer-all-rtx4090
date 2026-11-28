@@ -1086,6 +1086,8 @@ they advance during a long request rather than at its completion, and their rati
 | `ninfer:cancelled_prefills_salvaged_total` | counter | cancelled prefills the context cache kept, at the point they reached or at their deepest anchor, so the retry resumes there |
 | `ninfer:paced_prefill_steps_total` | counter | prefill steps `--prefill-stall-budget-ms` cut short while another stream generated |
 | `ninfer:paced_prefill_deferred_tokens_total` | counter | prompt tokens those steps left to later steps |
+| `ninfer:kv_lease_reclaimed_extensions_total` | counter | `--kv-lease-growth` windows extended after retained cache was released for them |
+| `ninfer:kv_lease_cut_requests_total` | counter | requests whose `--kv-lease-growth` window could not grow, so the answer ended with `finish_reason=length` before its `max_tokens` |
 | `ninfer:context_selections_total{source}` | counter | admissions by the context-cache source they started from: `root` (a miss, prefilled from token zero), `private_endpoint`, `private_turn_closure`, `private_response_replay`, `private_long_anchor`, `shared_stable_prefix`; the hit rate is 1 - root / all |
 | `ninfer:context_pressure_events_total{event}` | counter | what pressure planning did to inactive owners: `private_owner_evicted`, `private_owner_degraded`, `shared_owner_evicted`, `shared_owner_degraded`, `checkpoint_dropped` |
 | `ninfer:context_pressure_searches_total{result}` | counter | pressure planning searches: `started`, `budget_exhausted`, `maximal_fallback` |
@@ -1195,11 +1197,11 @@ The endpoint supports:
   processing without generation; llama.cpp's `-1` ("no limit", the WebUI's default) and omitting
   both apply the [default output limit](#default-output-limit); llama.cpp's `n_predict` overrides
   both, as on llama.cpp's server, and any negative `n_predict` is no limit;
-- `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
+- `temperature` (any value from `0`, with no upper bound), `top_p`, presence/frequency penalties
+  (any finite value), and signed integer `seed`;
 - the compatible `top_k` and `min_p` (`0..1`) sampler extensions; `top_k` is a non-negative
-  integer, and a value above the sampler's 20-candidate domain is clamped to 20 rather than
-  rejected (llama.cpp and Ollama default to 40), on every endpoint and in `post_thinking`; the
-  request log records the effective value;
+  integer, and a value above the sampler's 64-candidate domain is clamped to 64 rather than
+  rejected, on every endpoint and in `post_thinking`; the request log records the effective value;
 - the `post_thinking` extension object (see [post-thinking sampling](#post-thinking-sampling));
 - up to four non-empty stop strings, applied to both reasoning and answer output;
 - the `ignore_eos` benchmarking extension shared with vLLM, SGLang and llama.cpp: a boolean,
@@ -1325,7 +1327,11 @@ a stop string or a cancellation, or when prose, a quoted marker or a cut call fo
 call; the recovery pass for broken calls does not apply to thinking. Under strict tools the grammar
 admits the stop token only after the thinking closes, so a constrained turn never ends inside it.
 Gemma 4's, Flint's, DeepSeek-V4.1's and Inkling 2's tool calls are read by their own decoders and are not
-recovered from their reasoning.
+recovered from their reasoning. Instead, when the request declares tools, a call that Gemma 4, Flint
+or Inkling 2 opens while its reasoning is still open ends the reasoning there, as the close marker
+would, and is read as a call: Gemma 4 can open `<|tool_call>` without writing `<channel|>` first.
+Each of these models opens a call with one token. DeepSeek-V4.1 opens a calls block with several
+tokens of text, so a block inside its reasoning stays reasoning.
 
 Messages enter the selected template in their input order. The maintained Qwen templates keep
 system/developer messages at their original positions. With `--assistant-prefill` a final assistant
@@ -1742,7 +1748,7 @@ curl http://127.0.0.1:8080/v1/completions -d '{"prompt": "The capital of France 
 ```
 
 Both accept `temperature` (below zero samples greedily), `top_k` (zero or below is the widest
-candidate set, 20), `top_p`, `min_p`, `presence_penalty`, `frequency_penalty`, `seed` (negative for
+candidate set, 64), `top_p`, `min_p`, `presence_penalty`, `frequency_penalty`, `seed` (negative for
 a random one), `stop` (a string or up to 32 strings), [`bad_words`](#banned-words), `ignore_eos`,
 `stream`, `timings_per_token`,
 `response_format`, the vLLM and llama.cpp constraint fields of [Structured
@@ -2098,7 +2104,7 @@ wire response contains typed `output` Items.
 | `max_output_tokens` | non-negative integer; omission executes with the [default output limit](#default-output-limit) but remains `null` in the Response object |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
-| `temperature` | finite number in `[0,2]` |
+| `temperature` | finite number, `0` or more |
 | `top_p` | finite number in `[0,1]` |
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
@@ -2145,11 +2151,13 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments`; `async` may only be `false` |
 | `function_call_output` | completed result with required `call_id` and optional matching name/namespace assertion; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
 
-Contiguous assistant-owned Items form one assistant history turn in the representable order
-`reasoning` -> assistant message content -> `function_call`. Multiple message Items append their
-content parts, multiple calls retain declaration order, and a reasoning-only turn is retained. A
-user, system, developer, or `function_call_output` Item ends the group; an order that would require
-rearranging assistant content fails with `invalid_assistant_history`. Results are validated by
+Contiguous assistant-owned Items form one assistant history turn: `reasoning` and assistant
+message content, then `function_call`. Multiple message Items append their content parts, multiple
+reasoning Items join in order, before or after content (a response whose model reasoned after its
+content streams its reasoning that way), multiple calls retain declaration order, and a
+reasoning-only turn is retained. A user, system, developer, or `function_call_output` Item ends the
+group; content or reasoning after a call, which the turn would render before it, fails with
+`invalid_assistant_history` unless `--lenient-assistant-history` joins it. Results are validated by
 `call_id` and reordered to call declaration order before prompt rendering; unknown, duplicate, or
 unrepresentable partial result sets fail with `invalid_tool_history`. Canonical input Items retain
 client order. Input Item IDs are preserved when supplied and generated otherwise; duplicate IDs
@@ -2312,6 +2320,13 @@ For `include:["reasoning.encrypted_content"]`, the in-progress
 not available yet. `response.output_item.done` and the terminal Response output contain the same
 complete raw mirror. A response with no reasoning Item emits no encrypted placeholder.
 
+Items open and close one after another in the order the model writes them. A model that reasons
+after its content (Inkling 2 under a template that opens the text block in the prompt) gets a
+reasoning Item after the message, and content after that goes to a new message Item; the terminal
+Response output holds the same Items, and a request that returns them joins their reasoning and
+their content again. Chat Completions streams such reasoning as `reasoning_content` deltas after
+`content` ones, and Anthropic Messages as a new Thinking block after the text block.
+
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
 and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
 does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
@@ -2412,8 +2427,8 @@ explicitly.
 `max_tokens` is optional for local clients and otherwise uses the
 [default output limit](#default-output-limit); a positive
 value is the complete output budget. `max_tokens:0` is rejected because NInfer does not expose a
-completed zero-output cache-prewarm lifecycle. `temperature`, `top_p`, `top_k` (clamped to 20
-like the OpenAI endpoints), `stop_sequences` and vLLM's [`bad_words`](#banned-words) enter Engine
+completed zero-output cache-prewarm lifecycle. `temperature` (`0` or more, past Anthropic's `1`),
+`top_p`, `top_k` (clamped to 64 like the OpenAI endpoints), `stop_sequences` and vLLM's [`bad_words`](#banned-words) enter Engine
 execution. A matched custom stop is returned as
 `stop_reason:"stop_sequence"` together with the actual `stop_sequence`; context exhaustion returns
 `model_context_window_exceeded`.
@@ -2666,8 +2681,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `auto` with the hybrid prefix cache and `--max-context` with the checkpoint catalog | `auto`; `--max-context` with the checkpoint catalog |
 | `--kv-headroom-mib N` | device memory in MiB that `--kv-capacity auto` leaves free after sizing the KV pool; requires `auto`. `--vram-headroom-mib` is accepted as an alias | `1024` |
 | `--kv-host-mib N\|auto` | Qwen3.5 family on one device under Linux: continue the KV pool into N MiB of pinned host memory that the GPU reads in place, exact but slower for the part of a context there ([KV host tier](cli.md#kv-host-tier)); `auto` sizes it for every request to reach `--max-context` | `0` (off) |
-| `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
-| `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
+| `--max-concurrency N\|auto` | maximum admitted requests, `1..64`; `auto` admits as many as fit once the weights are loaded, each with its recurrent state and one `--max-context` KV window (with an explicit `--kv-capacity`, as many as its pages hold whole windows), and logs the count with each request's state and KV. With `--spec`, at most 8 (`auto` stops there); Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Qwen3.8-Flash-Next take `1..8` and refuse `auto` | `1` |
+| `--max-pending-requests N` | additional requests allowed to wait for admission | `max(16, --max-concurrency)` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
 | `--recover-invariant-failures` | a broken internal invariant in the Engine worker fails the active and materializing requests and leaves the waiting ones queued, as recovery from out of memory does, instead of failing the Engine; eight consecutive recoveries without a completed unit still fail it | off |
 | `--prefill-chunk N` | text-prefill chunk; with an `int8` or `rk*` KV cache a Qwen3.5-core model runs the nearby multiple of 128 that best fills the GPU's prompt-attention waves, up to 256 tokens more (see [device profiles](device-profiles.md)) | `1024`; `4096` for native MoE experts in host memory or files; `2048` for Qwen3.8-Flash-Next with `--tensor-parallel` when every device has room ([prompt pieces](maintainer/pipeline-stages.md#tensor-parallelism-of-qwen38-flash-next)); `2048` for DeepSeek-V4.1, which takes at most `4096` and a narrower chunk where the card lacks room ([its prompt chunks](deepseek-v41.md#prompt-spans)) |
@@ -2696,6 +2711,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--expert-dma-share F\|auto` | Host or disk experts: the GPU's share of a call's cache misses, `0..1`; the CPU computes the rest (GGUF and Qwen3.5/3.6 MoE experts: the GPU's results bit for bit); `auto` splits each such call by the copy and CPU times measured on earlier calls and copies every miss of Flash-Next native experts. Flash-Next host experts' calls of 9 to 64 tokens give the CPU only missing experts with at most eight pairs; wider Flash-Next calls, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 calls of more than eight tokens, and Qwen3.5/3.6 calls at or past the codec's prefill frontier or that route to half the experts or more, always use the GPU ([the CPU share](qwen3-8-flash-next.md#the-cpu-share)); DeepSeek-V4.1's `auto` copies every miss of disk experts ([its CPU share](deepseek-v41.md#the-cpu-share)) | `auto` |
 | `--iq1m-experts matrix\|vector` | DeepSeek-V4.1 and Qwen3.8-Flash-Next: IQ1_M routed experts of calls past eight tokens on the integer matrix kernel once a call routes more than 16 rows to each expert on average for their gate and up products and 6 for their down products (the vector kernel below), or always on the vector kernel in groups of eight columns; the two round the sums differently, so outputs differ slightly ([IQ1_M experts](deepseek-v41.md#iq1_m-experts-in-prompt-chunks)) | `matrix` |
 | `--expert-tail-skip N` | Qwen3.8-Flash-Next only, GGUF host experts with staged misses: a decode or verification call leaves out each routed expert its device cache lacks when every token of the call ranks it past place `N` (`1..9`) of its top ten; the other experts keep their router weights, so results change | off |
+| `--expert-route-bias B` | Host or disk experts: `0..1` added to the routing score of each expert the GPU holds when a decode or verification call chooses a layer's experts, so more of them are cache hits; the chosen experts keep the weights of their unbiased scores. Lossy: which experts a call takes, and so its output, depend on what the cache holds; prompts route as trained. Not with `--tensor-parallel` or Flash-Next native host experts ([route bias](cli.md#route-bias-toward-held-experts)) | `0` (off) |
 | `--expert-prefill-buffers 1\|2` | Qwen3.8-Flash-Next only, GGUF host experts: device buffers a long prompt's uncached experts are copied into; `2` copies the next layer's while the current layer's experts run, when half the free memory holds both. With the automatic cache the buffers hold expert cache slots between prompts ([the expert cache](qwen3-8-flash-next.md#the-expert-cache)) | `2` with the automatic expert cache, else `1` |
 | `--expert-cpu-threads N` | Host or disk experts with a CPU share: `1..256` CPU threads, the calling one included, pinned one to a physical core | `min(physical cores, usable CPUs / 2)`, at least one. Usable CPUs: the process's affinity mask, bounded by a container's CPU quota; physical cores: those in the mask. A 30-CPU container quota gives 15 threads, a 16-core/32-thread desktop 16 |
 | `--expert-cache-adaptive` | Qwen3.8-Flash-Next only: replace cold cached experts between calls; changes the CPU/GPU arithmetic partition | off |
@@ -2780,12 +2796,12 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--use-alt-prefix-caching` | the hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)), the default: content-addressed 64-token KV blocks shared across requests plus sparse state snapshots. It configures itself: `--kv-capacity` defaults to `auto` (free VRAM becomes Device block cache) and `--host-cache-mib` sizes the one pinned Host pool that blocks and snapshots share. Without this flag or `--use-original-prefix-caching`, an option only the checkpoint catalog serves selects the catalog instead: its capacities (`--device-state-slots`, `--host-state-slots`, `--host-kv-mib`, `--max-private-continuations`, `--max-shared-prefixes`, `--max-long-anchors-per-continuation`), its anchors and policies (`--auto-long-anchors`, `--long-anchor-spacing`, `--branch-anchors`, `--no-endpoint-anchors`, `--progress-anchor-tokens`, `--auto-prefix-grid`, `--derive-session-keys`, `--context-cache-policy`, `--release-diverged-checkpoints`, `--thorough-admission-search`, `--recency-eviction`, `--value-aware-demote`), the disk tier, slot files, several `--devices`, `--no-prefix-reuse` or a `--graft`. Named, the flag keeps the hybrid cache over several `--devices` (pipeline stages or `--tensor-parallel`) and rejects the other options instead. Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Qwen3.8-Flash-Next keep their own context caches, which the catalog options configure; they refuse this flag, the hybrid options below other than `--prefix-cache-file`, and `--graft` at startup. Requests that share a new prefix with one still prefilling wait for its snapshot instead of prefilling the prefix again, which needs `--concurrent-prefill` to admit them meanwhile. On an RTX 3090 with Qwen3.8-27B (`rk4v4`, 131K context) the agentic replay of `bench/agentic_ab` (seed 42, half scale) ran with an average time to first token of 55.6 s instead of 97.9 s on the catalog, served 84 % of prompt tokens from the cache instead of 46 %, and finished in 43.6 instead of 60.2 minutes; its one history-edit turn took 389 s instead of 183 s, and decode ran 1.4 % slower | default |
 | `--use-original-prefix-caching` | select the checkpoint catalog in place of the hybrid prefix cache. Rejected together with `--use-alt-prefix-caching` and with the hybrid options below | off |
-| `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`). Left at its default, the count drops, to one at the least, when the `--kv-capacity` asked for (or under `auto` one `--max-context` window beside the headroom) would not fit beside it, and startup logs `device snapshot slots 3 -> 1 to fit the requested KV capacity`; a given count is kept, and a capacity that does not fit beside it fails naming this option and the size of one slot | `max-concurrency + 2`, fewer where the KV capacity needs their memory |
+| `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`). Left at its default, the count drops, to one at the least, when the `--kv-capacity` asked for (or under `auto` one `--max-context` window beside the headroom) would not fit beside it, and startup logs `device snapshot slots 3 -> 1 to fit the requested KV capacity`; a given count is kept, and a capacity that does not fit beside it fails naming this option and the size of one slot | `min(max-concurrency, 8) + 2`, fewer where the KV capacity needs their memory |
 | `--cache-taps-per-request N` | hybrid: new prefill state snapshots per request (`0..64`) | `8`; `2` without a Host tier |
 | `--cache-tap-ladder N` | hybrid: history-snapshot ladder base G; flexible taps at `prompt − G·2^k` | `max(4096, 2 * prefill-chunk)` |
 | `--cache-tap-min-gap N` | hybrid: minimum tokens between ladder snapshots | `max(1024, prefill-chunk)` |
 | `--prefix-cache-file PATH` | hybrid: at startup, restore the Host tier from `PATH` if the file exists; when the server stops ([Stop the server](#stop-the-server)), save it there once running and queued requests are cancelled (every Host-backed snapshot and the block path it resumes through). A save cut short is abandoned and the previous file kept: one more Ctrl+C during the stop also deletes the unfinished `PATH.tmp`, while Windows ending a closed console's process about 5 s after the close leaves it until the next save, so stop large caches with Ctrl+C. `PATH` may be relative (resolved against the launch directory) or absolute, e.g. `--prefix-cache-file "e:\NInfer-Deploy-V3\file.cache"`. Its directory must exist, and the flag needs a Host tier (not `--host-cache-mib 0`). A file written for another artifact, KV format, speculative backend, RoPE scaling or `ninfer-serve` binary is ignored and replaced at shutdown. The startup log reports what was restored. Saving writes up to `--host-cache-mib` of data. Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and Qwen3.8-Flash-Next save and restore the images of their [context cache](#context-cache-of-the-other-families) instead, also beside the checkpoint catalog's options (`--host-kv-mib`, `--disk-kv-path`, `--slot-save-path`); the other families refuse it beside them at startup. | off: nothing is saved or restored |
-| `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
+| `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `min(max-concurrency, 8)` |
 | `--host-state-slots N` | pinned Host StateImage capacity | `8` |
 | `--host-kv-mib N` | shared pinned Host Main/Backend KV byte capacity in MiB | `8192` |
 | `--host-cache-mib N\|auto` | single pinned Host RAM ceiling for the whole retention tier in MiB. Hybrid mode: the slab pool KV blocks and state snapshots share, split at run time by eviction value; `0` keeps the cache on the Device only, and a nonzero budget below one snapshot is rejected. Default cache: the engine derives the Host StateImage slot count from the checkpoint inventory the capture path creates, spends the remaining state headroom on more long anchors per continuation when `--auto-long-anchors` is on, and gives Host KV the remainder. `auto` sizes it once the weights are loaded (and, for Qwen3.8-Flash-Next, its experts pinned) from the host memory still available, the smaller of the system's available memory and what the process's memory cgroup allows, less `--host-cache-reserve-mib` and, with Vision, the media caches, and never above `--host-cache-max-mib` or `--host-cache-percent` of the machine's memory; for a machine that serves this one process, since pinned pages cannot be reclaimed. Replaces `--host-state-slots` and `--host-kv-mib`, which are rejected alongside it. Qwen3.8-Flash-Next and Gemma 4 keep their sequences' state images within this budget (or `--host-kv-mib`). | hybrid `8192`; otherwise unset (component flags used) |
@@ -2810,7 +2826,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--disk-kv-directstorage` | read restores through Microsoft DirectStorage; Windows builds with `-DNINFER_DIRECTSTORAGE=ON` only, untested | mapped reads |
 | `--context-cache-policy default\|rolling` | `rolling`: within one cache session (a Responses `prompt_cache_key`), a capture that extends a resident checkpoint the request matched exactly inherits that resident's demand, so a conversation whose prompt only grows keeps rolling its frontier forward; with conversations sharing a prefix, one conversation's extension can evict the prefix the others use | `default` |
 | `--concurrent-prefill` | admit waiting requests to free lanes while other requests prefill, instead of holding admission until the staged prefill finishes; without it a staged prefill whose last chunk can share a pass with others still admits them ([Execution behavior](#execution-behavior)) | off |
-| `--kv-lease-growth` | admission reserves the prompt plus a 4096-token output window (or `--prefill-chunk` when larger) instead of the whole `max_tokens` budget and extends it at decode-round boundaries, releasing idle retained cache owners least recently used first when the pool is short; an answer whose smallest step still does not fit ends with `finish_reason=length` before `max_tokens` | off |
+| `--kv-lease-growth` | admission reserves the prompt plus a 4096-token output window (or `--prefill-chunk` when larger) instead of the whole `max_tokens` budget and extends it at decode-round boundaries, releasing idle retained cache owners least recently used first when the pool is short; an answer whose smallest step still does not fit ends with `finish_reason=length` before `max_tokens`; `--no-kv-lease-growth` turns it off | on past `--max-concurrency 8`, else off |
 | `--recency-eviction` | pressure ranks private conversations and shared prefixes in one least-recently-used order (latest hit or publication): a request that does not fit gives up the fewest oldest owners that make it fit and spares those it does not need, instead of clearing every owner it cannot reuse; kept owners, shared prefixes included, are demoted to Host where it has room, and the search may fully evict only inside that tail and only an owner Host cannot take. A private checkpoint that finds the state pools full reclaims the idle conversation that is oldest in this order, not the oldest publication | off |
 | `--value-aware-demote` | pressure search charges evicting a private conversation its rank by rebuild cost among the request's victims, so among otherwise equal plans it keeps the conversations most expensive to rebuild, demoted to Host, and evicts the cheapest; it only reorders a bounded search, which can then settle on a different plan | off |
 | `--thorough-admission-search` | a new request's admission searches up to 250 ms for its reuse plan at every boundary, even while other requests decode (otherwise 50 ms idle, 10 ms busy), and a request whose plan saves more earns a longer base grant; every eligible option with an uncertain forecast gets its own short discovery grant (otherwise one per search), an option already generated for a candidate is always assessed, and the gain a search may spend against is the request's own re-prefill rather than a share of it per runnable request; a running decode can then pause up to that long when a request arrives | off |
@@ -2829,7 +2845,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--usage-chunk-choice` | give the streamed usage chunk a zero-delta choice, for strict client parsers that reject the OpenAI-conformant empty `choices` array | off |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
-| `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |
+| `--top-k N` | process-level top-k override (`0..64`; zero selects the top-64 cap) | unset |
 | `--min-p F` | process-level min-p override | unset |
 | `--presence-penalty F` | process-level presence-penalty override | unset |
 | `--frequency-penalty F` | process-level frequency-penalty override | unset |
@@ -2872,7 +2888,7 @@ request enables it with a `post_thinking` object on Chat Completions, Responses 
 {"post_thinking": {"temperature": 0.1, "top_k": 10}}
 ```
 
-The object accepts `temperature` (`0..2`; `0..1` on Messages), `top_p`, `top_k`, `min_p`,
+The object accepts `temperature` (`0` or more), `top_p`, `top_k`, `min_p`,
 `presence_penalty`, `frequency_penalty` and `seed`; an empty object selects the preset. Request
 fields override the server's post-thinking flags, omitted fields come from the preset, an omitted
 seed continues the request's seed, and `--greedy` forces temperature `0` in both phases. A request
@@ -2881,10 +2897,12 @@ without thinking, or one whose reasoning never closes, keeps its original sample
 
 For `C=--max-concurrency` and `H=--device-state-slots`, total Device StateImage capacity is `C+H`:
 `C` slots guarantee active requests and `H` is a global checkpoint pool. A Qwen3.5-core model keeps
-`C` more images beside the catalog, one for each request: the state where a stop string's match
-began, which a turn returns to when the stop string ends it rounds later, so the next turn resumes
-there. A start whose KV capacity does not fit beside them drops them and logs it; such a turn's next
-turn then resumes from the prompt's checkpoint. Host State and Host KV are independent startup-fixed
+`min(C, 8)` more images beside the catalog: the state where a stop string's match began, which a
+turn returns to when the stop string ends it rounds later, so the next turn resumes there. Up to
+eight requests each have one; past eight a request takes a free one when a stop string's match
+begins, and a request that finds none free resumes such a turn's next turn from the prompt's
+checkpoint. A start whose KV capacity does not fit beside them drops them and logs it; such a
+turn's next turn then resumes from the prompt's checkpoint. Host State and Host KV are independent startup-fixed
 pinned-memory capacities; Host KV is shared by Main and the selected Backend pool and is consumed in
 physical page extents. `--no-prefix-reuse` selects root-only Engine mode and cannot be combined with
 any of the seven explicit context-cache capacity flags, including zero-valued flags.
@@ -3226,9 +3244,12 @@ kept (Inkling 2, four questions after a restart, each way).
 
 ## Execution behavior
 
-The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
-requests. At each decode boundary, every decode-ready request is compacted into one batch and
-processed by one model traversal and, when graphs are enabled, one exact-batch CUDA Graph replay.
+The server owns one resident Engine with a startup-fixed capacity of `1..64` active generation
+requests (`1..8` with `--spec` and on Gemma 4, Flint, DeepSeek-V4.1, Inkling 2 and
+Qwen3.8-Flash-Next). At each decode boundary, every decode-ready request is compacted into one batch
+and processed by one model traversal and, when graphs are enabled and the batch has at most eight
+requests, one exact-batch CUDA Graph replay; a batch of more launches its kernels directly. Rounds
+of drafts verify at most eight requests.
 A request joins that batch only after its staged prefill finishes; when it completes or is
 cancelled, the next boundary rebuilds the batch without an empty row. A staged prefill holds
 admission back until it finishes, unless every staged prefill has only a last chunk left that can
