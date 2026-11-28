@@ -1,5 +1,8 @@
 """GPU-free contract tests for the RTX graph allowance measurement runner."""
 import json
+import hashlib
+
+import pytest
 from types import SimpleNamespace
 
 from tools.bench import run_graph_allowance_sweep as sweep
@@ -67,6 +70,8 @@ def test_cli_emits_reproducible_sweep_and_handles_speculative_counts(monkeypatch
     report = json.loads((tmp_path / "results" /
                          "graph-allowance-dflash2-rk4v4.json").read_text(encoding="utf-8"))
     assert report["schema_version"] == 2
+    assert report["config"]["cli_sha256"] == hashlib.sha256(b"test").hexdigest()
+    assert report["config"]["model_sha256"] == hashlib.sha256(b"test").hexdigest()
     assert report["config"]["capacities"] == [2048, 8192]
     assert all(r["predicted_graphs"] is None for r in report["runs"])
     assert all(r["observed_bytes"] == 12 * sweep.MIB for r in report["runs"])
@@ -149,3 +154,19 @@ def test_unmeasured_graph_usage_is_not_substituted_with_allowance(monkeypatch, t
     assert result["observed_bytes"] is None
     assert result["allowance_bytes"] == 64 * sweep.MIB
     assert "unmeasured" in result["unparsed_output"]
+
+def test_existing_report_is_not_overwritten(monkeypatch, tmp_path):
+    exe, model = tmp_path / "ninfer.exe", tmp_path / "qwen.ninfer"
+    exe.write_bytes(b"engine")
+    model.write_bytes(b"model")
+    out = tmp_path / "out"
+    out.mkdir()
+    report = out / "graph-allowance-none-int8.json"
+    report.write_text("existing evidence")
+    def unexpected(*args, **kwargs):
+        pytest.fail("must reject existing report before starting inference")
+    monkeypatch.setattr(sweep.subprocess, "run", unexpected)
+    with pytest.raises(SystemExit) as exc:
+        sweep.main(["--cli", str(exe), "--model", str(model), "--output", str(out)])
+    assert exc.value.code == 2
+    assert report.read_text() == "existing evidence"

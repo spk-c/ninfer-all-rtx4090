@@ -1,0 +1,224 @@
+{
+  "scope": "Historical single-start screening, not production release qualification",
+  "source_revision": "1b5313ad350110e16e6049c6cea3020f808f4796",
+  "binary_sha256": "1a00976cf25b52c1e704d46dfd4406b3715d9451d686d17c5f55769b46ba0f98",
+  "model_sha256": "a410396311ccb27048008a7ccb8a38f91099f6f6a8e10d10bd8baed7248c046a",
+  "driver": "NVIDIA GeForce RTX 4090, 621.40",
+  "platform": "Windows WDDM",
+  "kv_dtype": "rk4v4",
+  "backend": "dflash2",
+  "prefill_chunk": 1024,
+  "ngram": 0,
+  "starts_per_cell": 1,
+  "default_reduction_qualified": false,
+  "rows": [
+    {
+      "concurrency": 1,
+      "draft_tokens": 5,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": null,
+      "physical_kv_tokens": 405120,
+      "configured_context": 32768,
+      "replies": 1,
+      "exact_ok": 1,
+      "actual_prompt_tokens": [
+        5303
+      ],
+      "wall_s": 1.5899,
+      "ready_free_mib": 881,
+      "before_free_mib": 22824
+    },
+    {
+      "concurrency": 1,
+      "draft_tokens": 5,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": 52035584,
+      "physical_kv_tokens": 397632,
+      "configured_context": 32768,
+      "replies": 1,
+      "exact_ok": 1,
+      "actual_prompt_tokens": [
+        5303
+      ],
+      "wall_s": 1.5982,
+      "ready_free_mib": 815,
+      "before_free_mib": 22940
+    },
+    {
+      "concurrency": 1,
+      "draft_tokens": 7,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": 46137344,
+      "physical_kv_tokens": 404800,
+      "configured_context": 32768,
+      "replies": 1,
+      "exact_ok": 1,
+      "actual_prompt_tokens": [
+        5303
+      ],
+      "wall_s": 2.2346,
+      "ready_free_mib": 847,
+      "before_free_mib": 22877
+    },
+    {
+      "concurrency": 1,
+      "draft_tokens": 7,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": null,
+      "physical_kv_tokens": 397312,
+      "configured_context": 32768,
+      "replies": 1,
+      "exact_ok": 1,
+      "actual_prompt_tokens": [
+        5303
+      ],
+      "wall_s": 1.5569,
+      "ready_free_mib": 860,
+      "before_free_mib": 22860
+    },
+    {
+      "concurrency": 2,
+      "draft_tokens": 5,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": 111149056,
+      "physical_kv_tokens": 382272,
+      "configured_context": 32768,
+      "replies": 2,
+      "exact_ok": 2,
+      "actual_prompt_tokens": [
+        5303,
+        5303
+      ],
+      "wall_s": 3.7134,
+      "ready_free_mib": 818,
+      "before_free_mib": 22898
+    },
+    {
+      "concurrency": 2,
+      "draft_tokens": 5,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": 111149056,
+      "physical_kv_tokens": 374784,
+      "configured_context": 32768,
+      "replies": 2,
+      "exact_ok": 2,
+      "actual_prompt_tokens": [
+        5303,
+        5303
+      ],
+      "wall_s": 3.0195,
+      "ready_free_mib": 767,
+      "before_free_mib": 22824
+    },
+    {
+      "concurrency": 2,
+      "draft_tokens": 7,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": 119930880,
+      "physical_kv_tokens": 381632,
+      "configured_context": 32768,
+      "replies": 2,
+      "exact_ok": 2,
+      "actual_prompt_tokens": [
+        5303,
+        5303
+      ],
+      "wall_s": 4.2421,
+      "ready_free_mib": 775,
+      "before_free_mib": 22824
+    },
+    {
+      "concurrency": 2,
+      "draft_tokens": 7,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": 262152192,
+      "physical_kv_tokens": 374144,
+      "configured_context": 32768,
+      "replies": 2,
+      "exact_ok": 2,
+      "actual_prompt_tokens": [
+        5303,
+        5303
+      ],
+      "wall_s": 3.5115,
+      "ready_free_mib": 792,
+      "before_free_mib": 22766
+    },
+    {
+      "concurrency": 4,
+      "draft_tokens": 5,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": 243204096,
+      "physical_kv_tokens": 336512,
+      "configured_context": 32768,
+      "replies": 4,
+      "exact_ok": 4,
+      "actual_prompt_tokens": [
+        5303,
+        5303,
+        5303,
+        5303
+      ],
+      "wall_s": 6.9867,
+      "ready_free_mib": 598,
+      "before_free_mib": 22807
+    },
+    {
+      "concurrency": 4,
+      "draft_tokens": 5,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": 417378304,
+      "physical_kv_tokens": 329024,
+      "configured_context": 32768,
+      "replies": 4,
+      "exact_ok": 4,
+      "actual_prompt_tokens": [
+        5303,
+        5303,
+        5303,
+        5303
+      ],
+      "wall_s": 6.2029,
+      "ready_free_mib": 602,
+      "before_free_mib": 22826
+    },
+    {
+      "concurrency": 4,
+      "draft_tokens": 7,
+      "allowance_bytes": 268435456,
+      "observed_net_bytes": 243269632,
+      "physical_kv_tokens": 335232,
+      "configured_context": 32768,
+      "replies": 4,
+      "exact_ok": 4,
+      "actual_prompt_tokens": [
+        5303,
+        5303,
+        5303,
+        5303
+      ],
+      "wall_s": 6.5548,
+      "ready_free_mib": 672,
+      "before_free_mib": 22964
+    },
+    {
+      "concurrency": 4,
+      "draft_tokens": 7,
+      "allowance_bytes": 402653184,
+      "observed_net_bytes": 326967296,
+      "physical_kv_tokens": 327744,
+      "configured_context": 32768,
+      "replies": 4,
+      "exact_ok": 4,
+      "actual_prompt_tokens": [
+        5303,
+        5303,
+        5303,
+        5303
+      ],
+      "wall_s": 6.1969,
+      "ready_free_mib": 641,
+      "before_free_mib": 22889
+    }
+  ]
+}

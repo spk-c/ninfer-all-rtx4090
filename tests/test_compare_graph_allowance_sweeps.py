@@ -65,3 +65,43 @@ def test_copy_proposals_change_graph_topology_and_are_not_compared():
     with pytest.raises(ValueError, match="ngram_draft_tokens"):
         compare_reports(sweep([sample(8192, 60)], ngram_draft_tokens=0),
                         sweep([sample(8192, 50)], ngram_draft_tokens=15))
+
+
+def budget_sample(observed, allowance=100, code=0, **extra):
+    return dict(sample(8192, observed, code), allowance_bytes=allowance, **extra)
+
+
+def test_partial_or_over_budget_sweep_cannot_pass_startup_screening():
+    baseline = sweep([budget_sample(70), budget_sample(80)])
+    for third in (budget_sample(0), budget_sample(20, code=1),
+                  budget_sample(110), budget_sample(100),
+                  budget_sample(20, graph_blocked=True),
+                  budget_sample(float("inf")), budget_sample(float("nan")),
+                  budget_sample(20, allowance=None)):
+        candidate = sweep([budget_sample(30), budget_sample(40), third])
+        result = compare_reports(baseline, candidate)
+        assert not result["rows"][0]["startup_screening_complete"]
+        assert not result["default_reduction_qualified"]
+
+
+def test_complete_startup_screen_is_not_default_reduction_qualification():
+    result = compare_reports(
+        sweep([budget_sample(70), budget_sample(80)]),
+        sweep([budget_sample(30), budget_sample(40)]))
+    assert result["rows"][0]["startup_screening_complete"]
+    assert result["all_capacities_matched"]
+    assert not result["default_reduction_qualified"]
+
+
+@pytest.mark.parametrize("second_hash", [None, "b" * 64])
+def test_model_path_alone_cannot_override_known_hash(second_hash):
+    rows = [budget_sample(30), budget_sample(40)]
+    with pytest.raises(ValueError, match="model_sha256"):
+        compare_reports(sweep(rows, model_sha256="a" * 64),
+                        sweep(rows, model_sha256=second_hash))
+
+
+def test_unmatched_capacity_is_reported():
+    a = sweep([budget_sample(30), budget_sample(40), sample(16384, 80)])
+    b = sweep([budget_sample(30), budget_sample(40)])
+    assert not compare_reports(a, b)["all_capacities_matched"]
