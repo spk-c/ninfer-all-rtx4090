@@ -467,3 +467,20 @@ device links and CTest commands/properties; check the relevant option combinatio
 affected targets and run their behavioral tests. A shape-source edit should rebuild its own
 translation unit plus necessary downstream links. Build-time or inference-speed claims require
 measurements at that scope.
+
+### Hosted CI allocation
+
+Routine pull requests and pushes use independent SM89 Linux CUDA builds with both
+CUDA 12.9.2 and 13.4.3. Windows MSVC still checks every original architecture
+configuration with both toolkits, using one complete host-compile shard per toolkit.
+The expensive jobs therefore require four runner allocations instead of sixteen.
+CUDA jobs are limited to four concurrent matrix entries and Windows jobs to two,
+per workflow run. Other path-scoped checks continue unchanged.
+
+Manual dispatch of CI, the weekly Sunday 03:37 UTC scheduled run, and pushes to
+`ci/full/**` force all check scopes and the original ten CUDA/architecture pairs
+and six Windows host-compile shards. Run full CI on the exact candidate revision
+when changing architecture-specific code or qualifying a release; routine SM89 CI
+is not proof of other device architectures. The independent native release and
+RTX 4090 packaging workflows are unchanged. GPU tests on hosted runners still skip
+when a GPU is unavailable. Routine pushes do not cancel the weekly full CI group.
