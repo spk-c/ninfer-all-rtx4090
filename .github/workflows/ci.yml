@@ -34,21 +34,24 @@
 #
 # CUDA/MSVC jobs compare compiled inputs with the PR base or published image revision.
 # Other jobs have individual path scopes; Docker cache checks require a Docker definition change.
-# Empty/Markdown-only PRs run only the change detector. Manual dispatch forces all scopes.
+# Empty/Markdown-only PRs run only the change detector. Manual and weekly runs force all scopes.
+# Routine builds prioritize SM89 on both toolkits; weekly/manual/ci/full/** runs cover all CUDA architectures.
 name: CI
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 0'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
-    # ci/** runs the whole workflow on a branch without a pull request; only master publishes.
+    # ci/** runs the scoped workflow without a pull request; ci/full/** forces full coverage.
     branches: [master, 'ci/**']
 
 # A newer push to a branch or pull request cancels the run still going for the older one; a merged
 # or closed pull request's runs are cancelled by cancel-superseded.yml.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/ci/full/')) && 'full' || 'routine' }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Draft PRs allocate no runners. Ready-for-review starts CI; converting back cancels the old run.
@@ -71,6 +74,9 @@ jobs:
       python: ${{ steps.compare.outputs.python }}
       docker: ${{ steps.compare.outputs.docker }}
       release_tools: ${{ steps.compare.outputs.release_tools }}
+      cuda_matrix: ${{ steps.matrix.outputs.cuda_matrix }}
+      windows_shards: ${{ steps.matrix.outputs.windows_shards }}
+      windows_shard_count: ${{ steps.matrix.outputs.windows_shard_count }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -83,11 +89,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/build-inputs.sh >> "$GITHUB_OUTPUT"
+      - id: matrix
+        run: python3.11 .github/scripts/ci-matrix.py >> "$GITHUB_OUTPUT"
 
   release-tools:
     needs: build-inputs
     # Master runs these checks in Native release; PRs and ci/** branches need them here.
-    if: (github.ref != 'refs/heads/master' || github.event_name == 'workflow_dispatch') && needs.build-inputs.outputs.release_tools == 'true'
+    if: (github.ref != 'refs/heads/master' || github.event_name != 'push') && needs.build-inputs.outputs.release_tools == 'true'
     uses: ./.github/workflows/build-workflow-checks.yml
 
   calculator:
@@ -144,7 +152,7 @@ jobs:
           ./checkpoint_recovery_impact_test
 
   windows-msvc:
-    name: Host code under MSVC (${{ matrix.build.label }}, part ${{ matrix.shard }}/3)
+    name: Host code under MSVC (${{ matrix.build.label }}, part ${{ matrix.shard }}/${{ needs.build-inputs.outputs.windows_shard_count }})
     needs: build-inputs
     if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.build-inputs.outputs.changed == 'true'
     # Visual Studio 2022 (MSVC 14.44): CUDA 12.9 refuses Visual Studio 2026's MSVC 14.5x.
@@ -152,10 +160,11 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        # A configuration's check takes 13-18 minutes on one 4-core runner; three runners take a
-        # third each.
-        shard: [1, 2, 3]
+        # Routine CI uses one complete shard per toolkit, preserving every Windows host input.
+        # Full CI uses three shards per toolkit to retain the original coverage and partitioning.
+        shard: ${{ fromJSON(needs.build-inputs.outputs.windows_shards) }}
         build:
           - label: sm_70;75;80;86;89
             archs: '70;75;80;86;89'
@@ -247,7 +256,7 @@ jobs:
         shell: pwsh
         run: |
           $builds = @('${{ matrix.build.archs }}'.Split(' ') | ForEach-Object { "build-$($_ -replace ';', '_')" })
-          python -u scripts/check-host-compile.py $builds --shard ${{ matrix.shard }}/3 --jobs 4
+          python -u scripts/check-host-compile.py $builds --shard ${{ matrix.shard }}/${{ needs.build-inputs.outputs.windows_shard_count }} --jobs 4
 
   linux-scripts:
     needs: build-inputs
@@ -364,21 +373,9 @@ jobs:
       CUDA_VERSION: ${{ matrix.cuda }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Compile and CTest each architecture independently. A combined five-arch
-          # build exceeded the 305-minute step limit on four-core hosted runners.
-          # Keep the complete CUDA/architecture coverage; no targets are disabled.
-          - { cuda: '12.9.2', archs: '70' }
-          - { cuda: '12.9.2', archs: '75' }
-          - { cuda: '12.9.2', archs: '80' }
-          - { cuda: '12.9.2', archs: '86' }
-          - { cuda: '12.9.2', archs: '89' }
-          - { cuda: '13.4.3', archs: '75' }
-          - { cuda: '13.4.3', archs: '80' }
-          - { cuda: '13.4.3', archs: '86' }
-          - { cuda: '13.4.3', archs: '89' }
-          - { cuda: '13.4.3', archs: '120a' }
+      max-parallel: 4
+      # Independent per-architecture compile and CTest, selected by the change detector.
+      matrix: ${{ fromJSON(needs.build-inputs.outputs.cuda_matrix) }}
     steps:
       - name: Reserve time for tests and diagnostics
         run: echo "BUILD_DEADLINE=$(( $(date +%s) + 19800 ))" >> "$GITHUB_ENV"
