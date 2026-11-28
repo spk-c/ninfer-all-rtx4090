@@ -1,0 +1,78 @@
+{
+  "scope": "Historical measured workloads; not cross-model rankings or new benchmarks.",
+  "hardware": "NVIDIA RTX 4090 24 GB",
+  "inkling": {
+    "decode": [
+      108.3,
+      240.7,
+      302.2
+    ],
+    "labels": [
+      "No draft",
+      "DSpark K3",
+      "DFlash2 K7"
+    ],
+    "human_eval": [
+      160,
+      160
+    ],
+    "tasks": 164,
+    "mean_decode": [
+      303.61,
+      288.3
+    ],
+    "prompt_tokens": [
+      124562,
+      250006
+    ],
+    "prefill": [
+      4871.9,
+      3925.6
+    ],
+    "long_decode": [
+      167.1,
+      142.9
+    ],
+    "retrieved": [
+      3,
+      3
+    ],
+    "source": "https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3",
+    "workload": "30-token prompt, 512 committed tokens, greedy, RK8V4; one run per decoder; earlier development artifact"
+  },
+  "qwen": {
+    "labels": [
+      "64K",
+      "128K",
+      "176128"
+    ],
+    "k5": [
+      242.75,
+      206.39,
+      214.87
+    ],
+    "k7": [
+      272.74,
+      240.6,
+      263.93
+    ],
+    "source": "https://github.com/spk-c/ninfer-all-rtx4090/blob/master/docs/performance/rtx4090-v014-long-context-2026-11-26.md",
+    "workload": "v0.1.4, fixed Engine corpus, 512 decode tokens, 2 repetitions per cell, RK4V4, ngram off"
+  },
+  "swift": {
+    "labels": [
+      "~1K",
+      "~32K",
+      "~100K",
+      "~160K"
+    ],
+    "decode": [
+      217.98,
+      229.04,
+      207.78,
+      191.78
+    ],
+    "source": "https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Swift1.5-Abliterated-IQ3S-DFlash2-NInfer/blob/main/BENCHMARK.md",
+    "workload": "October 19, 2026, 2048 output tokens, single client-observed run per length"
+  }
+}
