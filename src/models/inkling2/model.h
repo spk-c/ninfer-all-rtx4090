@@ -76,8 +76,13 @@ struct LoopWeights {
     std::array<ControllerWeights, 4> controllers;
 };
 
+struct Rank1Weights {
+    WeightId a, b;
+};
+
 struct LayerWeights {
     AttentionWeights attention;
+    std::optional<Rank1Weights> rank1_attention, rank1_expert;
     // The depth-mix queries of the attention's inputs (1 sliding, 3 full; none in layer 0) and
     // of the MoE input.
     std::optional<WeightId> attention_mix;
@@ -88,6 +93,7 @@ struct LayerWeights {
 
 struct TextWeights {
     WeightId token_embedding, embedding_norm, output_head, final_norm, output_mix;
+    std::optional<Rank1Weights> rank1_embedding;
     std::vector<LayerWeights> layers;
 };
 

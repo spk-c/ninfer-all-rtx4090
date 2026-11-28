@@ -30,6 +30,23 @@ If you use NInfer-all RTX 4090 or want to follow its development, consider starr
 
 Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated by this project. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
 
+## Experimental Inkling 2 GSQ-RCO Rank-1 model
+
+The experimental fixed AtomicChat Rank-1 implementation preserves the original ISTA-DASLab GSQ-RCO IQ3_S weights and adds native adapter support for Inkling 2 on SM89.
+
+| RTX 4090, RK8V4, DFlash2 K7 | Original | Rank-1 |
+| --- | ---: | ---: |
+| HumanEval, matched chat-adapted protocol | 160/164 (97.56%) | 160/164 (97.56%) |
+| Mean decode over 164 tasks | 303.61 tok/s | 288.30 tok/s |
+
+A separate synthetic retrieval test recovered 3/3 keys at 250,006 input tokens. Results are workload-specific, not canonical completion-format HumanEval scores or a guarantee of general coding parity. Vision, tool calling, DSpark and CUDA Graphs have passed local smoke tests.
+
+- [Model repository on Hugging Face](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3) — 12.08 GiB, staged for release; access depends on repository visibility.
+- [Implementation, compatibility requirements and benchmark details](docs/inkling2-rank1-model-card-draft.md).
+- [Runtime integration and tests](https://github.com/spk-c/ninfer-all-rtx4090/pull/66).
+
+The guarded model requires a runtime recognizing `inkling2_rank1_v1`. Existing stable releases do not support this model; use the matching experimental build until a compatible release is available.
+
 ## Built-in Live Monitoring Dashboard
 
 **Monitor local inference directly in your browser.** NInfer Monitor is compiled into `ninfer-serve`, including the portable Windows release. No separate Python process, external assets or cloud service is required.

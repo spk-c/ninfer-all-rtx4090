@@ -74,8 +74,10 @@ std::vector<std::pair<std::uint32_t, std::uint32_t>> TextConfig::visits() const 
 }
 
 TextConfig parse_text_config(const Json& value) {
-    architecture(value, "Inkling2ForCausalLM", "inkling2");
+    const bool rank1 = value.value("model_type", "") == "inkling2_rank1_v1";
+    architecture(value, "Inkling2ForCausalLM", rank1 ? "inkling2_rank1_v1" : "inkling2");
     TextConfig out;
+    out.requires_rank1 = rank1;
     out.hidden_size             = integer(value, "hidden_size");
     out.vocab_size              = integer(value, "vocab_size");
     out.unpadded_vocab_size     = integer(value, "unpadded_vocab_size");

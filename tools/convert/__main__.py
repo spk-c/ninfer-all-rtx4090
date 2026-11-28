@@ -362,7 +362,7 @@ def main(argv=None):
             dflash2 = (stack.enter_context(SafetensorsSource(paths["dflash2"]))
                        if "dflash2" in paths else None)
             model = build_inkling2(base, gguf, vision=vision, dspark=dspark, dflash2=dflash2,
-                                   resource_overrides=overrides)
+                                   resource_overrides=overrides, rank1_adapter=paths.get("rank1"))
             recipe = Recipe(model)
             inkling_sources = ({"base": base, "gguf": gguf} | ({"vision": vision} if vision else {})
                                | ({"dspark": dspark} if dspark else {})
@@ -372,7 +372,7 @@ def main(argv=None):
                 _function(args.override)(model, recipe, inkling_sources)
             source_paths = {"base": {"path": str(args.model)},
                             "gguf": {"path": str(paths["gguf"])}}
-            for name in ("vision", "dspark", "dflash2"):
+            for name in ("vision", "dspark", "dflash2", "rank1"):
                 if name in paths:
                     source_paths[name] = {"path": str(paths[name])}
             report = convert(

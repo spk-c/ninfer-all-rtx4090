@@ -267,7 +267,26 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
     const auto vector = [&](const std::string& name, artifact::Shape shape) {
         return b.direct(name, std::move(shape), QType::FP32);
     };
+    const bool rank1 = config.requires_rank1;
+    if (rank1 != binder.contains("text/rank1/embedding_a")) {
+        throw artifact::ArtifactError("Inkling2 rank1 compatibility marker/factors mismatch; "
+                                      "reconvert with the matching rank1 converter");
+    }
+    const auto rank1_pair = [&](const std::string& prefix, std::uint64_t a, std::uint64_t b_size)
+        -> std::optional<Rank1Weights> {
+        const bool has_a = binder.contains(prefix + "_a"), has_b = binder.contains(prefix + "_b");
+        if (has_a != rank1 || has_b != rank1) {
+            throw artifact::ArtifactError("Incomplete Inkling2 rank1 adapter: " + prefix);
+        }
+        if (!rank1) { return std::nullopt; }
+        return Rank1Weights{vector(prefix + "_a", {a}), vector(prefix + "_b", {b_size})};
+    };
+    if (rank1 && (offload || !ends.empty() || !options.dspine.empty())) {
+        throw artifact::ArtifactError("Experimental Inkling2 rank1 requires device experts, "
+                                      "one GPU; external DSpine is not qualified");
+    }
     TextWeights weights;
+    weights.rank1_embedding = rank1_pair("text/rank1/embedding", config.vocab_size, h);
     weights.token_embedding = b.parameter("text/token_embedding", {config.vocab_size, h});
     weights.embedding_norm  = vector("text/embedding_norm", {h});
     weights.output_head     = b.parameter("text/output_head", {config.vocab_size, h},
@@ -280,6 +299,8 @@ std::unique_ptr<Model> load_model(const artifact::Reader& reader, const LoadOpti
         const std::string a = p + "attention/", m = p + "moe/";
         const bool full     = config.full_attention[i];
         LayerWeights layer;
+        layer.rank1_attention = rank1_pair(p + "rank1/attention", q, h);
+        layer.rank1_expert = rank1_pair(p + "rank1/expert", e * w, e * h);
         AttentionWeights& at = layer.attention;
         at.query    = b.parameter(a + "query", {q, h}, {a + "query_input"});
         at.gate     = b.parameter(a + "gate", {q, h}, {a + "query_input"});

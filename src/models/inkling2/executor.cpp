@@ -132,6 +132,8 @@ struct LayerPlan {
     std::vector<Weight> query; // one [Q; gate; relative] parent, or its parts
     int query_rows = 0;
     Weight key, value, output;
+    const float *rank1_attention_a = nullptr, *rank1_attention_b = nullptr,
+                *rank1_expert_a = nullptr, *rank1_expert_b = nullptr;
     const float *query_norm = nullptr, *key_norm = nullptr, *value_norm = nullptr,
                 *input_norm = nullptr;
     const float *sinks = nullptr, *query_clip = nullptr, *relative_clip = nullptr,
@@ -296,6 +298,7 @@ struct Executor::Impl {
     // a call of q8_1 rows then writes as well, and the other products keep their q8_1 form.
     bool attention_bf16 = false;
     const float *embedding_norm = nullptr, *final_norm = nullptr, *output_mix = nullptr;
+    const float *rank1_embedding_a = nullptr, *rank1_embedding_b = nullptr;
     std::vector<std::uint32_t> positions;
     // The position at which each sequence's rings last came whole from a prompt, a checkpoint or
     // an image (rewind()).
@@ -391,6 +394,16 @@ struct Executor::Impl {
         require_gguf(model, w.output_head, head);
         // The token table is only read row by row (table_rows), so its format leaves the calls'
         // forms alone.
+        if (w.rank1_embedding) {
+            if (options.dspine || model.expert_parallel() ||
+                model.expert_residency() != ExpertResidency::Device) {
+                throw std::invalid_argument("Experimental Inkling2 rank1: device experts and no external DSpine");
+            }
+            rank1_embedding_a = fp32(model, w.rank1_embedding->a, int(config.vocab_size));
+            rank1_embedding_b = fp32(model, w.rank1_embedding->b, hidden);
+            // The fixed artifact-local adapter has immutable pointers and uses stream-ordered
+            // kernels; it can participate in graph capture on SM89.
+        }
         bf16_rows = head.qtype == QType::BF16;
         if (options.dspine && (model.dspine() == nullptr || options.draft_tokens == 0 ||
                                options.draft_tokens + 1 > model.dspine()->config().block_size)) {
@@ -670,6 +683,12 @@ struct Executor::Impl {
         for (const Weight& m : p.query) { attention_bf16 = attention_bf16 || m.qtype == QType::BF16; }
         const MoeWeights& mw = lw.moe;
         const int e = int(config.num_experts), width = int(config.moe_intermediate_size);
+        if (lw.rank1_attention && lw.rank1_expert) {
+            p.rank1_attention_a = fp32(model, lw.rank1_attention->a, q);
+            p.rank1_attention_b = fp32(model, lw.rank1_attention->b, hidden);
+            p.rank1_expert_a = fp32(model, lw.rank1_expert->a, e * width);
+            p.rank1_expert_b = fp32(model, lw.rank1_expert->b, e * hidden);
+        }
         p.router      = fp32(model, mw.router, e * hidden);
         p.router_bias = fp32(model, mw.router_bias, e);
         p.moe_conv    = fp32(model, mw.output_conv, hidden * kTaps);
@@ -833,6 +852,10 @@ struct Executor::Impl {
             auto scope   = workspace->scope();
             auto* scratch = static_cast<float*>(workspace->alloc_bytes(std::size_t(n) * hidden * 4).data);
             table_rows(embedding, static_cast<const std::int32_t*>(ids.data), n, scratch, hidden, on);
+            if (rank1_embedding_a) {
+                kernels::rank1_embedding(scratch, static_cast<const std::int32_t*>(ids.data),
+                                         rank1_embedding_a, rank1_embedding_b, n, hidden, on);
+            }
             kernels::rms_norm(scratch, embedding_norm, hidden, n, eps,
                               static_cast<__nv_bfloat16*>(rows.data), on);
         };
@@ -1152,6 +1175,10 @@ struct Executor::Impl {
         auto scope = workspace->scope();
         auto* h    = static_cast<float*>(workspace->alloc_bytes(std::size_t(b) * hidden * 4).data);
         table_rows(embedding, static_cast<const std::int32_t*>(d_tokens.p), 1, h, hidden, stream);
+        if (rank1_embedding_a) {
+            kernels::rank1_embedding(h, static_cast<const std::int32_t*>(d_tokens.p),
+                                     rank1_embedding_a, rank1_embedding_b, 1, hidden, stream);
+        }
         kernels::rms_norm(h, embedding_norm, hidden, 1, eps, nullptr, stream, {}, h);
         for (int i = 1; i < b; ++i) {
             CUDA_CHECK(cudaMemcpyAsync(h + std::int64_t(i) * hidden, d.mask_embedding,
@@ -1681,6 +1708,16 @@ struct Executor::Impl {
         add(kernels::attention_workspace_floats(int(t), query_heads, 1) * 4); // far field states
         add(t * q_floats * 2);            // attention out BF16
         add(t * h * 4);                   // output product
+        if (rank1_embedding_a) {
+            add(t * 4);
+            add(t * config.top_k_experts * 4);
+            // Short calls may have more rows than the configured prefill chunk.
+            const std::size_t short_rows = gguf::kMaxVectorColumns;
+            const std::size_t pairs = short_rows * config.top_k_experts;
+            add(pairs * h * 4);
+            add(q8_bytes(int(width), int(pairs)));
+            add(short_rows * h * 8);
+        }
         if (kvfmt.staged()) { add(t * 2 * kvd * 2); } // a quantized visit's F16 staging (kv_store reads it)
         // Controllers of three inputs: [rms x; rms m], the rank's hidden state, forget and gain.
         add(3 * t * 2 * h * 4);
@@ -2293,6 +2330,10 @@ struct Executor::Impl {
         s.cur     = 0;
         float* h  = s.buffers[0];
         table_rows(embedding, static_cast<const std::int32_t*>(d_tokens.p), c.t, h, hidden, stream);
+        if (rank1_embedding_a) {
+            kernels::rank1_embedding(h, static_cast<const std::int32_t*>(d_tokens.p),
+                                     rank1_embedding_a, rank1_embedding_b, c.t, hidden, stream);
+        }
         kernels::rms_norm(h, embedding_norm, hidden, c.t, eps, nullptr, stream, {}, h);
         // A piece at a time through the device rows, each copy ordered after the placement before.
         for (const ImageRows& piece : images) {
@@ -2668,6 +2709,16 @@ struct Executor::Impl {
         }
         auto* y = static_cast<float*>(workspace->alloc_bytes(std::size_t(c.plane) * 4).data);
         product(lp.output, c.q8 ? attn_q.base : nullptr, attn, t, y, hidden);
+        if (lp.rank1_attention_a) {
+            auto* dots = static_cast<float*>(workspace->alloc_bytes(std::size_t(t) * 4).data);
+            if (c.q8) {
+                kernels::rank1_attention_q8(y, attn_q.rows, lp.rank1_attention_a,
+                                            lp.rank1_attention_b, dots, t, q_floats, hidden, stream);
+            } else {
+                kernels::rank1_attention(y, attn, lp.rank1_attention_a, lp.rank1_attention_b,
+                                         dots, t, q_floats, hidden, stream);
+            }
+        }
         // The attention's residual update, then the MoE input's mix.
         if (vp.start) {
             s.blocks.push_back(s.cur);
@@ -2845,6 +2896,27 @@ struct Executor::Impl {
             gguf::MoeOutput out;
             out.weighted = fixed;
             out.weights  = weights;
+            if (p.rank1_expert_a) {
+                // Add the rank-one term to each pair BEFORE the existing weighted fixed-point
+                // reduction, so down_scale and routing weight are applied exactly once.
+                if (call) { throw std::logic_error("rank1 with expert delivery is unsupported"); }
+                out.weighted = nullptr;
+                out.weights = nullptr;
+                out.f32 = static_cast<float*>(workspace->alloc_bytes(
+                    std::size_t(pairs) * hidden * 4).data);
+                gguf::moe_vector_product(p.gate_up_type, gate_up, routing, max_active, k, k, act, t,
+                                         rows, chunk, stream);
+                situ_q8(gu, pairs, pair_scale, act2, stream);
+                gguf::moe_vector_product(p.down_type, down, routing, max_active, 1, k, act2, pairs,
+                                         out, chunk, stream);
+                auto* dots = static_cast<float*>(workspace->alloc_bytes(std::size_t(pairs) * 4).data);
+                kernels::rank1_experts_q8(out.f32, q8_view(act2, width, pairs).rows, ids,
+                                          p.rank1_expert_a, p.rank1_expert_b, dots, pairs,
+                                          width, hidden, stream);
+                gguf::moe_weighted_rows(out.f32, ids, weights, t, k, hidden, fixed, stream);
+                ra.fixed = fixed;
+                return;
+            }
             const auto compute = [&](const gguf::MoeRouting& part) {
                 gguf::moe_vector_product(p.gate_up_type, gate_up, part, max_active, k, k, act, t,
                                          rows, chunk, stream);
@@ -2879,6 +2951,9 @@ struct Executor::Impl {
         auto* middle = static_cast<__nv_bfloat16*>(
             workspace->alloc_bytes(std::size_t(pairs) * width * 2).data);
         if (delivery) { delivery->await(stream); }
+        if (p.rank1_expert_a && (p.bf16 || p.mxfp8)) {
+            throw std::logic_error("Experimental rank1 only supports GGUF expert banks");
+        }
         if (p.bf16 || p.mxfp8) {
             auto* rows = static_cast<float*>(
                 workspace->alloc_bytes(std::size_t(pairs) * hidden * 4).data);
@@ -2901,6 +2976,11 @@ struct Executor::Impl {
         auto* rows = static_cast<float*>(workspace->alloc_bytes(std::size_t(pairs) * hidden * 4).data);
         gguf::moe_matrix_product(p.down_type, down, routing, max_active, pairs, true, act2, rows,
                                  stream);
+        if (p.rank1_expert_a) {
+            auto* dots = static_cast<float*>(workspace->alloc_bytes(std::size_t(pairs) * 4).data);
+            kernels::rank1_experts(rows, middle, ids, p.rank1_expert_a, p.rank1_expert_b,
+                                   dots, pairs, width, hidden, stream);
+        }
         ra.moe_rows    = rows;
         ra.moe_weights = weights;
         ra.top_k       = k;

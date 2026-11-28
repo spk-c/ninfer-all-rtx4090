@@ -512,6 +512,21 @@ void spark_step(const SparkStepArgs& args, cudaStream_t stream);
 void spark_score(const SparkStepArgs& args, cudaStream_t stream);
 void spark_take(const SparkStepArgs& args, cudaStream_t stream);
 
+// Experimental fixed-scale artifact-local rank-one factors.
+void rank1_embedding(float* y, const std::int32_t* ids, const float* a, const float* b,
+                     int tokens, int hidden, cudaStream_t stream);
+void rank1_attention(float* y, const __nv_bfloat16* x, const float* a, const float* b,
+                     float* dots, int tokens, int width, int hidden, cudaStream_t stream);
+void rank1_experts(float* y, const __nv_bfloat16* x, const std::int32_t* ids,
+                   const float* a, const float* b, float* dots, int pairs, int width,
+                   int hidden, cudaStream_t stream);
+
+void rank1_attention_q8(float* y, Q8Rows x, const float* a, const float* b,
+                        float* dots, int tokens, int width, int hidden, cudaStream_t stream);
+void rank1_experts_q8(float* y, Q8Rows x, const std::int32_t* ids,
+                      const float* a, const float* b, float* dots, int pairs, int width,
+                      int hidden, cudaStream_t stream);
+
 // sums[i] += products[i] for i < n when *flag is nonzero: the 2^-32 fixed-point sums of the
 // routed experts the CPU computed for a call (ExpertDelivery), added as the expert kernels add
 // theirs, modulo 2^64.

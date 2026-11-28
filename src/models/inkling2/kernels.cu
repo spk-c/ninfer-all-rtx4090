@@ -1,4 +1,5 @@
 #include "models/inkling2/kernels.h"
+#include "models/inkling2/rank1_adapter.cuh"
 
 #include "core/device_launch.h"
 #include "core/pdl_arch.cuh"
@@ -3760,4 +3761,39 @@ void add_fixed(unsigned long long* sums, const void* products, const std::int32_
     check_launch("add_fixed");
 }
 
+void rank1_embedding(float* y, const std::int32_t* ids, const float* a, const float* b,
+                     int tokens, int hidden, cudaStream_t stream) {
+    rank1::embedding_add<<<tokens, rank1::threads, 0, stream>>>(y, ids, a, b, tokens, hidden, 1.0f);
+    check_launch("rank1_embedding");
+}
+void rank1_attention(float* y, const __nv_bfloat16* x, const float* a, const float* b,
+                     float* dots, int tokens, int width, int hidden, cudaStream_t stream) {
+    rank1::dot_bf16<<<tokens, rank1::threads, 0, stream>>>(x, nullptr, a, dots, width);
+    check_launch("rank1_attention dot");
+    rank1::attention_add<<<tokens, rank1::threads, 0, stream>>>(y, dots, b, hidden, 1.0f);
+    check_launch("rank1_attention add");
+}
+void rank1_experts(float* y, const __nv_bfloat16* x, const std::int32_t* ids,
+                   const float* a, const float* b, float* dots, int pairs, int width,
+                   int hidden, cudaStream_t stream) {
+    rank1::dot_bf16<<<pairs, rank1::threads, 0, stream>>>(x, ids, a, dots, width);
+    check_launch("rank1_experts dot");
+    rank1::expert_add<<<pairs, rank1::threads, 0, stream>>>(y, ids, dots, b, hidden, 1.0f);
+    check_launch("rank1_experts add");
+}
+void rank1_attention_q8(float* y, Q8Rows x, const float* a, const float* b,
+                        float* dots, int tokens, int width, int hidden, cudaStream_t stream) {
+    rank1::dot_q8<<<tokens, rank1::threads, 0, stream>>>(x.qs, x.ds, nullptr, a, dots, width);
+    check_launch("rank1_attention_q8 dot");
+    rank1::attention_add<<<tokens, rank1::threads, 0, stream>>>(y, dots, b, hidden, 1.0f);
+    check_launch("rank1_attention_q8 add");
+}
+void rank1_experts_q8(float* y, Q8Rows x, const std::int32_t* ids,
+                      const float* a, const float* b, float* dots, int pairs, int width,
+                      int hidden, cudaStream_t stream) {
+    rank1::dot_q8<<<pairs, rank1::threads, 0, stream>>>(x.qs, x.ds, ids, a, dots, width);
+    check_launch("rank1_experts_q8 dot");
+    rank1::expert_add<<<pairs, rank1::threads, 0, stream>>>(y, ids, dots, b, hidden, 1.0f);
+    check_launch("rank1_experts_q8 add");
+}
 } // namespace ninfer::models::inkling2::kernels
