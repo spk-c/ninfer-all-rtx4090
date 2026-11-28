@@ -393,3 +393,47 @@
   the graph-enabled allowance sweep. Windows Python sweep regressions
   8/8 passed. C++ build/tests and hosted CI are not yet run.
   No graph default, master, integration binary, or release tag changed.
+
+## Phase 9: profile qualification complete; integration and telemetry validation
+
+- SentinelX jobs job_611f6e3186db and job_a3d349ac9aa1 both completed
+  successfully, with empty failure lists. Phase7 ended at 01:33:28 and
+  phase8 ended at 01:50:34 on 2026-11-28.
+- All 18 chat retrieval diagnostics and 12 approximate long-chat cases
+  returned the exact requested key. Original raw completion failures
+  contained the requested key but additional reasoning/continuation text.
+  The four 176128-output examples all preserved the three facts; exact
+  hash parity across versions remains unresolved.
+- Exact native-window retrieval: 262016 prompt tokens, 128 reserved
+  output, three positions 5/50/95%, all exact, no speculative decoding,
+  rk4v4, regular GDN. Prefill 1442.1/1447.1/1447.1 tok/s.
+- Warm 512-token medians (15 requests per binary): prefill
+  3670.159/3686.381, decode 169.974/167.216, TTFT 152.586/153.655 ms.
+- The four profile candidates are validated for their recorded workloads:
+  Max-Decode K7 356.921 tok/s median synthetic code, Max-Prefill K7
+  chunk4096 3357.288 tok/s, Max-Context 262144 native window,
+  Balanced-Coding K7 chunk2048 (strict JSON/tool/vision checks passed).
+  They still refer to the original pinned binary hash, not the next build.
+- Concurrency screening passed 12 configurations with correct replies.
+  C4 K5 at a 384 MiB allowance observed 398.043 MiB net decrease;
+  do not lower default allowance. C4 needs further conservative testing.
+- Merged PR #60 via GitHub after 19 successful CI jobs, expected head
+  7d0fd6ad; master became 466f027e. #62 is green but still stacked on
+  #57, which has outstanding jobs. #61/#63 also have pending CI.
+- Marked telemetry PR #64 ready for review to permit hosted checks.
+  Python tests 8/8 previously passed, native C++ validation still pending.
+- Created a separate integration worktree C:/coding/ninfer-codex-v018-final
+  (branch codex/v018-final-validation, commit 0df6d4845acbfaf38e469708702eb7c25e03b015)
+  by merging telemetry commit 89360ef0 into pinned 1b5313ad without conflicts.
+  This is a validation integration, not the final merged master commit.
+  Its tree differs from the original candidate only in the 11 telemetry files.
+- Started run-phase9-final-validation.ps1 via SentinelX job
+  job_10a4177f424d. CMake configuration succeeded with SM89, VS18 2026,
+  MSVC 19.52 (newer than the original qualification toolset).
+  Native Release build in build-final-v018 started at 02:11:04; then
+  targeted C++ and Python tests, followed by full CTest at 1200s/test.
+  Initial invocation job_460ed5d114a3 failed due PowerShell command quoting,
+  corrected before configure. Job limit 3600s; resume only unfinished
+  stages after verifying process exit and logs. No GPU benchmark runs
+  concurrently. Final master tree/commit and portable package qualification
+  must be reconciled before publication. No release tag created.
