@@ -9,7 +9,11 @@ force() {
   python3.11 "$script_dir/change-scopes.py" --force </dev/null
   exit 0
 }
-[[ "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ]] || force 'Manual dispatch: all checks and builds requested.'
+case "${GITHUB_EVENT_NAME:-}:${GITHUB_REF:-}" in
+  workflow_dispatch:*|schedule:*|push:refs/heads/ci/full/*)
+    force 'Full CI: all checks and builds requested.'
+    ;;
+esac
 base=''
 case "${GITHUB_EVENT_NAME:-}:${GITHUB_REF:-}" in
   pull_request:*)
