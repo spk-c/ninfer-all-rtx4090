@@ -18,6 +18,7 @@
 #include <spdlog/logger.h>
 
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -454,6 +455,9 @@ void HttpServer::handle_monitor_requests(httplib::Response& res) const {
             item["cached_tokens"] = event.cached_tokens;
             item["ttft_seconds"] = event.ttft_seconds;
             item["total_seconds"] = event.total_seconds;
+            if (std::isfinite(event.prefill_seconds) && event.prefill_seconds > 0.0) {
+                item["prefill_seconds"] = event.prefill_seconds;
+            }
             item["decode_seconds"] = event.decode_seconds;
             item["drafted_tokens"] = event.drafted_tokens;
             item["accepted_tokens"] = event.accepted_tokens;
@@ -497,6 +501,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
         .cached_tokens = outcome.metrics.prefix_cache_hit_tokens,
         .ttft_seconds = outcome.metrics.ttft_seconds,
         .total_seconds = outcome.metrics.total_seconds,
+        .prefill_seconds = outcome.metrics.prefill_seconds,
         .decode_seconds = outcome.metrics.decode_seconds,
         .drafted_tokens =
             outcome.metrics.speculative_draft_tokens >= outcome.metrics.ngram_drafted_tokens
