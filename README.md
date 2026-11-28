@@ -12,7 +12,7 @@
 
 **[Project website](https://spk-c.github.io/ninfer-all-rtx4090/)** · **[Download Windows binaries](https://github.com/spk-c/ninfer-all-rtx4090/releases)** · [RTX 4090 guide](docs/rtx4090.md) · [Built-in Monitor](#built-in-live-monitoring-dashboard) · [Model artifacts](#supported-models) · [Benchmarks](#rtx-4090-benchmarks) · [Build from source](#build-from-source-windows) · [FAQ](#rtx-4090-local-llm-faq) · [Upstream documentation](docs/README.md)
 
-**Start with a portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
+**Start with the v0.1.8 portable binary, no local CUDA compilation needed.** Recorded serving throughput for a Qwen3.8-27B IQ3_S model with DFlash2 on one RTX 4090: **146.6 tok/s median, 215.5 tok/s P90** across 1,831 completed requests. These are workload-specific observations, not guaranteed rates or a comparison with other inference engines. [Measurement details](#real-world-serving).
 
 If you use NInfer-all RTX 4090 or want to follow its development, consider starring the repository and sharing your own reproducible results. [Watch releases](https://github.com/spk-c/ninfer-all-rtx4090/releases) · [Report an issue or benchmark](https://github.com/spk-c/ninfer-all-rtx4090/issues/new/choose).
 
@@ -23,14 +23,14 @@ If you use NInfer-all RTX 4090 or want to follow its development, consider starr
 | Native GPU target | Ada Lovelace, compute capability 8.9, native `sm_89` Windows x64 builds with CUDA 13.4 |
 | Local LLM serving | OpenAI- and Anthropic-compatible APIs, CLI and model-specific launch profiles |
 | Model families | Qwen3.5/3.6/3.8, Flash-Next, Ternary Bonsai 2/2.5, Gemma 4, Flint, DeepSeek-V4.1 and Inkling 2 via upstream |
-| Speculative decoding | DFlash2, MTP and other model-dependent draft backends; measured draft-width and prefill tuning |
+| Speculative decoding | DFlash2, DSpark, MTP and other model-dependent draft backends; measured draft-width and prefill tuning |
 | Quantization and memory | GGUF conversion, IQ3_S/IQ4_XS, quantized KV cache, hybrid prefix caching and model-dependent host/disk expert residency |
 | Built-in monitoring | Read-only browser dashboard, live token rates, NVIDIA GPU sensors, DFlash2 acceptance, KV occupancy and request metadata |
 | Engineering | Device calibration, CUDA Graph experiments, regression tests, raw benchmark evidence and reproducible builds |
 
 Model support is inherited from upstream; not every model or context fits in 24 GB VRAM or has been independently validated by this project. Use a compatible converted `.ninfer` artifact, not an arbitrary GGUF file.
 
-## Experimental Inkling 2 GSQ-RCO Rank-1 model
+## Inkling 2 Mini GSQ-RCO IQ3_S — experimental Rank-1 model
 
 The experimental fixed AtomicChat Rank-1 implementation preserves the original ISTA-DASLab GSQ-RCO IQ3_S weights and adds native adapter support for Inkling 2 on SM89.
 
@@ -41,11 +41,15 @@ The experimental fixed AtomicChat Rank-1 implementation preserves the original I
 
 A separate synthetic retrieval test recovered 3/3 keys at 250,006 input tokens. Results are workload-specific, not canonical completion-format HumanEval scores or a guarantee of general coding parity. Vision, tool calling, DSpark and CUDA Graphs have passed local smoke tests.
 
-- [Model repository on Hugging Face](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3) — 12.08 GiB, staged for release; access depends on repository visibility.
-- [Implementation, compatibility requirements and benchmark details](docs/inkling2-rank1-model-card-draft.md).
+- [Model repository on Hugging Face](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3) — 12.08 GiB, publicly available; experimental Rank-1 model.
+- [Current compatibility requirements, provenance and benchmark methodology](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3).
 - [Runtime integration and tests](https://github.com/spk-c/ninfer-all-rtx4090/pull/66).
 
-The guarded model requires a runtime recognizing `inkling2_rank1_v1`. Existing stable releases do not support this model; use the matching experimental build until a compatible release is available.
+The guarded model requires a runtime recognizing `inkling2_rank1_v1`. Use the [regular v0.1.8 Windows release](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.8) or a later compatible runtime. Rank-1 remains experimental, with single-GPU device-resident experts only.
+
+![Inkling 2 decoder benchmark](docs/images/benchmarks/inkling-public-bench.svg)
+
+One fixed 30-token coding prompt, 512 committed tokens, RK8V4: no draft 108.3, DSpark K3 240.7 and DFlash2 K7 302.2 tok/s, identical outputs on that prompt. Historical development measurements, not general throughput or a new exact-release benchmark. [Full model card](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3).
 
 ## Built-in Live Monitoring Dashboard
 
@@ -53,7 +57,7 @@ The guarded model requires a runtime recognizing `inkling2_rank1_v1`. Existing s
 
 [![NInfer Monitor desktop dashboard: GPU telemetry, token throughput, DFlash2 acceptance, KV occupancy and recent request events; synthetic demonstration data](docs/images/monitor/monitor-desktop.png)](docs/images/monitor/monitor-desktop.png)
 
-*Screenshot of the actual v0.1.4 dashboard rendered with synthetic demonstration data. Values are illustrative, not live readings or benchmark results. [Full-size screenshot](docs/images/monitor/monitor-desktop.png) · [Mobile screenshot](docs/images/monitor/monitor-mobile.png).*
+*Screenshot of the actual v0.1.8 native dashboard rendered with synthetic demonstration data. Values are illustrative, not live readings or benchmark results. [Full-size screenshot](docs/images/monitor/monitor-desktop.png) · [Mobile screenshot](docs/images/monitor/monitor-mobile.png).*
 
 | Monitoring area | Available metrics |
 | --- | --- |
@@ -70,7 +74,7 @@ Start `ninfer-serve` normally and open the dashboard in your browser:
 http://127.0.0.1:8080/monitor
 ```
 
-Replace `8080` with your configured `--port` (for example `8099`). If API-key authentication is enabled, enter the key in the dashboard password field. The dashboard is read-only and refreshes every three seconds. Keep the server bound to localhost unless remote access is deliberately secured. Rates are interval-based server counters, not standardized benchmark measurements; unavailable NVML sensors are displayed as a dash.
+Replace `8080` with your configured `--port` (for example `8099`). If API-key authentication is enabled, enter the key in the dashboard password field. Telemetry is read-only and refreshes every three seconds. The optional test chat sends a request only when explicitly submitted. Keep the server bound to localhost unless remote access is deliberately secured. Rates are interval-based server counters, not standardized benchmark measurements; unavailable NVML sensors are displayed as a dash.
 
 [Technical documentation](docs/monitor-dashboard.md) · [English feature page](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) · [Deutsche Funktionsseite](https://spk-c.github.io/ninfer-all-rtx4090/monitor-de.html) · [Optional Python monitor](tools/monitor/README.md)
 
@@ -148,7 +152,7 @@ RK4V4, no N-gram during the controlled Engine sweep (two repeats per cell):
 | 128K | 206.39 tok/s | 240.60 tok/s |
 | 176128 | 214.87 tok/s | 263.93 tok/s |
 
-![RTX 4090 long-context draft-width sweep](docs/images/benchmarks/rtx4090-v014-long-context.svg)
+![RTX 4090 long-context draft-width sweep](docs/images/benchmarks/qwen-public-bench.svg)
 
 Separate exact-rename tests with ~21.4K-token source prompts reached 568.1 tok/s
 mean decode with N-gram 15 vs 256.7 without (4/6 exact outputs in both arms).
@@ -162,10 +166,17 @@ not general serving rates or cross-engine comparisons. Experimental graphs and c
 [Measured K7 preset](configs/rtx4090-huihui-dflash2-k7.ini) ·
 [Raw numerical results](profiles/bench/rtx4090-v014-long-coding-20261126/)
 
+### Swift 1.5 HTTP decode (October 19)
+
+![Swift 1.5 single-request decode benchmark](docs/images/benchmarks/swift-public-bench.svg)
+
+One observed request per length with 2,048 output tokens; not comparable to the separate Engine or Inkling benchmarks. [Full report](https://huggingface.co/SPK1337/Huihui-Qwen3.8-27B-Swift1.5-Abliterated-IQ3S-DFlash2-NInfer/blob/main/BENCHMARK.md). [Machine-readable chart data](docs/performance/public-benchmarks-v018.json).
+
 ## Release and development status
 
 - **v0.1.3:** published portable Windows archive verified on a real RTX 4090 with two successful real-model smoke requests. [Verification evidence](docs/releases/rtx4090-v0.1.3-gpu-verification.md).
-- **v0.1.4:** [latest stable Windows release (real GPU smoke verified)](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. [Exact release verification](docs/releases/rtx4090-v0.1.4-gpu-verification.md). See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
+- **v0.1.8:** [latest regular Windows release](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.8), native SM89 CUDA 13.4, exact extracted archive smoke verified with Inkling 2 DFlash2 K7, DSpark K3 and Qwen DFlash2 K7. Source `71b5582`; no exhaustive or long-duration qualification implied.
+- **v0.1.4:** [previous stable Windows release (real GPU smoke verified)](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.4), with upstream sync, SM89 architecture backports, opt-in flat draft/target graphs, attention buckets, bounded startup calibration and restricted live KV-pressure replay. [Exact release verification](docs/releases/rtx4090-v0.1.4-gpu-verification.md). See [PR #44](https://github.com/spk-c/ninfer-all-rtx4090/pull/44) and the [release pipeline](https://github.com/spk-c/ninfer-all-rtx4090/actions/workflows/rtx4090-auto-release.yml).
 - Experimental graph, recovery and arithmetic paths remain opt-in. A successful hosted build is not real-GPU validation; a prerelease requires independent hardware qualification before stable promotion.
 
 ## Build from source (Windows)

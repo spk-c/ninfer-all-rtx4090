@@ -1,0 +1,13 @@
+{
+  "source": "71b5582bc7b80edf362fa0d2dc605ca980c927d1",
+  "synthetic": true,
+  "verified": [
+    "online",
+    "12 prefill/decode samples",
+    "94% mock GPU",
+    "no horizontal overflow",
+    "no JS errors"
+  ],
+  "desktop_sha256": "a9f3c77e655a1fa4bfe1dc84937351d04588cab3034232a49cfb2eb1ed38d998",
+  "mobile_sha256": "27c7c7607b3378f006466d48d8f4537e772686cf38df0d7f32cbbc9aa7e7d9bf"
+}

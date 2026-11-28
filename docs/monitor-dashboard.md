@@ -1,6 +1,6 @@
 # Built-in NInfer Monitor
 
-The native read-only dashboard is compiled into every ninfer-serve build, including
+The native dashboard is compiled into every ninfer-serve build, including
 Windows builds without NINFER_WEBUI_DIR. No separate Python process, downloaded
 assets, CDN or external web service is needed.
 
@@ -8,11 +8,13 @@ assets, CDN or external web service is needed.
 
 [![NInfer Monitor desktop dashboard with synthetic demonstration data](images/monitor/monitor-desktop.png)](images/monitor/monitor-desktop.png)
 
-The screenshot uses the actual v0.1.4 dashboard with synthetic demonstration data,
+The screenshot uses the actual v0.1.8 native dashboard with synthetic demonstration data,
 not production telemetry or benchmark measurements.
 [Mobile view (390 px)](images/monitor/monitor-mobile.png) ·
 [English overview](https://spk-c.github.io/ninfer-all-rtx4090/monitor.html) ·
 [Deutsche Übersicht](https://spk-c.github.io/ninfer-all-rtx4090/monitor-de.html).
+
+The new screenshots use an isolated synthetic telemetry fixture and no production model or prompt data. Telemetry remains read-only; optional test chat sends requests explicitly.
 
 ## Open
 

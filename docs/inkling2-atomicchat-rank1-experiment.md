@@ -1,3 +1,5 @@
+> **Publication update (2026-11-28):** The guarded artifact is [public on Hugging Face](https://huggingface.co/SPK1337/Inkling-2-Mini-Uncensored-GSQ-RCO-IQ3_S-NInfer-v3). The [regular NInfer RTX 4090 v0.1.8 release](https://github.com/spk-c/ninfer-all-rtx4090/releases/tag/rtx4090-v0.1.8) includes the compatible runtime and passed real portable GPU smoke tests. Rank-1 remains experimental. The historical development notes below retain their original scope; use the current Model Card for published status and final HumanEval results.
+
 # Experimental Inkling 2 rank-one adapter reference
 
 Scope: CPU numerical oracle only, not a released model or native serving support.
