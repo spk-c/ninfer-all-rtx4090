@@ -52,7 +52,7 @@ def test_cli_emits_reproducible_sweep_and_handles_speculative_counts(monkeypatch
     def run(cmd, **kwargs):
         calls.append(cmd)
         return SimpleNamespace(returncode=0, stdout="",
-                               stderr="CUDA Graph used 0 B\nCUDA Graph allowance 64 MiB")
+                               stderr="CUDA Graph used 12 MiB\nCUDA Graph allowance 64 MiB")
 
     monkeypatch.setattr(sweep.subprocess, "run", run)
     code = sweep.main([
@@ -69,7 +69,24 @@ def test_cli_emits_reproducible_sweep_and_handles_speculative_counts(monkeypatch
     assert report["schema_version"] == 2
     assert report["config"]["capacities"] == [2048, 8192]
     assert all(r["predicted_graphs"] is None for r in report["runs"])
-    assert all(r["observed_bytes"] == 0 for r in report["runs"])
+    assert all(r["observed_bytes"] == 12 * sweep.MIB for r in report["runs"])
+
+
+def test_legacy_zero_graph_delta_is_unmeasured(monkeypatch, tmp_path):
+    exe, model = tmp_path / "ninfer.exe", tmp_path / "qwen.ninfer"
+    exe.write_bytes(b"x")
+    model.write_bytes(b"x")
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(returncode=0, stdout="",
+                                        stderr="CUDA Graph used 0 B\nCUDA Graph allowance 64 MiB"))
+    assert sweep.main([
+        "--cli", str(exe), "--model", str(model), "--capacities", "4096",
+        "--repeats", "2", "--output", str(tmp_path / "out"),
+    ]) == 2
+    report = json.loads((tmp_path / "out" / "graph-allowance-none-int8.json").read_text())
+    assert all(r["observed_bytes"] is None for r in report["runs"])
+    assert all(r["allowance_bytes"] == 64 * sweep.MIB for r in report["runs"])
+    assert all("0 B" in r["unparsed_output"] for r in report["runs"])
 
 
 def test_missing_graph_diagnostics_is_incomplete_not_zero(monkeypatch, tmp_path):
@@ -130,4 +147,5 @@ def test_unmeasured_graph_usage_is_not_substituted_with_allowance(monkeypatch, t
     result = sweep.measure(tmp_path / "ninfer.exe", tmp_path / "qwen.ninfer",
                            8192, "dflash2", 5, "rk4v4", 1024, True)
     assert result["observed_bytes"] is None
+    assert result["allowance_bytes"] == 64 * sweep.MIB
     assert "unmeasured" in result["unparsed_output"]

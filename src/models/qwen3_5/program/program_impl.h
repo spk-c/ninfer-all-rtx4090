@@ -1007,10 +1007,11 @@ public:
     const std::size_t kv_payload_bytes;
     const std::uint32_t kv_host_pages;
     const std::size_t graph_allowance_bytes;
-    // Free device memory CUDA Graph preparation consumed at startup (instantiate, upload and one
-    // launch of every executable), for comparison with graph_allowance_bytes; empty when no free
-    // memory was left to measure it by.
+    // Device-wide net free-memory decrease during graph preparation, not isolated allocation
+    // accounting. Empty for saturated or nonpositive observations; zero when graphs are disabled.
     std::optional<std::size_t> graph_measured_bytes = 0;
+    std::optional<std::size_t> graph_free_before_bytes;
+    std::optional<std::size_t> graph_free_after_bytes;
     const WorkspacePlan workspace_plan;
 
     // Overlay Vision residency only: the persistent arena is VMM-backed so free KV granules can be

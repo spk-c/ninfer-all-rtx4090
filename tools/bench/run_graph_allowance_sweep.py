@@ -57,8 +57,8 @@ PREFILL_CHUNK = 640
 OUT = ROOT / "out/graph_allowance"
 
 SUMMARY = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9 _/-]*?)\s{2,}(.+?)\s*$")
-# A bare "B" unit is not a formatting curiosity: the engine clamps a negative device-wide delta to
-# zero, so "0 B" is the signature of another process freeing VRAM during capture. It must parse.
+# Keep parsing the bare "B" unit for older binaries, but a legacy zero from a graph-enabled
+# sweep is not a valid cost estimate: older engines clamped nonpositive device-wide deltas.
 GRAPH_USED = re.compile(r"CUDA Graph used\s+([\d.]+)\s*([KMG]?i?B)")
 GRAPH_ALLOWANCE = re.compile(r"CUDA Graph allowance\s+([\d.]+)\s*([KMG]?i?B)")
 GRAPH_ERROR = re.compile(
@@ -129,9 +129,13 @@ def measure(cli: Path, model: Path, capacity: int, spec: str | None, draft_token
     else:
         used = GRAPH_USED.search(combined)
         planned = GRAPH_ALLOWANCE.search(combined)
-        if used and planned:
-            observed = parse_bytes(used.group(1), used.group(2))
+        if planned:
             allowance = parse_bytes(planned.group(1), planned.group(2))
+        if used and planned:
+            delta = parse_bytes(used.group(1), used.group(2))
+            # The sweep always enables graphs. A legacy zero cannot prove that
+            # graph allocation is free; preserve the raw output, not a false cost.
+            observed = delta if delta > 0 else None
 
     return {
         "capacity": capacity,
