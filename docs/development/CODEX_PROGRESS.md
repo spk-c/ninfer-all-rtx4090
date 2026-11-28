@@ -437,3 +437,39 @@
   stages after verifying process exit and logs. No GPU benchmark runs
   concurrently. Final master tree/commit and portable package qualification
   must be reconciled before publication. No release tag created.
+
+## Phase 10: successful integrated build, resumed tests and green PR merges
+
+- Integrated source 0df6d484 built successfully on native Windows SM89
+  at 02:50:21 on 2026-11-28. Targeted CTest: 9 passed, 3 prerequisite
+  skips, including request log (0.09 s) and Gemma kernels (5.95 s).
+  Graph allowance Python suite: 8 passed. No native test failures.
+- Phase9 job reached its one-hour execution limit during full CTest.
+  The original full-ctest.log has 250 completed cases (211 passed,
+  39 skipped, no recorded failures), with test #251 started but not
+  completed. Attention #248 passed in 436.27 s. Logs are retained.
+- Confirmed no remaining test/build/server process before resuming.
+  CTest selection -I 251,418 contains 168 cases. Started
+  SentinelX job job_bb2e6dfd7208 at 05:11:59, same build, Release,
+  1200-second per-test timeout, new log
+  phase9-final-validation/resumed-ctest-251-418.log. Verified live
+  CTest and dispatcher processes. No rebuild or repeat of 250 cases.
+  Audit both result logs by test number before declaring all 418 complete.
+- PR #61 merged after 22 successful hosted checks at pinned head
+  e7edce16 (master merge 386b8e6f). PR #63 also completed hosted CI
+  successfully and merged at pinned head 163b73ae
+  (master merge 147b51cd). #63 temporarily returned nonmergeable after
+  the base change; local merge-tree showed no conflict and fresh
+  GitHub metadata confirmed mergeability before merging.
+- #57 now has 18 successful jobs, three running, four skips.
+  #64 has 12 successful jobs, nine running, four skips. No failed jobs.
+  #62 remains green but stacked on #57. Do not merge pending CI.
+- The portable packager requires the shared-runtime build
+  (NINFER_SHARED_RUNTIME=ON, NINFER_WINDOWS_KERNEL_DLL=ON,
+  NINFER_CUDA_PRUNE_PTX=ON, NINFER_BUILD_BENCHMARKS=ON for the
+  previous package). The successful static test build cannot
+  substitute for the final portable archive. Reconcile the merged
+  master tree with 0df6d484 after all PRs, then package the exact final
+  source in a separate build, check hashes/DLLs/help, extract and run
+  GPU smoke. Existing 1b5313ad profile manifest remains pinned.
+  No release tag or asset published.
