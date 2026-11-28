@@ -30,6 +30,7 @@ namespace ninfer::models::inkling2 {
 inline constexpr float kMixEps = 1e-6f;
 
 struct TextConfig {
+    bool requires_rank1 = false; // Explicit compatibility marker for fixed rank-one artifacts.
     std::uint32_t hidden_size             = 0;
     std::uint32_t vocab_size              = 0; // embedding and head rows (padded)
     std::uint32_t unpadded_vocab_size     = 0; // the tokens the head scores

@@ -676,7 +676,7 @@ def _dflash2(model, store: SafetensorsSource, drafter: dict) -> None:
 
 def build_model(base, gguf: GGUFFile, *, vision: GGUFFile | None = None,
                 dspark: GGUFFile | None = None, dflash2: SafetensorsSource | None = None,
-                resource_overrides=None):
+                resource_overrides=None, rank1_adapter=None):
     """Inkling 2's text component, every parameter's source the GGUF, with `vision` its vision
     tower from the mmproj, with `dspark` its drafter from the drafter GGUF and with `dflash2`
     incoai's DFlash2 drafter from its safetensors directory."""
@@ -692,6 +692,9 @@ def build_model(base, gguf: GGUFFile, *, vision: GGUFFile | None = None,
     if count != config["unpadded_vocab_size"]:
         raise ValueError(f"the tokenizer has {count} tokens, the config's unpadded vocabulary "
                          f"{config['unpadded_vocab_size']}")
+    if rank1_adapter is not None:
+        # Stock runtimes strictly validate model_type and must reject this artifact.
+        config["model_type"] = "inkling2_rank1_v1"
     records = {"text": {"config": config, "resources": references}}
     if vision is not None:
         vc = vision_config(vision, base.config, config)
@@ -781,6 +784,30 @@ def build_model(base, gguf: GGUFFile, *, vision: GGUFFile | None = None,
                 vector(c + "down", stem + "down.weight", (r, 2 * h))
                 vector(c + "gain", stem + "gain.weight", (h, r))
                 vector(c + "forget", stem + "forget.weight", (h, r))
+    if rank1_adapter is not None:
+        # Fixed, artifact-local adapter. Store the original quantized matrices untouched.
+        from tools.reference.inkling2_rank1_adapter import Rank1Adapter
+        adapter = Rank1Adapter(rank1_adapter)
+        if (h, vocab, heads * d, e, w, config["num_hidden_layers"]) != (2304, 201024, 3072, 128, 1152, 24):
+            raise ValueError("rank1 adapter geometry does not match Inkling 2 Mini")
+        def factor(name, value):
+            data = torch.from_numpy(np.ascontiguousarray(value, dtype=np.float32).reshape(-1))
+            model.add(Parameter(name, (data.numel(),), array_source(data, name),
+                                direct_format="fp32"))
+        for name, (left, right) in adapter.pairs.items():
+            if name == "token_embd.weight":
+                expected = (vocab, h)
+                prefix = "text/rank1/embedding"
+            elif name.endswith(".attn_output.weight"):
+                expected = (h, heads * d)
+                prefix = "text/layers/" + name.split(".")[1] + "/rank1/attention"
+            else:
+                expected = (e, h, w)
+                prefix = "text/layers/" + name.split(".")[1] + "/rank1/expert"
+            if tuple(gguf.info(name).shape) != expected:
+                raise ValueError(f"{name}: incompatible base geometry")
+            factor(prefix + "_a", left)
+            factor(prefix + "_b", right)
     if vision is not None:
         _vision(model, vision, records["vision"]["config"], config)
     if dspark is not None:

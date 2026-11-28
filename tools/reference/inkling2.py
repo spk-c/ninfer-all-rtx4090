@@ -50,15 +50,23 @@ DIRECT_TYPES = (TYPE_F32, TYPE_F16, TYPE_BF16)
 
 
 class Weights:
-    def __init__(self, gguf: GGUFFile):
+    def __init__(self, gguf: GGUFFile, adapter=None, adapter_scale: float = 1.0):
         self.gguf = gguf
+        self.adapter = adapter
+        self.adapter_scale = adapter_scale
         self.cache: dict[str, np.ndarray] = {}
 
     def has(self, name: str) -> bool:
         return name in self.gguf.tensors
 
     def rows(self, name: str, begin: int = 0, end: int | None = None) -> np.ndarray:
-        """Rows [begin, end) of a matrix (a 3-D bank counts its rows over every expert)."""
+        """Rows [begin, end) of a matrix, with optional experimental rank-one edits."""
+        values = self._base_rows(name, begin, end)
+        if self.adapter is not None:
+            return self.adapter.apply_rows(name, begin, values, self.adapter_scale)
+        return values
+
+    def _base_rows(self, name: str, begin: int = 0, end: int | None = None) -> np.ndarray:
         info = self.gguf.info(name)
         if info.type_id in DIRECT_TYPES:
             # Only the rows asked for: a BF16 token table (GSQ-RCO's) is read a row at a time.
@@ -270,9 +278,10 @@ def moe(w: Weights, c: Config, physical: int, x: np.ndarray, record: dict) -> np
     return out
 
 
-def forward(gguf: GGUFFile, ids: list[int], visits: int | None = None) -> dict[str, np.ndarray]:
+def forward(gguf: GGUFFile, ids: list[int], visits: int | None = None,
+            adapter=None, adapter_scale: float = 1.0) -> dict[str, np.ndarray]:
     c = Config(gguf)
-    w = Weights(gguf)
+    w = Weights(gguf, adapter, adapter_scale)
     n = len(ids)
     pos = np.arange(n, dtype=np.float64)
     tau = 1.0 + c.log_alpha * np.log(np.maximum(1.0, (pos + 1.0) / c.log_floor))
@@ -383,10 +392,16 @@ def main(argv=None) -> None:
     parser.add_argument("--tokens", required=True, help="JSON list of token ids")
     parser.add_argument("--visits", type=int, default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--rank1-adapter", default=None, help="Experimental Inkling2 GGUF rank-one adapter (CPU reference only)")
+    parser.add_argument("--adapter-scale", type=float, default=1.0)
     args = parser.parse_args(argv)
+    adapter = None
+    if args.rank1_adapter:
+        from tools.reference.inkling2_rank1_adapter import Rank1Adapter
+        adapter = Rank1Adapter(args.rank1_adapter)
     ids = json.loads(Path(args.tokens).read_text())
     with GGUFFile(args.gguf) as gguf:
-        result = forward(gguf, ids, args.visits)
+        result = forward(gguf, ids, args.visits, adapter, args.adapter_scale)
     if args.visits is None:
         nll = target_nll(result["logits"], ids)
         for i, value in enumerate(nll):
