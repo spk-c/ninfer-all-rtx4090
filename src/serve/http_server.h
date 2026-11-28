@@ -249,6 +249,7 @@ private:
         std::uint64_t cached_tokens = 0;
         double ttft_seconds = 0.0;
         double total_seconds = 0.0;
+        double prefill_seconds = 0.0;
         double decode_seconds = 0.0;
         std::uint64_t drafted_tokens = 0;
         std::uint64_t accepted_tokens = 0;
