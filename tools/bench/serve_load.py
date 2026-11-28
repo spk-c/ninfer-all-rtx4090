@@ -22,7 +22,7 @@ DIR/<profile>.jsonl:
   steady_tps      tokens generated while all N streams decode (from the latest first token to the
                   earliest last token) over that window: the decode rate of N rows, and round_ms =
                   1000 N / steady_tps, the round time t(N).
-  ttft_ms, itl_ms p50/p99/max; per-request decode tok/s; finish reasons; prompt and cached
+  ttft_ms, itl_ms and latency_ms p50/p95/p99/max; per-request decode tok/s; finish reasons; prompt and cached
   tokens; the device memory peak (nvidia-smi); /metrics lines with "ninfer:" after the level.
 
 The client uses the standard library only.
@@ -135,12 +135,17 @@ def stream_chat(base: urllib.parse.ParseResult, body: dict, timeout: float) -> d
         while True:
             line = response.readline()
             if not line:
+                row["error"] = "SSE stream closed before [DONE]"
                 break
             line = line.strip()
             if not line.startswith(b"data:"):
                 continue
             payload = line[5:].strip()
             if payload == b"[DONE]":
+                if not row.get("finish"):
+                    row["error"] = "SSE stream ended without a finish reason"
+                elif not isinstance((row.get("usage") or {}).get("completion_tokens"), int):
+                    row["error"] = "SSE stream ended without completion token usage"
                 break
             now = time.perf_counter()
             event = json.loads(payload)
@@ -235,6 +240,7 @@ def summarize(profile: str, level: int, rows: list[dict], started: float, ended:
         cached += details.get("cached_tokens") or (r.get("timings") or {}).get("cache_n") or 0
     wall = ended - started
     ttft = [1000 * (r["chunks"][0] - r["sent"]) for r in ok if r["chunks"]]
+    latency = [1000 * (r["ended"] - r["sent"]) for r in ok]
     itl: list[float] = []
     per_request: list[float] = []
     for r in ok:
@@ -256,6 +262,10 @@ def summarize(profile: str, level: int, rows: list[dict], started: float, ended:
             window_s = window_end - window_begin
             steady_tps = tokens / window_s
             round_ms = 1000.0 * level / steady_tps
+    def latency_summary(values: list[float]) -> dict[str, float | None]:
+        return {name: percentile(values, fraction)
+                for name, fraction in (("p50", 0.5), ("p95", 0.95), ("p99", 0.99), ("max", 1.0))}
+
     finishes: dict[str, int] = {}
     for r in ok:
         finishes[r.get("finish") or "none"] = finishes.get(r.get("finish") or "none", 0) + 1
@@ -268,8 +278,8 @@ def summarize(profile: str, level: int, rows: list[dict], started: float, ended:
         "steady_tps": round(steady_tps, 2) if steady_tps else None,
         "round_ms": round(round_ms, 3) if round_ms else None,
         "steady_window_s": round(window_s, 3) if window_s else None,
-        "ttft_ms": {"p50": percentile(ttft, 0.5), "p99": percentile(ttft, 0.99), "max": percentile(ttft, 1.0)},
-        "itl_ms": {"p50": percentile(itl, 0.5), "p99": percentile(itl, 0.99), "max": percentile(itl, 1.0)},
+        "ttft_ms": latency_summary(ttft), "itl_ms": latency_summary(itl),
+        "latency_ms": latency_summary(latency),
         "per_request_tps": {"min": percentile(per_request, 0.0), "p50": percentile(per_request, 0.5),
                             "max": percentile(per_request, 1.0),
                             "mean": round(statistics.fmean(per_request), 2) if per_request else None},
@@ -303,6 +313,7 @@ def main() -> int:
     memory = None if args.no_memory else Memory(args.gpu_index)
     shared = "You are a careful assistant. Reference material follows.\n\n" + corpus.slice(0, args.prompt_tokens)
     out_path = os.path.join(args.out, args.profile + ".jsonl")
+    had_errors = False
     for level in [int(v) for v in args.clients.split(",") if v.strip()]:
         messages = [build_messages(args.profile, i, args, corpus, shared) for i in range(level)]
         if args.profile == "history":
@@ -333,10 +344,11 @@ def main() -> int:
                   row["steady_tps"], row["round_ms"], row["ttft_ms"]["p50"], row["itl_ms"]["p50"],
                   row["itl_ms"]["p99"], row["cached_tokens"], row["prompt_tokens"], row["peak_mib"]), flush=True)
         if row["error_count"]:
+            had_errors = True
             print("  errors: %s" % row["errors"][:3], flush=True)
     if memory:
         memory.stop = True
-    return 0
+    return int(had_errors)
 
 
 if __name__ == "__main__":
