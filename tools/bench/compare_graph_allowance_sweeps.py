@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -22,6 +23,10 @@ def compare_reports(baseline: dict, candidate: dict) -> dict:
     mismatch = [name for name in REQUIRED_CONFIG if a.get(name) != b.get(name)]
     if mismatch:
         raise ValueError("incomparable sweep configurations: " + ", ".join(mismatch))
+    # Legacy reports have no artifact identity. Do not compare a known model
+    # hash against a different or unknown hash, even if the filename matches.
+    if a.get("model_sha256") != b.get("model_sha256"):
+        raise ValueError("incomparable sweep configurations: model_sha256")
     if not baseline.get("runs") or not candidate.get("runs"):
         raise ValueError("both sweeps must contain samples")
 
@@ -42,6 +47,9 @@ def compare_reports(baseline: dict, candidate: dict) -> dict:
             return [float(item["observed_bytes"]) for item in samples
                     if item.get("returncode") == 0
                     and item.get("observed_bytes") is not None
+                    and isinstance(item["observed_bytes"], (int, float))
+                    and not isinstance(item["observed_bytes"], bool)
+                    and math.isfinite(item["observed_bytes"])
                     and item["observed_bytes"] > 0]
         a_good, b_good = measured(x), measured(y)
         enough = len(a_good) >= 2 and len(b_good) >= 2
@@ -56,6 +64,21 @@ def compare_reports(baseline: dict, candidate: dict) -> dict:
                 verdict = "higher observed VRAM delta (nonoverlapping sample ranges)"
             else:
                 verdict = "inconclusive: sample ranges overlap"
+        # A directional comparison of the available samples is descriptive
+        # only. A conservative screening gate must include *every* attempted
+        # run, and must not accept missing/zero/over-budget measurements.
+        def screening_complete(samples, valid):
+            return len(valid) == len(samples) and len(valid) >= 2 and all(
+                not item.get("graph_blocked", False)
+                and isinstance(item.get("allowance_bytes"), (int, float))
+                and not isinstance(item["allowance_bytes"], bool)
+                and math.isfinite(item["allowance_bytes"])
+                and 0 < item["observed_bytes"] < item["allowance_bytes"]
+                for item in samples
+            )
+
+        screening_ok = (screening_complete(x, a_good)
+                        and screening_complete(y, b_good))
         rows.append({
             "capacity": capacity,
             "baseline_successes": len(a_good),
@@ -66,11 +89,18 @@ def compare_reports(baseline: dict, candidate: dict) -> dict:
             "candidate_median_bytes": median_b,
             "candidate_minus_baseline_bytes": delta,
             "verdict": verdict,
+            "startup_screening_complete": screening_ok,
+            "calibration_status": (
+                "startup screening only; request and topology qualification required"
+                if screening_ok else "incomplete or over-budget startup evidence"
+            ),
         })
     return {
         "scope": "CUDA Graph startup-memory observations, not throughput",
         "caveat": "Device-wide VRAM deltas; external GPU load and different graph sets can confound results.",
-        "compared_configuration": {key: a.get(key) for key in REQUIRED_CONFIG},
+        "compared_configuration": {key: a.get(key) for key in (*REQUIRED_CONFIG, "model_sha256")},
+        "all_capacities_matched": left.keys() == right.keys(),
+        "default_reduction_qualified": False,
         "rows": rows,
     }
 
@@ -91,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{row['capacity']:>9} | "
               f"{row['baseline_successes']}/{row['baseline_runs']} vs "
               f"{row['candidate_successes']}/{row['candidate_runs']} valid | "
-              f"{row['verdict']}")
+              f"{row['verdict']} | {row['calibration_status']}")
     print(report["caveat"])
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

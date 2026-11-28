@@ -18,6 +18,7 @@ Missing or unparseable memory instrumentation is reported as incomplete.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -157,6 +158,11 @@ def measure(cli: Path, model: Path, capacity: int, spec: str | None, draft_token
     }
 
 
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path, default=CLI, help="ninfer CLI executable")
@@ -187,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"model artifact not found: {args.model}")
 
     args.output.mkdir(parents=True, exist_ok=True)
+    destination = args.output / f"graph-allowance-{args.spec}-{args.kv_dtype}.json"
+    if destination.exists():
+        parser.error(f"report already exists: {destination}; use a fresh --output directory")
+    cli_sha256 = sha256_file(args.cli)
+    model_sha256 = sha256_file(args.model)
     rows: list[dict] = []
     print(f"{'capacity':>9}  {'graphs':>6}  {'observed':>12}  {'allowance':>10}  "
           f"{'spread':>8}  result")
@@ -222,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
                            "No WDDM or scheduling attribution is implied."),
         "config": {
             "cli": str(args.cli), "model": str(args.model), "repeats": args.repeats,
+            "cli_sha256": cli_sha256, "model_sha256": model_sha256,
             "spec": spec, "draft_tokens": args.draft_tokens if spec else None,
             "kv_dtype": args.kv_dtype, "prefill_chunk": args.prefill_chunk,
             "gdn_state_fp16": args.gdn_state_fp16,
@@ -230,8 +242,9 @@ def main(argv: list[str] | None = None) -> int:
         },
         "runs": rows,
     }
-    destination = args.output / f"graph-allowance-{args.spec}-{args.kv_dtype}.json"
-    destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    # Exclusive creation also guards against a concurrent writer.
+    with destination.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(report, indent=2) + "\n")
     print(f"\nwrote {destination}")
     return 0 if all(r["returncode"] == 0 and r["observed_bytes"] is not None
                     for r in rows) else 2
